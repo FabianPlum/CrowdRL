@@ -14,8 +14,6 @@ Forschungszentrum Jülich
 
 March 2026
 
-**WORKING DOCUMENT — NOT FOR DISTRIBUTION**
-
 # 1. Executive Summary
 
 **The Thesis.** Hand-crafted pedestrian locomotion models (social forces, velocity obstacles, generalized centrifugal force) are tuned to reproduce macroscopic observables—fundamental diagrams, flow rates—without explicit supervision on the trajectories that produce those observables. They are elegant, interpretable, and brittle: every new geometric scenario requires manual re-calibration, and they cannot represent body-level behaviours (shoulder-turning, gait adaptation, anticipatory yielding) that govern dynamics in the high-density regimes that matter most for safety.
