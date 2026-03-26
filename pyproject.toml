@@ -3,6 +3,17 @@ name = "crowdrl"
 version = "0.1.0"
 description = "MARL-learned pedestrian navigation policies for JuPedSim"
 requires-python = ">=3.12"
+dependencies = [
+    "crowdrl-core",
+    "crowdrl-env",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
 
 [tool.uv.workspace]
 members = [
