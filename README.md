@@ -3,7 +3,7 @@
 [![CI](https://github.com/FabianPlum/CrowdRL/actions/workflows/ci.yml/badge.svg)](https://github.com/FabianPlum/CrowdRL/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)]()
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 MARL-learned pedestrian navigation policies trained in procedural 2D environments,
 validated against [IAS-7](https://www.fz-juelich.de/en/ias/ias-7) (Forschungszentrum Juelich)
@@ -144,4 +144,4 @@ uv run jupyter lab
 
 ## License
 
-TBD
+[MIT](LICENSE)
