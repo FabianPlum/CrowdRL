@@ -6,10 +6,19 @@ requires-python = ">=3.12"
 dependencies = [
     "crowdrl-env",
     "torch>=2.0",
+    "tensorboard>=2.14",
 ]
+
+[project.optional-dependencies]
+export = ["onnx>=1.14"]
+verify = ["onnxruntime>=1.15"]
+
+[project.scripts]
+crowdrl-train = "crowdrl_train.train:main"
 
 [tool.uv.sources]
 crowdrl-env = { workspace = true }
+torch = { index = "pytorch-cu126" }
 
 [build-system]
 requires = ["hatchling"]
