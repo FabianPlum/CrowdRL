@@ -30,6 +30,11 @@ crowdrl-env = { workspace = true }
 crowdrl-train = { workspace = true }
 crowdrl-jupedsim = { workspace = true }
 
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 addopts = "-v --tb=short"
