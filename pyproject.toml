@@ -1,0 +1,27 @@
+[project]
+name = "crowdrl"
+version = "0.1.0"
+description = "MARL-learned pedestrian navigation policies for JuPedSim"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = [
+    "packages/crowdrl-core",
+    "packages/crowdrl-env",
+    "packages/crowdrl-train",
+    "packages/crowdrl-jupedsim",
+]
+
+[tool.uv.sources]
+crowdrl-core = { workspace = true }
+crowdrl-env = { workspace = true }
+crowdrl-train = { workspace = true }
+crowdrl-jupedsim = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"

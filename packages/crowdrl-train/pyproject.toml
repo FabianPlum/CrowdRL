@@ -1,0 +1,19 @@
+[project]
+name = "crowdrl-train"
+version = "0.1.0"
+description = "MAPPO training infrastructure for CrowdRL"
+requires-python = ">=3.12"
+dependencies = [
+    "crowdrl-env",
+    "torch>=2.0",
+]
+
+[tool.uv.sources]
+crowdrl-env = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crowdrl_train"]
