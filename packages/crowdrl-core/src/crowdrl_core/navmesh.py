@@ -449,5 +449,56 @@ def is_reachable(
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
 ) -> bool:
-    """Check if a path exists between start and goal on the navmesh."""
+    """Check if a path exists between start and goal on the navmesh.
+
+    This is a pure topological check — it does NOT consider agent size.
+    Use :func:`is_passable` for clearance-aware reachability.
+    """
     return find_path(navmesh, start, goal) is not None
+
+
+def _min_portal_width(
+    navmesh: NavMesh,
+    tri_path: list[int],
+) -> float:
+    """Return the minimum portal (shared-edge) width along a triangle path.
+
+    Portal width is the Euclidean length of the shared edge between
+    consecutive triangles — i.e. the physical gap the agent must fit through.
+    """
+    min_width = float("inf")
+    for i in range(len(tri_path) - 1):
+        key = (tri_path[i], tri_path[i + 1])
+        left, right = navmesh.portals[key]
+        width = float(np.linalg.norm(right - left))
+        if width < min_width:
+            min_width = width
+    return min_width
+
+
+def is_passable(
+    navmesh: NavMesh,
+    start: NDArray[np.float64],
+    goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
+) -> bool:
+    """Check if an agent of the given radius can traverse from start to goal.
+
+    Combines A* reachability with a portal-width check: every shared edge
+    along the triangle corridor must be at least ``2 * agent_radius`` wide
+    for the agent to physically fit through.
+
+    Parameters
+    ----------
+    navmesh : NavMesh
+    start, goal : (2,) arrays
+    agent_radius : float
+        Half-width of the agent (e.g. max of shoulder_width, chest_depth).
+        If 0, this is equivalent to :func:`is_reachable`.
+    """
+    tri_path = find_path(navmesh, start, goal)
+    if tri_path is None:
+        return False
+    if agent_radius <= 0 or len(tri_path) <= 1:
+        return True
+    return _min_portal_width(navmesh, tri_path) >= 2.0 * agent_radius
