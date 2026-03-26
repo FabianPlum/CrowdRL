@@ -220,16 +220,59 @@ def find_containing_triangle(point: NDArray[np.float64], navmesh: NavMesh) -> in
 
 
 def sample_point_in_polygon(
-    polygon: Polygon, rng: np.random.Generator | None = None
+    polygon: Polygon,
+    rng: np.random.Generator | None = None,
+    margin: float = 0.0,
+    walkable: Polygon | None = None,
 ) -> NDArray[np.float64]:
-    """Uniformly sample a random point inside a polygon (rejection sampling)."""
+    """Uniformly sample a random point inside a polygon (rejection sampling).
+
+    Parameters
+    ----------
+    polygon : Polygon
+        The polygon to sample from (e.g. a spawn or goal region).
+    rng : Generator, optional
+        Random number generator.
+    margin : float
+        Minimum distance from any walkable-polygon wall. The effective
+        sampling area is eroded inward by this amount. When *walkable* is
+        given the margin is applied to the walkable polygon; otherwise it
+        is applied to *polygon* itself.
+    walkable : Polygon, optional
+        The walkable area that contains the sampling region. When given,
+        the sampling region is clipped to lie inside this polygon (eroded
+        by *margin*). This prevents spawning outside the walkable area
+        even when the spawn/goal region extends beyond it.
+    """
     if rng is None:
         rng = np.random.default_rng()
 
-    minx, miny, maxx, maxy = polygon.bounds
+    if walkable is not None:
+        # Erode walkable area by margin, then clip the sampling region to it
+        safe_area = walkable.buffer(-margin) if margin > 0 else walkable
+        if safe_area.is_empty:
+            raise ValueError(
+                f"Walkable polygon is too narrow for margin={margin}m — buffered polygon is empty."
+            )
+        sample_region = polygon.intersection(safe_area)
+        if sample_region.is_empty:
+            raise ValueError(
+                "Spawn/goal region does not overlap walkable area "
+                f"(after applying margin={margin}m)."
+            )
+    elif margin > 0:
+        sample_region = polygon.buffer(-margin)
+        if sample_region.is_empty:
+            raise ValueError(
+                f"Polygon is too narrow for margin={margin}m — buffered polygon is empty."
+            )
+    else:
+        sample_region = polygon
+
+    minx, miny, maxx, maxy = sample_region.bounds
     while True:
         x = rng.uniform(minx, maxx)
         y = rng.uniform(miny, maxy)
         p = Point(x, y)
-        if polygon.contains(p):
+        if sample_region.contains(p):
             return np.array([x, y], dtype=np.float64)
