@@ -112,6 +112,15 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 - **Not started**: crowdrl-train, crowdrl-jupedsim, Tier 3 reward
 - **Reference doc**: CrowdRL_Project_Plan_v5.docx (full design rationale, milestones, risks)
 
+## Development tooling
+
+- **Package manager**: [uv](https://docs.astral.sh/uv/). Always use `uv run` to execute tools (pytest, ruff, pre-commit, etc.) and `uv sync` / `uv add` to manage dependencies. Never use bare `pip` or `pip install`.
+- **Workspace**: uv workspace defined in root `pyproject.toml`. Install everything with `uv sync --all-packages --extra dev`.
+- **Linting / formatting**: ruff (config in root `pyproject.toml`). Pre-commit hooks run ruff check + ruff format on every commit.
+- **Pre-commit**: Install hooks after cloning with `uv run pre-commit install`. Config in `.pre-commit-config.yaml`.
+- **Testing**: pytest, configured in root `pyproject.toml`. Run with `uv run pytest`.
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`) — ruff lint + pytest on Python 3.12/3.13.
+
 ## Key design principles
 
 1. **One observation builder, used everywhere.** Never duplicate obs construction logic.
