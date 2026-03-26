@@ -38,3 +38,8 @@ addopts = "-v --tb=short"
 line-length = 99
 target-version = "py312"
 extend-exclude = ["examples/"]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+]
