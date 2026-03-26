@@ -36,3 +36,4 @@ addopts = "-v --tb=short"
 [tool.ruff]
 line-length = 99
 target-version = "py312"
+extend-exclude = ["examples/"]
