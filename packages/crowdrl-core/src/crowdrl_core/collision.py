@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from shapely.geometry import Point
+from shapely.ops import nearest_points
 
 from crowdrl_core.world_state import WorldState
 
@@ -98,53 +100,178 @@ def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
     return collisions
 
 
+def _point_to_segment_nearest(
+    point: NDArray[np.float64],
+    seg_start: NDArray[np.float64],
+    seg_end: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], float]:
+    """Return the nearest point on a line segment and the distance to it."""
+    edge = seg_end - seg_start
+    edge_len_sq = np.dot(edge, edge)
+    if edge_len_sq < 1e-12:
+        return seg_start.copy(), float(np.linalg.norm(point - seg_start))
+    t = np.clip(np.dot(point - seg_start, edge) / edge_len_sq, 0.0, 1.0)
+    nearest = seg_start + t * edge
+    return nearest, float(np.linalg.norm(point - nearest))
+
+
+# ---------------------------------------------------------------------------
+# Agent-agent + wall forces
+# ---------------------------------------------------------------------------
+
+
 def compute_contact_forces(
     world: WorldState,
     stiffness: float = 2000.0,
     damping: float = 50.0,
+    wall_strength: float = 5.0,
+    wall_range: float = 0.3,
 ) -> NDArray[np.float64]:
-    """Compute repulsive contact forces for all agents.
+    """Compute repulsive forces for all agents (agent-agent + wall repulsion).
 
-    Uses a spring-damper model: F = stiffness * overlap * normal + damping * rel_vel_normal.
+    Agent-agent: spring-damper on overlap.
+    Wall: smooth exponential repulsion (following JuPedSim's BoundaryRepulsion).
+    The exponential acts continuously, providing a smooth gradient for RL.
 
     Parameters
     ----------
     stiffness : float
-        Spring constant (N/m). Higher = harder collisions.
+        Agent-agent spring constant (N/m).
     damping : float
-        Damping coefficient (N·s/m). Prevents oscillation.
+        Agent-agent damping coefficient (N·s/m).
+    wall_strength : float
+        Wall repulsion amplitude (m/s²).
+    wall_range : float
+        Wall repulsion length scale (m). Force ∝ exp((radius − dist) / range).
 
     Returns
     -------
     forces : (n_agents, 2) array
-        Net contact force on each agent.
+        Net force on each agent.
     """
     n = world.n_agents
     forces = np.zeros((n, 2), dtype=np.float64)
 
+    # --- Agent-agent contact forces ---
     collisions = detect_collisions(world)
     for i, j, overlap in collisions:
-        # Normal direction: from i to j
         diff = world.positions[j] - world.positions[i]
         dist = np.linalg.norm(diff)
         if dist < 1e-10:
-            # Agents exactly on top of each other — use random direction
             normal = np.array([1.0, 0.0])
         else:
             normal = diff / dist
 
-        # Relative velocity along normal (positive = approaching)
         rel_vel = world.velocities[i] - world.velocities[j]
         rel_vel_normal = np.dot(rel_vel, normal)
 
-        # Spring-damper force
         force_magnitude = stiffness * overlap + damping * max(0.0, rel_vel_normal)
         force = force_magnitude * normal
 
-        forces[i] -= force  # Push i away from j
-        forces[j] += force  # Push j away from i
+        forces[i] -= force
+        forces[j] += force
+
+    # --- Smooth exponential wall repulsion ---
+    if world.wall_segments is not None:
+        for i in range(n):
+            if world.active_mask is not None and not world.active_mask[i]:
+                continue
+            radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
+            pos = world.positions[i]
+            for seg in world.wall_segments:
+                nearest, dist = _point_to_segment_nearest(pos, seg[0], seg[1])
+                if dist < 1e-10:
+                    edge = seg[1] - seg[0]
+                    normal = np.array([-edge[1], edge[0]], dtype=np.float64)
+                    norm_len = np.linalg.norm(normal)
+                    if norm_len < 1e-12:
+                        continue
+                    normal /= norm_len
+                else:
+                    normal = (pos - nearest) / dist
+                f_mag = wall_strength * np.exp((radius - dist) / wall_range)
+                forces[i] += f_mag * normal
 
     return forces
+
+
+# ---------------------------------------------------------------------------
+# Hard wall constraint
+# ---------------------------------------------------------------------------
+
+
+def enforce_wall_boundaries(world: WorldState) -> None:
+    """Project agents to stay inside the walkable polygon with body clearance.
+
+    For each agent, computes the distance from the agent centre to the
+    polygon boundary.  If the agent is outside or closer than its body
+    radius, the position is snapped to exactly *radius* distance inside
+    the boundary and the velocity component into the wall is zeroed.
+
+    The polygon's signed geometry (Shapely ``contains``) determines
+    inside vs outside unambiguously — there is no directional ambiguity
+    from undirected wall segments.
+
+    Call **after** physics integration every step.
+    Modifies ``world.positions`` and ``world.velocities`` in place.
+    """
+    polygon = world.walkable_polygon
+    if polygon is None:
+        return
+
+    n = world.n_agents
+    boundary = polygon.boundary
+
+    for i in range(n):
+        if world.active_mask is not None and not world.active_mask[i]:
+            continue
+
+        radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
+        pos = world.positions[i]
+        p = Point(pos[0], pos[1])
+
+        boundary_dist = boundary.distance(p)
+        inside = polygon.contains(p)
+
+        if inside and boundary_dist >= radius:
+            continue  # Agent safely inside — nothing to do
+
+        # Find nearest point on boundary
+        nearest_pt = nearest_points(boundary, p)[0]
+        nearest_pos = np.array([nearest_pt.x, nearest_pt.y], dtype=np.float64)
+
+        # Compute inward normal (always pointing toward polygon interior)
+        diff = pos - nearest_pos
+        diff_len = np.linalg.norm(diff)
+
+        if diff_len > 1e-10:
+            if inside:
+                # Inside but too close — inward direction is away from boundary
+                inward = diff / diff_len
+            else:
+                # Outside — inward direction is toward boundary and beyond
+                inward = -diff / diff_len
+        else:
+            # Exactly on boundary — use polygon interior point as reference
+            ref = polygon.representative_point()
+            inward = np.array([ref.x, ref.y]) - nearest_pos
+            inward_len = np.linalg.norm(inward)
+            if inward_len < 1e-10:
+                continue
+            inward /= inward_len
+
+        # Place agent at radius distance inside the boundary
+        world.positions[i] = nearest_pos + inward * radius
+
+        # Kill velocity component into the wall
+        vel_into_wall = np.dot(world.velocities[i], -inward)
+        if vel_into_wall > 0:
+            world.velocities[i] += vel_into_wall * inward
+
+
+# ---------------------------------------------------------------------------
+# Ray-ellipse intersection (used by raycast engine)
+# ---------------------------------------------------------------------------
 
 
 def ray_ellipse_intersection(
