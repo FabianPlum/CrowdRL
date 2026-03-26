@@ -51,6 +51,11 @@ class RewardConfig:
     progress_weight: float = 0.1
     """Reward for getting closer to goal (potential-based shaping)."""
 
+    # Inverse distance to goal (continuous proximity signal)
+    inverse_distance_weight: float = 0.0
+    """Per-step reward proportional to 1/(distance_to_goal + 1).
+    Captures intermediate progress — closer is better. 0.0 = disabled."""
+
 
 @dataclass
 class RewardState:
@@ -135,6 +140,11 @@ def compute_rewards(
     if state.prev_goal_distances is not None:
         progress = state.prev_goal_distances - goal_distances
         rewards[active_mask] += config.progress_weight * progress[active_mask]
+
+    # Inverse distance to goal: 1 / (d + 1) — closer is better
+    if config.inverse_distance_weight != 0.0:
+        inv_dist = 1.0 / (goal_distances + 1.0)
+        rewards[active_mask] += config.inverse_distance_weight * inv_dist[active_mask]
 
     # --- Tier 2: Smoothness ---
     if config.use_smoothness and state.prev_velocities is not None:
