@@ -320,6 +320,7 @@ def visualise_generated_geometry(
     title: str | None = None,
     show_navmesh: bool = False,
     navmesh: NavMesh | None = None,
+    ax: Axes | None = None,
     figsize: tuple[float, float] = (10, 8),
 ) -> tuple[Figure, Axes]:
     """Complete visualisation of a generated geometry with regions.
@@ -332,12 +333,17 @@ def visualise_generated_geometry(
         If True, overlay the navmesh triangulation.
     navmesh : NavMesh or None
         Pre-built navmesh. If None and show_navmesh is True, builds one.
+    ax : Axes or None
+        If provided, draw into this axes. Otherwise create a new figure.
 
     Returns
     -------
     fig, ax
     """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.get_figure()
     plot_geometry(geom.polygon, ax=ax)
     plot_spawn_goal_regions(geom, ax=ax)
 
@@ -363,6 +369,7 @@ def visualise_world_state(
     raycast_agent: int | None = None,
     raycast_config: RaycastConfig | None = None,
     raycast_readings: NDArray[np.float64] | None = None,
+    ax: Axes | None = None,
     figsize: tuple[float, float] = (10, 8),
 ) -> tuple[Figure, Axes]:
     """Complete visualisation of a world state.
@@ -379,8 +386,13 @@ def visualise_world_state(
     raycast_config : RaycastConfig
     raycast_readings : NDArray
         Pre-computed readings (avoids recomputing).
+    ax : Axes or None
+        If provided, draw into this axes. Otherwise create a new figure.
     """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.get_figure()
 
     if world.walkable_polygon is not None:
         plot_geometry(world.walkable_polygon, ax=ax)
