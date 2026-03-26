@@ -1,7 +1,6 @@
 """Tests for elliptical collision detection and contact forces."""
 
 import numpy as np
-import pytest
 
 from crowdrl_core.collision import (
     compute_contact_forces,
@@ -15,47 +14,83 @@ from conftest import make_world_state
 class TestEllipseOverlap:
     def test_no_overlap(self):
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.23, 0.15, 0.0,
-            np.array([2.0, 0.0]), 0.23, 0.15, 0.0,
+            np.array([0.0, 0.0]),
+            0.23,
+            0.15,
+            0.0,
+            np.array([2.0, 0.0]),
+            0.23,
+            0.15,
+            0.0,
         )
         assert overlap == 0.0
 
     def test_touching(self):
         # Two circles (equal semi-axes) just touching
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.5, 0.5, 0.0,
-            np.array([1.0, 0.0]), 0.5, 0.5, 0.0,
+            np.array([0.0, 0.0]),
+            0.5,
+            0.5,
+            0.0,
+            np.array([1.0, 0.0]),
+            0.5,
+            0.5,
+            0.0,
         )
         # Should be at boundary — very small or zero overlap
         assert overlap <= 0.05
 
     def test_overlapping(self):
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.5, 0.5, 0.0,
-            np.array([0.3, 0.0]), 0.5, 0.5, 0.0,
+            np.array([0.0, 0.0]),
+            0.5,
+            0.5,
+            0.0,
+            np.array([0.3, 0.0]),
+            0.5,
+            0.5,
+            0.0,
         )
         assert overlap > 0
 
     def test_same_position(self):
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.23, 0.15, 0.0,
-            np.array([0.0, 0.0]), 0.23, 0.15, 0.0,
+            np.array([0.0, 0.0]),
+            0.23,
+            0.15,
+            0.0,
+            np.array([0.0, 0.0]),
+            0.23,
+            0.15,
+            0.0,
         )
         assert overlap > 0
 
     def test_rotated_ellipses_no_overlap(self):
         # Two thin ellipses side by side, not overlapping
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.5, 0.1, 0.0,  # Wide, thin
-            np.array([0.0, 1.5]), 0.5, 0.1, 0.0,
+            np.array([0.0, 0.0]),
+            0.5,
+            0.1,
+            0.0,  # Wide, thin
+            np.array([0.0, 1.5]),
+            0.5,
+            0.1,
+            0.0,
         )
         assert overlap == 0.0
 
     def test_rotated_ellipses_overlap(self):
         # Two ellipses rotated 90° to each other, close enough to overlap
         overlap = ellipse_overlap(
-            np.array([0.0, 0.0]), 0.5, 0.2, 0.0,
-            np.array([0.3, 0.0]), 0.5, 0.2, np.pi / 2,
+            np.array([0.0, 0.0]),
+            0.5,
+            0.2,
+            0.0,
+            np.array([0.3, 0.0]),
+            0.5,
+            0.2,
+            np.pi / 2,
         )
         assert overlap > 0
 
@@ -135,7 +170,9 @@ class TestRayEllipseIntersection:
             np.array([-3.0, 0.0]),
             np.array([1.0, 0.0]),
             np.array([0.0, 0.0]),
-            semi_width=1.0, semi_depth=1.0, ellipse_angle=0.0,
+            semi_width=1.0,
+            semi_depth=1.0,
+            ellipse_angle=0.0,
         )
         assert t is not None
         assert abs(t - 2.0) < 1e-6  # Hit at x = -1
@@ -145,7 +182,9 @@ class TestRayEllipseIntersection:
             np.array([-3.0, 5.0]),
             np.array([1.0, 0.0]),
             np.array([0.0, 0.0]),
-            semi_width=1.0, semi_depth=1.0, ellipse_angle=0.0,
+            semi_width=1.0,
+            semi_depth=1.0,
+            ellipse_angle=0.0,
         )
         assert t is None
 
@@ -155,7 +194,9 @@ class TestRayEllipseIntersection:
             np.array([-3.0, 0.0]),
             np.array([1.0, 0.0]),
             np.array([0.0, 0.0]),
-            semi_width=0.5, semi_depth=1.0, ellipse_angle=0.0,
+            semi_width=0.5,
+            semi_depth=1.0,
+            ellipse_angle=0.0,
         )
         assert t is not None
         assert abs(t - 2.0) < 1e-6
@@ -166,7 +207,9 @@ class TestRayEllipseIntersection:
             np.array([0.0, 0.0]),
             np.array([1.0, 0.0]),
             np.array([0.0, 0.0]),
-            semi_width=1.0, semi_depth=1.0, ellipse_angle=0.0,
+            semi_width=1.0,
+            semi_depth=1.0,
+            ellipse_angle=0.0,
         )
         assert t is not None
         assert abs(t - 1.0) < 1e-6  # Exits at x = 1
@@ -177,7 +220,9 @@ class TestRayEllipseIntersection:
             np.array([0.0, -3.0]),
             np.array([0.0, 1.0]),
             np.array([0.0, 0.0]),
-            semi_width=0.5, semi_depth=2.0, ellipse_angle=np.pi / 2,
+            semi_width=0.5,
+            semi_depth=2.0,
+            ellipse_angle=np.pi / 2,
         )
         assert t is not None
         assert t < 3.0  # Should hit before reaching centre

@@ -1,11 +1,9 @@
 """Tests for the action interpreter."""
 
 import numpy as np
-import pytest
 
 from crowdrl_core.action import (
     ActionConfig,
-    ActionResult,
     interpret_action,
     interpret_actions_batch,
 )
@@ -117,9 +115,7 @@ class TestInterpretAction:
             current_torso=np.pi / 4,
             current_head=np.pi / 4,
         )
-        vel_angle = np.arctan2(
-            result.desired_velocity[1], result.desired_velocity[0]
-        )
+        vel_angle = np.arctan2(result.desired_velocity[1], result.desired_velocity[0])
         assert abs(vel_angle - result.new_heading) < 1e-6
 
     def test_action_clipping(self):

@@ -14,10 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Sequence
 
 import numpy as np
-from numpy.typing import NDArray
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.ops import unary_union
 from shapely.validation import make_valid
@@ -83,6 +81,7 @@ def _ensure_valid_polygon(poly: Polygon) -> Polygon:
 # Tier 0: Open fields
 # ---------------------------------------------------------------------------
 
+
 def generate_rectangle(
     rng: np.random.Generator,
     config: GeometryConfig,
@@ -121,10 +120,7 @@ def generate_convex_polygon(
     cx = config.max_side / 2
     cy = config.max_side / 2
 
-    coords = [
-        (cx + radius_x * np.cos(a), cy + radius_y * np.sin(a))
-        for a in angles
-    ]
+    coords = [(cx + radius_x * np.cos(a), cy + radius_y * np.sin(a)) for a in angles]
     polygon = Polygon(coords)
     polygon = _ensure_valid_polygon(polygon)
 
@@ -162,6 +158,7 @@ def generate_tier0(
 # ---------------------------------------------------------------------------
 # Tier 1: Corridors + bottlenecks
 # ---------------------------------------------------------------------------
+
 
 def generate_corridor(
     rng: np.random.Generator,
@@ -260,6 +257,7 @@ def generate_tier1(
 # ---------------------------------------------------------------------------
 # Tier 2: Branching corridors, T-junctions, L-bends, crossroads
 # ---------------------------------------------------------------------------
+
 
 def generate_l_bend(
     rng: np.random.Generator,
@@ -362,16 +360,22 @@ def generate_crossroads(
     # Four endpoints as spawn/goal regions
     spawn_left = box(margin, cy - w / 2 + margin, min(2.0, l_h * 0.15), cy + w / 2 - margin)
     goal_right = box(
-        l_h - min(2.0, l_h * 0.15), cy - w / 2 + margin,
-        l_h - margin, cy + w / 2 - margin,
+        l_h - min(2.0, l_h * 0.15),
+        cy - w / 2 + margin,
+        l_h - margin,
+        cy + w / 2 - margin,
     )
     goal_top = box(
-        cx - w / 2 + margin, l_v - min(2.0, l_v * 0.15),
-        cx + w / 2 - margin, l_v - margin,
+        cx - w / 2 + margin,
+        l_v - min(2.0, l_v * 0.15),
+        cx + w / 2 - margin,
+        l_v - margin,
     )
     goal_bottom = box(
-        cx - w / 2 + margin, margin,
-        cx + w / 2 - margin, min(2.0, l_v * 0.15),
+        cx - w / 2 + margin,
+        margin,
+        cx + w / 2 - margin,
+        min(2.0, l_v * 0.15),
     )
 
     return GeneratedGeometry(
@@ -399,6 +403,7 @@ def generate_tier2(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def generate_geometry(
     rng: np.random.Generator | None = None,

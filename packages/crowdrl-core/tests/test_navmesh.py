@@ -1,7 +1,6 @@
 """Tests for navmesh A* pathfinding."""
 
 import numpy as np
-import pytest
 from shapely.geometry import Polygon
 
 from crowdrl_core.geometry import build_navmesh
@@ -11,8 +10,8 @@ from crowdrl_core.navmesh import (
     is_reachable,
     next_waypoint_direction,
     path_deviation,
+    shortest_path,
 )
-from conftest import make_world_state
 
 
 class TestAstarTrianglePath:
@@ -147,3 +146,109 @@ class TestPathDeviation:
         dev = path_deviation(nm, pos, pos)
         assert dev is not None
         assert dev == 0.0
+
+
+class TestShortestPath:
+    """Tests for the funnel-smoothed shortest path."""
+
+    def test_straight_line_in_open_field(self, simple_square_polygon):
+        """In a convex polygon the shortest path should be (nearly) the straight line."""
+        nm = build_navmesh(simple_square_polygon)
+        start = np.array([2.0, 5.0])
+        goal = np.array([8.0, 5.0])
+        wp = shortest_path(nm, start, goal)
+        assert wp is not None
+        # Should be essentially start → goal (2 waypoints)
+        assert len(wp) <= 3
+        path_len = sum(float(np.linalg.norm(wp[i + 1] - wp[i])) for i in range(len(wp) - 1))
+        direct = float(np.linalg.norm(goal - start))
+        assert path_len < direct * 1.01  # within 1% of straight line
+
+    def test_bottleneck_path_goes_through_aperture(self):
+        """Path through a bottleneck must pass through the gap, not through walls."""
+        exterior = [(0, 0), (10, 0), (10, 4), (0, 4)]
+        top_wall = [(4, 2.5), (6, 2.5), (6, 4), (4, 4)]
+        bottom_wall = [(4, 0), (6, 0), (6, 1.5), (4, 1.5)]
+        bottleneck = Polygon(exterior, [top_wall, bottom_wall])
+        nm = build_navmesh(bottleneck)
+
+        start = np.array([1.0, 2.0])
+        goal = np.array([9.0, 2.0])
+        wp = shortest_path(nm, start, goal)
+        assert wp is not None
+        # All waypoints must be inside the polygon (with tolerance)
+        from shapely.geometry import Point
+
+        for p in wp:
+            assert bottleneck.distance(Point(p[0], p[1])) < 0.01
+
+        # Path must cross x=5 (the bottleneck centre) at y between 1.5 and 2.5
+        for i in range(len(wp) - 1):
+            x0, x1 = wp[i][0], wp[i + 1][0]
+            if (x0 <= 5.0 <= x1) or (x1 <= 5.0 <= x0):
+                t = (5.0 - x0) / (x1 - x0) if abs(x1 - x0) > 1e-10 else 0.5
+                y_at_5 = wp[i][1] + t * (wp[i + 1][1] - wp[i][1])
+                assert 1.5 <= y_at_5 <= 2.5, f"Path crosses x=5 at y={y_at_5}, outside aperture"
+                break
+
+
+class TestAgentRadius:
+    """Tests for agent_radius portal inset."""
+
+    def test_radius_zero_matches_no_radius(self):
+        """With radius=0 the path should be identical to the default."""
+        exterior = [(0, 0), (10, 0), (10, 4), (0, 4)]
+        top_wall = [(4, 2.5), (6, 2.5), (6, 4), (4, 4)]
+        bottom_wall = [(4, 0), (6, 0), (6, 1.5), (4, 1.5)]
+        bottleneck = Polygon(exterior, [top_wall, bottom_wall])
+        nm = build_navmesh(bottleneck)
+
+        start = np.array([1.0, 2.0])
+        goal = np.array([9.0, 2.0])
+        wp_default = shortest_path(nm, start, goal)
+        wp_zero = shortest_path(nm, start, goal, agent_radius=0.0)
+        assert wp_default is not None and wp_zero is not None
+        assert len(wp_default) == len(wp_zero)
+        for a, b in zip(wp_default, wp_zero):
+            np.testing.assert_allclose(a, b)
+
+    def test_radius_keeps_path_away_from_corners(self):
+        """With a nonzero radius, waypoints should stay away from wall corners."""
+        exterior = [(0, 0), (10, 0), (10, 4), (0, 4)]
+        top_wall = [(4, 2.5), (6, 2.5), (6, 4), (4, 4)]
+        bottom_wall = [(4, 0), (6, 0), (6, 1.5), (4, 1.5)]
+        bottleneck = Polygon(exterior, [top_wall, bottom_wall])
+        nm = build_navmesh(bottleneck)
+
+        start = np.array([1.0, 2.0])
+        goal = np.array([9.0, 2.0])
+        radius = 0.2
+        wp = shortest_path(nm, start, goal, agent_radius=radius)
+        assert wp is not None
+
+        # The wall corners of the aperture are at (4, 2.5), (4, 1.5), (6, 2.5), (6, 1.5)
+        corners = [np.array([4, 2.5]), np.array([4, 1.5]), np.array([6, 2.5]), np.array([6, 1.5])]
+        for p in wp[1:-1]:  # skip start/goal
+            for corner in corners:
+                dist = float(np.linalg.norm(p - corner))
+                # Waypoint should not sit exactly on a corner
+                assert dist > 0.05, f"Waypoint {p} too close to corner {corner}"
+
+    def test_radius_path_longer_than_zero_radius(self):
+        """Path with clearance should be at least as long as the zero-radius path."""
+        exterior = [(0, 0), (10, 0), (10, 4), (0, 4)]
+        top_wall = [(4, 2.5), (6, 2.5), (6, 4), (4, 4)]
+        bottom_wall = [(4, 0), (6, 0), (6, 1.5), (4, 1.5)]
+        bottleneck = Polygon(exterior, [top_wall, bottom_wall])
+        nm = build_navmesh(bottleneck)
+
+        start = np.array([1.0, 2.0])
+        goal = np.array([9.0, 2.0])
+        wp_0 = shortest_path(nm, start, goal, agent_radius=0.0)
+        wp_r = shortest_path(nm, start, goal, agent_radius=0.2)
+        assert wp_0 is not None and wp_r is not None
+
+        def path_len(wp):
+            return sum(float(np.linalg.norm(wp[i + 1] - wp[i])) for i in range(len(wp) - 1))
+
+        assert path_len(wp_r) >= path_len(wp_0) - 1e-10

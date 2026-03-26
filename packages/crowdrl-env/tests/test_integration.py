@@ -7,19 +7,18 @@ to a transfer guarantee test without the actual JuPedSim adapter.
 
 import numpy as np
 import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 
-from crowdrl_core.action import ActionConfig, interpret_action, interpret_actions_batch
+from crowdrl_core.action import ActionConfig, interpret_actions_batch
 from crowdrl_core.collision import detect_collisions, compute_contact_forces
 from crowdrl_core.geometry import (
     build_navmesh,
     extract_wall_segments,
-    find_containing_triangle,
     sample_point_in_polygon,
 )
-from crowdrl_core.navmesh import find_path, is_reachable, next_waypoint_direction
+from crowdrl_core.navmesh import is_reachable, next_waypoint_direction
 from crowdrl_core.observation import ObsConfig, build_observation, build_observations_batch
-from crowdrl_core.sensing import RaycastConfig, cast_rays, knn_social
+from crowdrl_core.sensing import RaycastConfig, cast_rays
 from crowdrl_core.world_state import WorldState
 
 from crowdrl_env.geometry_generator import (
@@ -40,12 +39,8 @@ def _spawn_agents_in_geometry(
     region = spawn_region if spawn_region is not None else polygon
     goal_reg = goal_region if goal_region is not None else polygon
 
-    positions = np.array(
-        [sample_point_in_polygon(region, rng) for _ in range(n_agents)]
-    )
-    goal_positions = np.array(
-        [sample_point_in_polygon(goal_reg, rng) for _ in range(n_agents)]
-    )
+    positions = np.array([sample_point_in_polygon(region, rng) for _ in range(n_agents)])
+    goal_positions = np.array([sample_point_in_polygon(goal_reg, rng) for _ in range(n_agents)])
 
     return WorldState(
         positions=positions,
@@ -70,7 +65,9 @@ class TestFullPipelineTier0:
         geom = generate_geometry(rng, config)
 
         world = _spawn_agents_in_geometry(
-            geom.polygon, n_agents=10, rng=rng,
+            geom.polygon,
+            n_agents=10,
+            rng=rng,
             spawn_region=geom.spawn_regions[0],
             goal_region=geom.goal_regions[0],
         )
@@ -114,8 +111,9 @@ class TestFullPipelineTier1:
             for _ in range(5):
                 start = sample_point_in_polygon(geom.spawn_regions[0], rng)
                 goal = sample_point_in_polygon(geom.goal_regions[0], rng)
-                assert is_reachable(navmesh, start, goal), \
+                assert is_reachable(navmesh, start, goal), (
                     f"Unreachable path in {geom.metadata['shape']}"
+                )
 
     def test_bottleneck_observations_finite(self, rng):
         """Observations should be finite even in tight bottleneck geometries."""
@@ -126,7 +124,9 @@ class TestFullPipelineTier1:
         for _ in range(5):
             geom = generate_geometry(rng, config)
             world = _spawn_agents_in_geometry(
-                geom.polygon, 5, rng,
+                geom.polygon,
+                5,
+                rng,
                 spawn_region=geom.spawn_regions[0],
                 goal_region=geom.goal_regions[0],
             )
@@ -197,7 +197,9 @@ class TestFullPipelineTier2:
             pytest.skip("No L-bend generated in 30 attempts")
 
         world = _spawn_agents_in_geometry(
-            geom.polygon, 5, rng,
+            geom.polygon,
+            5,
+            rng,
             spawn_region=geom.spawn_regions[0],
             goal_region=geom.goal_regions[0],
         )
@@ -237,8 +239,8 @@ class TestObservationConsistency:
 
         # The base components (ego + social + rays) should be identical
         np.testing.assert_array_equal(
-            obs_base[:config_base.obs_dim],
-            obs_nav[:config_base.obs_dim],
+            obs_base[: config_base.obs_dim],
+            obs_nav[: config_base.obs_dim],
         )
 
     def test_obs_invariant_to_reconstruction(self, rng):
@@ -362,7 +364,9 @@ class TestActionCycleIntegration:
         """Run 50 steps of observe-act-update without numerical blowup."""
         geom = generate_geometry(rng, GeometryConfig(tier=GeometryTier.TIER_1))
         world = _spawn_agents_in_geometry(
-            geom.polygon, 10, rng,
+            geom.polygon,
+            10,
+            rng,
             spawn_region=geom.spawn_regions[0],
             goal_region=geom.goal_regions[0],
         )
@@ -403,6 +407,7 @@ class TestVisualisationSmoke:
     def test_plot_geometry_all_tiers(self, rng):
         """Plotting should not crash for any tier."""
         import matplotlib
+
         matplotlib.use("Agg")  # Non-interactive backend
         from crowdrl_env.visualiser import visualise_generated_geometry
 
@@ -415,6 +420,7 @@ class TestVisualisationSmoke:
 
     def test_plot_with_navmesh(self, rng):
         import matplotlib
+
         matplotlib.use("Agg")
         from crowdrl_env.visualiser import visualise_generated_geometry
 
@@ -425,6 +431,7 @@ class TestVisualisationSmoke:
 
     def test_plot_world_state(self, rng):
         import matplotlib
+
         matplotlib.use("Agg")
         from crowdrl_env.visualiser import visualise_world_state
 
@@ -436,6 +443,7 @@ class TestVisualisationSmoke:
 
     def test_plot_raycasts(self, rng):
         import matplotlib
+
         matplotlib.use("Agg")
         from crowdrl_env.visualiser import visualise_world_state
 
@@ -446,8 +454,10 @@ class TestVisualisationSmoke:
         readings = cast_rays(world, 0, rc)
 
         fig, ax = visualise_world_state(
-            world, show_raycasts=True,
-            raycast_config=rc, raycast_readings=readings,
+            world,
+            show_raycasts=True,
+            raycast_config=rc,
+            raycast_readings=readings,
         )
         assert fig is not None
         plt_close(fig)
@@ -456,4 +466,5 @@ class TestVisualisationSmoke:
 def plt_close(fig):
     """Helper to close a figure without importing plt at module level."""
     import matplotlib.pyplot as plt
+
     plt.close(fig)

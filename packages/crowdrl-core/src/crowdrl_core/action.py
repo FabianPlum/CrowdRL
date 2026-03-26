@@ -125,8 +125,7 @@ def interpret_action(
 
     # Desired velocity vector from heading and speed
     desired_velocity = np.array(
-        [desired_speed * np.cos(new_heading),
-         desired_speed * np.sin(new_heading)],
+        [desired_speed * np.cos(new_heading), desired_speed * np.sin(new_heading)],
         dtype=np.float64,
     )
 

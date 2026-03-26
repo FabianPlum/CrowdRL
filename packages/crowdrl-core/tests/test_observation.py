@@ -1,8 +1,6 @@
 """Tests for the observation builder — the critical transfer guarantee."""
 
 import numpy as np
-import pytest
-from shapely.geometry import Polygon
 
 from crowdrl_core.observation import ObsConfig, build_observation, build_observations_batch
 from crowdrl_core.sensing import RaycastConfig

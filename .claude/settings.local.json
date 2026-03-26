@@ -43,7 +43,15 @@
       "Bash(python -c \"import triangle; print\\(''triangle available''\\)\")",
       "Bash(\"/c/Users/Fabian/.local/bin/uv\" run:*)",
       "Bash(\"/c/Users/Fabian/.cargo/bin/uv\" run:*)",
-      "Bash(gh auth:*)"
+      "Bash(gh auth:*)",
+      "Bash(find \"c:/Users/Fabian/dev/jupedsim\" -name \"*.py\" -type f -exec grep -l \"portal\\\\|funnel\\\\|waypoint\" {})",
+      "Bash(grep -E \"\\\\.h$\")",
+      "Bash(gh run:*)",
+      "Bash(python -m ruff check . --fix)",
+      "Bash(pip show:*)",
+      "Bash(.venv/Scripts/ruff.exe format:*)",
+      "Bash(.venv/Scripts/ruff.exe check:*)",
+      "Bash(.venv/Scripts/pytest.exe --tb=short -q)"
     ]
   }
 }

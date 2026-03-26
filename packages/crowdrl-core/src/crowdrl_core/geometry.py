@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.spatial import Delaunay
 from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.ops import triangulate as shapely_triangulate
 
@@ -172,14 +171,10 @@ def build_navmesh(polygon: Polygon) -> NavMesh:
                 edge_a, edge_b = shared_verts[0], shared_verts[1]
 
                 # Orient portal for both travel directions
-                left_ij, right_ij = _orient_portal(
-                    edge_a, edge_b, centroids[i], centroids[j]
-                )
+                left_ij, right_ij = _orient_portal(edge_a, edge_b, centroids[i], centroids[j])
                 portals[(i, j)] = (left_ij, right_ij)
 
-                left_ji, right_ji = _orient_portal(
-                    edge_a, edge_b, centroids[j], centroids[i]
-                )
+                left_ji, right_ji = _orient_portal(edge_a, edge_b, centroids[j], centroids[i])
                 portals[(j, i)] = (left_ji, right_ji)
 
     return NavMesh(
@@ -213,9 +208,7 @@ def point_in_triangle(point: NDArray, triangle: NDArray) -> bool:
     return (u >= -1e-10) and (v >= -1e-10) and (u + v <= 1.0 + 1e-10)
 
 
-def find_containing_triangle(
-    point: NDArray[np.float64], navmesh: NavMesh
-) -> int | None:
+def find_containing_triangle(point: NDArray[np.float64], navmesh: NavMesh) -> int | None:
     """Find which triangle in the navmesh contains the given point.
 
     Returns triangle index, or None if point is outside all triangles.

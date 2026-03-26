@@ -107,13 +107,9 @@ class WorldState:
         }
         for name, (arr, expected_shape) in checks.items():
             if arr.shape != expected_shape:
-                raise ValueError(
-                    f"{name} has shape {arr.shape}, expected {expected_shape}"
-                )
+                raise ValueError(f"{name} has shape {arr.shape}, expected {expected_shape}")
         if self.active_mask is not None and self.active_mask.shape != (n,):
-            raise ValueError(
-                f"active_mask has shape {self.active_mask.shape}, expected ({n},)"
-            )
+            raise ValueError(f"active_mask has shape {self.active_mask.shape}, expected ({n},)")
         if self.wall_segments is not None and self.wall_segments.ndim != 3:
             raise ValueError(
                 f"wall_segments must be (S, 2, 2), got shape {self.wall_segments.shape}"

@@ -103,13 +103,18 @@ def build_observation(
     head_rel_torso = ego_head - ego_heading
     head_rel_torso = (head_rel_torso + np.pi) % (2 * np.pi) - np.pi
 
-    ego_state = np.array([
-        goal_dir_ego[0], goal_dir_ego[1],
-        vel_ego[0], vel_ego[1],
-        speed,
-        torso_angle,
-        head_rel_torso,
-    ], dtype=np.float64)
+    ego_state = np.array(
+        [
+            goal_dir_ego[0],
+            goal_dir_ego[1],
+            vel_ego[0],
+            vel_ego[1],
+            speed,
+            torso_angle,
+            head_rel_torso,
+        ],
+        dtype=np.float64,
+    )
 
     # --- Social sensing (K × 7D) ---
     social = knn_social(world, agent_idx, k=config.k_neighbours)
@@ -123,8 +128,16 @@ def build_observation(
     parts = [ego_state, social_flat, rays_flat]
 
     if config.use_navmesh and world.navmesh is not None:
-        wp_dir = next_waypoint_direction(world.navmesh, ego_pos, goal)
-        p_dev = path_deviation(world.navmesh, ego_pos, goal)
+        # Use the larger body half-dimension as the clearance radius so the
+        # path stays clear of wall corners.
+        agent_radius = float(
+            max(
+                world.shoulder_widths[agent_idx],
+                world.chest_depths[agent_idx],
+            )
+        )
+        wp_dir = next_waypoint_direction(world.navmesh, ego_pos, goal, agent_radius)
+        p_dev = path_deviation(world.navmesh, ego_pos, goal, agent_radius)
 
         if wp_dir is not None and p_dev is not None:
             # Transform waypoint direction to ego frame

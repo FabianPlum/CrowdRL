@@ -7,12 +7,12 @@ generating figures for papers/documentation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import patches as mpatches
-from matplotlib.collections import LineCollection, PatchCollection
+from matplotlib.collections import LineCollection
 from numpy.typing import NDArray
 from shapely.geometry import Polygon
 
@@ -57,8 +57,11 @@ def plot_geometry(
 
     # Draw walkable area
     walkable = _polygon_to_patch(
-        polygon, facecolor=walkable_color, edgecolor=wall_color,
-        linewidth=wall_linewidth, zorder=1,
+        polygon,
+        facecolor=walkable_color,
+        edgecolor=wall_color,
+        linewidth=wall_linewidth,
+        zorder=1,
     )
     ax.add_patch(walkable)
 
@@ -67,8 +70,11 @@ def plot_geometry(
         for hole in polygon.interiors:
             coords = np.array(hole.coords)
             obs_patch = mpatches.Polygon(
-                coords, facecolor=obstacle_color, edgecolor=wall_color,
-                linewidth=wall_linewidth, zorder=2,
+                coords,
+                facecolor=obstacle_color,
+                edgecolor=wall_color,
+                linewidth=wall_linewidth,
+                zorder=2,
             )
             ax.add_patch(obs_patch)
 
@@ -96,15 +102,24 @@ def plot_navmesh(
     """Overlay the navigation mesh on an existing plot."""
     for tri in navmesh.triangles:
         triangle = mpatches.Polygon(
-            tri, closed=True, facecolor=tri_color, alpha=tri_alpha,
-            edgecolor=edge_color, linewidth=0.5, zorder=3,
+            tri,
+            closed=True,
+            facecolor=tri_color,
+            alpha=tri_alpha,
+            edgecolor=edge_color,
+            linewidth=0.5,
+            zorder=3,
         )
         ax.add_patch(triangle)
 
     if show_centroids:
         ax.scatter(
-            navmesh.centroids[:, 0], navmesh.centroids[:, 1],
-            c=tri_color, s=8, zorder=5, alpha=0.7,
+            navmesh.centroids[:, 0],
+            navmesh.centroids[:, 1],
+            c=tri_color,
+            s=8,
+            zorder=5,
+            alpha=0.7,
         )
 
     if show_adjacency:
@@ -142,52 +157,82 @@ def plot_agents(
             width=2 * world.chest_depths[i],
             height=2 * world.shoulder_widths[i],
             angle=np.degrees(world.torso_orientations[i]),
-            facecolor=color, edgecolor="black", linewidth=0.8,
-            alpha=0.7, zorder=10,
+            facecolor=color,
+            edgecolor="black",
+            linewidth=0.8,
+            alpha=0.7,
+            zorder=10,
         )
         ax.add_patch(ellipse)
 
         if show_orientations and is_active:
             # Torso forward direction
-            torso_dir = np.array([
-                np.cos(world.torso_orientations[i]),
-                np.sin(world.torso_orientations[i]),
-            ])
+            torso_dir = np.array(
+                [
+                    np.cos(world.torso_orientations[i]),
+                    np.sin(world.torso_orientations[i]),
+                ]
+            )
             ax.arrow(
-                pos[0], pos[1],
+                pos[0],
+                pos[1],
                 torso_dir[0] * orientation_length,
                 torso_dir[1] * orientation_length,
-                head_width=0.08, head_length=0.05,
-                fc=color, ec="black", linewidth=0.5, zorder=11,
+                head_width=0.08,
+                head_length=0.05,
+                fc=color,
+                ec="black",
+                linewidth=0.5,
+                zorder=11,
             )
 
             # Head direction (dashed, thinner)
-            head_dir = np.array([
-                np.cos(world.head_orientations[i]),
-                np.sin(world.head_orientations[i]),
-            ])
+            head_dir = np.array(
+                [
+                    np.cos(world.head_orientations[i]),
+                    np.sin(world.head_orientations[i]),
+                ]
+            )
             ax.plot(
                 [pos[0], pos[0] + head_dir[0] * orientation_length * 0.7],
                 [pos[1], pos[1] + head_dir[1] * orientation_length * 0.7],
-                color="#3498db", linewidth=1.5, linestyle="--", zorder=11,
+                color="#3498db",
+                linewidth=1.5,
+                linestyle="--",
+                zorder=11,
             )
 
         if show_goals and is_active:
             goal = world.goal_positions[i]
             ax.plot(
-                goal[0], goal[1],
-                marker="*", markersize=10, color=goal_color,
-                markeredgecolor="black", markeredgewidth=0.5, zorder=9,
+                goal[0],
+                goal[1],
+                marker="*",
+                markersize=10,
+                color=goal_color,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                zorder=9,
             )
             ax.plot(
-                [pos[0], goal[0]], [pos[1], goal[1]],
-                color=goal_color, linewidth=0.5, linestyle=":", alpha=0.4, zorder=8,
+                [pos[0], goal[0]],
+                [pos[1], goal[1]],
+                color=goal_color,
+                linewidth=0.5,
+                linestyle=":",
+                alpha=0.4,
+                zorder=8,
             )
 
         if show_ids:
             ax.text(
-                pos[0], pos[1] + world.shoulder_widths[i] + 0.15,
-                str(i), fontsize=7, ha="center", va="bottom", zorder=12,
+                pos[0],
+                pos[1] + world.shoulder_widths[i] + 0.15,
+                str(i),
+                fontsize=7,
+                ha="center",
+                va="bottom",
+                zorder=12,
             )
 
 
@@ -224,7 +269,8 @@ def plot_raycasts(
         hit = dist < config.max_range - 0.01
 
         ax.plot(
-            [origin[0], endpoint[0]], [origin[1], endpoint[1]],
+            [origin[0], endpoint[0]],
+            [origin[1], endpoint[1]],
             color=hit_color if hit else ray_color,
             linewidth=0.8 if hit else 0.4,
             alpha=0.8 if hit else 0.3,
@@ -245,16 +291,26 @@ def plot_spawn_goal_regions(
     for region in geom.spawn_regions:
         if isinstance(region, Polygon) and not region.is_empty:
             patch = _polygon_to_patch(
-                region, facecolor=spawn_color, edgecolor=spawn_color,
-                alpha=alpha, linewidth=1.5, linestyle="--", zorder=4,
+                region,
+                facecolor=spawn_color,
+                edgecolor=spawn_color,
+                alpha=alpha,
+                linewidth=1.5,
+                linestyle="--",
+                zorder=4,
             )
             ax.add_patch(patch)
 
     for region in geom.goal_regions:
         if isinstance(region, Polygon) and not region.is_empty:
             patch = _polygon_to_patch(
-                region, facecolor=goal_color, edgecolor=goal_color,
-                alpha=alpha, linewidth=1.5, linestyle="--", zorder=4,
+                region,
+                facecolor=goal_color,
+                edgecolor=goal_color,
+                alpha=alpha,
+                linewidth=1.5,
+                linestyle="--",
+                zorder=4,
             )
             ax.add_patch(patch)
 
@@ -288,6 +344,7 @@ def visualise_generated_geometry(
     if show_navmesh:
         if navmesh is None:
             from crowdrl_core.geometry import build_navmesh
+
             navmesh = build_navmesh(geom.polygon)
         plot_navmesh(navmesh, ax, show_centroids=True, show_adjacency=True)
 

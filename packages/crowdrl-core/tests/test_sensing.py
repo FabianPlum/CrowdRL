@@ -1,7 +1,6 @@
 """Tests for sensing: raycasts and KNN social query."""
 
 import numpy as np
-import pytest
 from shapely.geometry import Polygon
 
 from crowdrl_core.sensing import RaycastConfig, cast_rays, knn_social

@@ -1,8 +1,6 @@
 """Tests for geometry module: wall extraction, triangulation, navmesh construction."""
 
 import numpy as np
-import pytest
-from shapely.geometry import Polygon
 
 from crowdrl_core.geometry import (
     build_navmesh,
@@ -58,6 +56,7 @@ class TestTriangulation:
         for tri in tris:
             centroid = tri.mean(axis=0)
             from shapely.geometry import Point
+
             assert simple_square_polygon.contains(Point(centroid))
 
     def test_polygon_with_hole(self, square_with_obstacle):
@@ -67,6 +66,7 @@ class TestTriangulation:
         for tri in tris:
             centroid = tri.mean(axis=0)
             from shapely.geometry import Point
+
             assert square_with_obstacle.contains(Point(centroid))
 
     def test_corridor(self, corridor_polygon):
@@ -153,6 +153,7 @@ class TestSamplePointInPolygon:
         for _ in range(50):
             pt = sample_point_in_polygon(simple_square_polygon, rng)
             from shapely.geometry import Point
+
             assert simple_square_polygon.contains(Point(pt))
 
     def test_samples_inside_polygon_with_hole(self, square_with_obstacle):
@@ -160,6 +161,7 @@ class TestSamplePointInPolygon:
         for _ in range(50):
             pt = sample_point_in_polygon(square_with_obstacle, rng)
             from shapely.geometry import Point
+
             assert square_with_obstacle.contains(Point(pt))
 
     def test_returns_2d_array(self, simple_square_polygon):

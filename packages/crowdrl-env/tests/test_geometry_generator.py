@@ -1,8 +1,7 @@
 """Tests for the procedural geometry generator (Tiers 0–2)."""
 
 import numpy as np
-import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 
 from crowdrl_env.geometry_generator import (
     GeneratedGeometry,

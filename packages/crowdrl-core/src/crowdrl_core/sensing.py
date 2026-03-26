@@ -124,7 +124,8 @@ def cast_rays(
                 continue
 
             t = ray_ellipse_intersection(
-                origin, direction,
+                origin,
+                direction,
                 world.positions[j],
                 world.shoulder_widths[j],
                 world.chest_depths[j],

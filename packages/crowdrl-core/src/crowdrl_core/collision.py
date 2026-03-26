@@ -24,8 +24,14 @@ def _rotation_matrix(angle: float) -> NDArray[np.float64]:
 
 
 def ellipse_overlap(
-    pos_a: NDArray, a_width: float, a_depth: float, a_angle: float,
-    pos_b: NDArray, b_width: float, b_depth: float, b_angle: float,
+    pos_a: NDArray,
+    a_width: float,
+    a_depth: float,
+    a_angle: float,
+    pos_b: NDArray,
+    b_width: float,
+    b_depth: float,
+    b_angle: float,
 ) -> float:
     """Approximate overlap between two oriented ellipses.
 
@@ -78,10 +84,12 @@ def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
 
             overlap = ellipse_overlap(
                 world.positions[i],
-                world.shoulder_widths[i], world.chest_depths[i],
+                world.shoulder_widths[i],
+                world.chest_depths[i],
                 world.torso_orientations[i],
                 world.positions[j],
-                world.shoulder_widths[j], world.chest_depths[j],
+                world.shoulder_widths[j],
+                world.chest_depths[j],
                 world.torso_orientations[j],
             )
             if overlap > 0:
@@ -172,12 +180,8 @@ def ray_ellipse_intersection(
     dir_local = rot @ ray_dir
 
     # Scale to unit circle
-    origin_scaled = np.array(
-        [origin_local[0] / semi_depth, origin_local[1] / semi_width]
-    )
-    dir_scaled = np.array(
-        [dir_local[0] / semi_depth, dir_local[1] / semi_width]
-    )
+    origin_scaled = np.array([origin_local[0] / semi_depth, origin_local[1] / semi_width])
+    dir_scaled = np.array([dir_local[0] / semi_depth, dir_local[1] / semi_width])
 
     # Solve |origin_scaled + t * dir_scaled|^2 = 1
     a = np.dot(dir_scaled, dir_scaled)

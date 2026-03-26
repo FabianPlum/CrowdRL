@@ -25,6 +25,7 @@ from crowdrl_core.world_state import NavMesh
 # A* on triangle adjacency graph
 # ---------------------------------------------------------------------------
 
+
 def _heuristic(a: NDArray, b: NDArray) -> float:
     """Euclidean distance heuristic for A*."""
     return float(np.linalg.norm(a - b))
@@ -68,9 +69,7 @@ def astar_triangle_path(
             return path
 
         for neighbour in navmesh.adjacency[current]:
-            edge_cost = float(
-                np.linalg.norm(centroids[current] - centroids[neighbour])
-            )
+            edge_cost = float(np.linalg.norm(centroids[current] - centroids[neighbour]))
             tentative_g = g_score[current] + edge_cost
 
             if tentative_g < g_score.get(neighbour, float("inf")):
@@ -87,6 +86,7 @@ def astar_triangle_path(
 # Funnel algorithm (Simple Stupid Funnel / Lee's algorithm)
 # ---------------------------------------------------------------------------
 
+
 def _cross2d(o: NDArray, a: NDArray, b: NDArray) -> float:
     """2D cross product of vectors (a - o) and (b - o).
 
@@ -100,20 +100,49 @@ def _extract_portals(
     tri_path: list[int],
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> list[tuple[NDArray[np.float64], NDArray[np.float64]]]:
     """Extract the sequence of portal edges from a triangle path.
 
     Returns a list of (left, right) endpoint pairs. The first portal is
     (start, start) and the last is (goal, goal) — degenerate portals that
     anchor the funnel at the endpoints.
+
+    When *agent_radius* > 0, each portal is inset from both ends so that
+    the resulting path keeps the agent centre at least *agent_radius* away
+    from wall vertices. If a portal is too narrow, it collapses to the
+    midpoint (the agent can still squeeze through, just centred).
     """
     portals = [(start.copy(), start.copy())]
     for i in range(len(tri_path) - 1):
         key = (tri_path[i], tri_path[i + 1])
         left, right = navmesh.portals[key]
+        if agent_radius > 0:
+            left, right = _inset_portal(left, right, agent_radius)
         portals.append((left, right))
     portals.append((goal.copy(), goal.copy()))
     return portals
+
+
+def _inset_portal(
+    left: NDArray[np.float64],
+    right: NDArray[np.float64],
+    radius: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Shrink a portal edge inward by *radius* from both endpoints.
+
+    If the portal is shorter than 2 * radius, collapse both endpoints
+    to the midpoint so the path stays centred in the gap.
+    """
+    direction = right - left
+    length = float(np.linalg.norm(direction))
+    if length < 1e-12:
+        return left.copy(), right.copy()
+    unit = direction / length
+    if length <= 2.0 * radius:
+        mid = (left + right) * 0.5
+        return mid.copy(), mid.copy()
+    return left + unit * radius, right - unit * radius
 
 
 def funnel_path(
@@ -121,6 +150,7 @@ def funnel_path(
     tri_path: list[int],
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> list[NDArray[np.float64]]:
     """Compute the shortest path through a sequence of triangles using the funnel algorithm.
 
@@ -144,7 +174,7 @@ def funnel_path(
     if len(tri_path) <= 1:
         return [start.copy(), goal.copy()]
 
-    portals = _extract_portals(navmesh, tri_path, start, goal)
+    portals = _extract_portals(navmesh, tri_path, start, goal, agent_radius)
 
     # Simple Stupid Funnel Algorithm
     path_points: list[NDArray[np.float64]] = [start.copy()]
@@ -159,8 +189,8 @@ def funnel_path(
         new_right = portals[i][1]
 
         # Update right vertex
-        if _cross2d(apex, portal_right, new_right) <= 0:
-            if np.allclose(apex, portal_right) or _cross2d(apex, portal_left, new_right) > 0:
+        if _cross2d(apex, portal_right, new_right) >= 0:
+            if np.allclose(apex, portal_right) or _cross2d(apex, portal_left, new_right) < 0:
                 # Tighten the funnel
                 portal_right = new_right.copy()
                 right_idx = i
@@ -171,7 +201,6 @@ def funnel_path(
                 left_idx = left_idx
                 right_idx = left_idx
                 portal_right = apex.copy()
-                i_restart = left_idx + 1
                 # Reset and restart scan from the new apex
                 portal_left = apex.copy()
                 # We can't actually restart the for-loop in Python, so we use
@@ -180,8 +209,8 @@ def funnel_path(
                 pass
 
         # Update left vertex
-        if _cross2d(apex, portal_left, new_left) >= 0:
-            if np.allclose(apex, portal_left) or _cross2d(apex, portal_right, new_left) < 0:
+        if _cross2d(apex, portal_left, new_left) <= 0:
+            if np.allclose(apex, portal_left) or _cross2d(apex, portal_right, new_left) > 0:
                 portal_left = new_left.copy()
                 left_idx = i
             else:
@@ -207,6 +236,7 @@ def funnel_path_robust(
     tri_path: list[int],
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> list[NDArray[np.float64]]:
     """Compute the shortest path using the funnel algorithm (while-loop variant).
 
@@ -216,7 +246,7 @@ def funnel_path_robust(
     if len(tri_path) <= 1:
         return [start.copy(), goal.copy()]
 
-    portals = _extract_portals(navmesh, tri_path, start, goal)
+    portals = _extract_portals(navmesh, tri_path, start, goal, agent_radius)
     n_portals = len(portals)
 
     path_points: list[NDArray[np.float64]] = []
@@ -234,14 +264,10 @@ def funnel_path_robust(
         new_left = portals[i][0]
         new_right = portals[i][1]
 
-        # Skip sides where the new vertex is identical to the current boundary —
-        # no change means no narrowing and no crossing check needed.
-        right_changed = not np.allclose(new_right, portal_right, atol=1e-10)
-        left_changed = not np.allclose(new_left, portal_left, atol=1e-10)
-
-        # Try to narrow the funnel from the right side
-        if right_changed and _cross2d(apex, portal_right, new_right) <= 0:
-            if np.allclose(apex, portal_right) or _cross2d(apex, portal_left, new_right) > 0:
+        # Try to narrow the funnel from the right side.
+        # cross >= 0 means new_right is to the left of (or on) portal_right → tighter.
+        if _cross2d(apex, portal_right, new_right) >= 0:
+            if np.allclose(apex, portal_right) or _cross2d(apex, portal_left, new_right) < 0:
                 # Still inside funnel — tighten right
                 portal_right = new_right.copy()
                 right_idx = i
@@ -254,13 +280,13 @@ def funnel_path_robust(
                 right_idx = apex_idx
                 portal_left = apex.copy()
                 left_idx = apex_idx
-                # Restart scan from after the new apex
                 i = apex_idx + 1
                 continue
 
-        # Try to narrow the funnel from the left side
-        if left_changed and _cross2d(apex, portal_left, new_left) >= 0:
-            if np.allclose(apex, portal_left) or _cross2d(apex, portal_right, new_left) < 0:
+        # Try to narrow the funnel from the left side.
+        # cross <= 0 means new_left is to the right of (or on) portal_left → tighter.
+        if _cross2d(apex, portal_left, new_left) <= 0:
+            if np.allclose(apex, portal_left) or _cross2d(apex, portal_right, new_left) > 0:
                 # Still inside funnel — tighten left
                 portal_left = new_left.copy()
                 left_idx = i
@@ -273,7 +299,6 @@ def funnel_path_robust(
                 left_idx = apex_idx
                 portal_right = apex.copy()
                 right_idx = apex_idx
-                # Restart scan from after the new apex
                 i = apex_idx + 1
                 continue
 
@@ -293,6 +318,7 @@ def funnel_path_robust(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def find_path(
     navmesh: NavMesh,
@@ -318,12 +344,19 @@ def shortest_path(
     navmesh: NavMesh,
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> list[NDArray[np.float64]] | None:
     """Compute the true shortest path between two points through the navmesh.
 
     Uses A* to find the triangle corridor, then the funnel algorithm to
     compute the geometrically shortest (taut-string) path through the
     portal edges.
+
+    Parameters
+    ----------
+    agent_radius : float
+        Clearance distance from wall vertices. Portal edges are inset by
+        this amount so the agent centre stays clear of geometry corners.
 
     Returns
     -------
@@ -333,25 +366,31 @@ def shortest_path(
     tri_path = find_path(navmesh, start, goal)
     if tri_path is None:
         return None
-    return funnel_path_robust(navmesh, tri_path, start, goal)
+    return funnel_path_robust(navmesh, tri_path, start, goal, agent_radius)
 
 
 def next_waypoint_direction(
     navmesh: NavMesh,
     position: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> NDArray[np.float64] | None:
     """Compute the unit direction toward the next waypoint on the shortest path.
 
     Uses the funnel-smoothed path so the direction points toward the
     actual next turning point — not a triangle centroid.
 
+    Parameters
+    ----------
+    agent_radius : float
+        Clearance distance from wall vertices (see :func:`shortest_path`).
+
     Returns
     -------
     direction : (2,) array or None
         Unit direction vector, or None if path cannot be computed.
     """
-    waypoints = shortest_path(navmesh, position, goal)
+    waypoints = shortest_path(navmesh, position, goal, agent_radius)
     if waypoints is None:
         return None
 
@@ -375,6 +414,7 @@ def path_deviation(
     navmesh: NavMesh,
     position: NDArray[np.float64],
     goal: NDArray[np.float64],
+    agent_radius: float = 0.0,
 ) -> float | None:
     """Compute how much longer the shortest walkable path is vs. the straight line.
 
@@ -382,9 +422,14 @@ def path_deviation(
     - 0.0 means the shortest path IS the straight line (no obstacles in the way).
     - >0 means obstacles force a detour.
 
+    Parameters
+    ----------
+    agent_radius : float
+        Clearance distance from wall vertices (see :func:`shortest_path`).
+
     Returns None if no path exists.
     """
-    waypoints = shortest_path(navmesh, position, goal)
+    waypoints = shortest_path(navmesh, position, goal, agent_radius)
     if waypoints is None:
         return None
 
@@ -393,8 +438,7 @@ def path_deviation(
         return 0.0
 
     path_length = sum(
-        float(np.linalg.norm(waypoints[i + 1] - waypoints[i]))
-        for i in range(len(waypoints) - 1)
+        float(np.linalg.norm(waypoints[i + 1] - waypoints[i])) for i in range(len(waypoints) - 1)
     )
 
     return (path_length / euclidean) - 1.0

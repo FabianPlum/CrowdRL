@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from shapely.geometry import Polygon
 
 from crowdrl_core.world_state import WorldState
 
