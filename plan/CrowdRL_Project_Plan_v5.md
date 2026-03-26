@@ -324,25 +324,30 @@ New modules implemented (86 tests, 100% pass):
 - [ ] External geometry importer (IAS-7 test geometries) — NOT blocking training
 - [ ] Tier 3 reward (distributional style matching from PeTrack data) — Phase III
 
-**crowdrl-train (Step 3) — not started:**
-- [ ] MAPPO training loop (PPO with parameter sharing)
-- [ ] Policy network architecture (Actor-Critic MLP)
-- [ ] Curriculum manager (tier/density scheduling)
-- [ ] ONNX export pipeline
-- [ ] Training logging (W&B or TensorBoard)
+**crowdrl-train (Step 3) — complete:**
+- [x] MAPPO training loop (PPO with parameter sharing)
+- [x] Policy network architecture (separate Actor-Critic MLPs)
+- [x] Observation + reward normalization (Welford's running stats)
+- [x] Rollout buffer with per-agent GAE (variable agent counts)
+- [x] Curriculum manager (success-rate-driven phase advancement)
+- [x] ONNX export pipeline (actor + frozen normalizer)
+- [x] Training logging (TensorBoard)
+- [x] Checkpointing (save/load full training state)
+- [x] CLI entry point (`crowdrl-train`)
 
 **crowdrl-jupedsim (Step 4) — not started:**
 - [ ] LearnedPolicyModel adapter
 - [ ] ONNX runtime wrapper
 - [ ] Orientation state tracking (Strategy A)
 
-### Test suite: 205 tests total
+### Test suite: 266 tests total
 
 | Package | Tests | Pass rate |
 |---------|-------|-----------|
 | crowdrl-core | 119 | 100% |
 | crowdrl-env | 86 | 100% |
-| **Total** | **205** | **100%** |
+| crowdrl-train | 61 | 100% |
+| **Total** | **266** | **100%** |
 
 ### Example notebooks
 
@@ -351,5 +356,45 @@ New modules implemented (86 tests, 100% pass):
 | 01 | Geometry and Navmesh | Complete |
 | 02 | Sensing and Observations | Complete |
 | 03 | Mini Simulation | Complete |
-| 04 | Gymnasium Environment | New — demos CrowdEnv reset/step, multi-tier, reward analysis |
+| 04 | Gymnasium Environment | Complete — demos CrowdEnv reset/step, multi-tier, reward analysis |
+| 05 | MAPPO Training | New — networks, buffer, GAE, PPO update, curriculum, mini training run |
+
+## 2026-03-26 — Step 3 complete: crowdrl-train package
+
+Implemented the full MAPPO training pipeline (9 modules, 61 tests, 100% pass rate).
+
+### New modules
+
+| Module | Purpose |
+|--------|---------|
+| `config.py` | Frozen dataclasses for all hyperparameters (NetworkConfig, PPOConfig, CurriculumConfig, TrainConfig) with JSON serialisation |
+| `networks.py` | Separate Actor (diagonal Gaussian) + Critic MLPs with numpy-based orthogonal init (avoids Windows MKL crash) |
+| `normalizer.py` | RunningNormalizer (Welford's algorithm) + RewardNormalizer (divide by running std of returns) |
+| `buffer.py` | RolloutBuffer storing variable-agent-count timesteps, per-agent GAE with mid-episode termination, FlatBatch for PPO |
+| `mappo.py` | MAPPOUpdater: clipped surrogate loss, MSE value loss, separate actor/critic optimizers, KL early stopping, linear LR decay |
+| `curriculum.py` | CurriculumManager: rolling goal rate tracking, phase advancement, env config generation |
+| `logger.py` | TensorBoard + console logging backends |
+| `export.py` | ONNX export (actor + frozen normalizer) with verification against PyTorch |
+| `train.py` | Main training loop + checkpointing + CLI entry point |
+
+### Key design decisions (literature-grounded)
+
+- **Full-batch PPO** (n_minibatches=1): Yu et al. (2022) — "Avoid splitting data into mini-batches" for MARL
+- **No value loss clipping**: Andrychowicz et al. (2021) — "hurts regardless of threshold"
+- **Separate actor/critic**: Andrychowicz et al. (2021) — outperformed shared trunk
+- **tanh activation**: Andrychowicz et al. (2021) — beat ReLU on 4/5 continuous control envs
+- **Gradient clip 10.0**: Yu et al. (2022) — more permissive for multi-agent
+- **Welford's running normalisation**: Andrychowicz et al. (2021) — "Always use observation normalisation"
+
+### Windows compatibility
+
+- `torch.nn.init.orthogonal_` crashes via LAPACK/MKL access violation → replaced with numpy QR-based init
+- PyTorch backward pass crashes inside pytest process → PPO update tests run as subprocesses
+
+### What remains before deployment (Step 4):
+
+- crowdrl-jupedsim package (ONNX runtime adapter for JuPedSim)
+- Large-scale training runs (10M+ timesteps)
+- Tier 3 reward (distributional style matching)
+- Geometry Tiers 3-5
 
