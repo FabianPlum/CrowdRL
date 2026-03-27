@@ -5,6 +5,9 @@ Social sensing returns K nearest neighbours' relative state.
 
 Both operate on WorldState — agnostic to whether state comes from
 the training environment or from JuPedSim.
+
+Provides both per-agent functions (for deployment) and batch functions
+(for training) that process all agents in vectorized numpy operations.
 """
 
 from __future__ import annotations
@@ -147,6 +150,218 @@ def cast_rays(
     return readings
 
 
+def cast_rays_batch(
+    world: WorldState,
+    agent_indices: NDArray[np.intp],
+    config: RaycastConfig,
+) -> NDArray[np.float64]:
+    """Cast rays for multiple agents in a single vectorized operation.
+
+    Parameters
+    ----------
+    world : WorldState
+    agent_indices : (M,) array of agent indices to sense for
+    config : RaycastConfig
+
+    Returns
+    -------
+    readings : (M, n_rays) or (M, n_rays, 2) array
+    """
+    M = len(agent_indices)
+    R = config.n_rays
+    max_range = config.max_range
+    fov_rad = np.radians(config.fov_deg)
+
+    # Compute ray angles for all agents: (M, R)
+    head_angles = world.head_orientations[agent_indices]  # (M,)
+    start_angles = head_angles - fov_rad / 2.0
+
+    if R == 1:
+        ray_angles = head_angles[:, np.newaxis]  # (M, 1)
+    else:
+        # (M, R): each row is linspace from start to start+fov
+        t_vals = np.linspace(0.0, 1.0, R)
+        ray_angles = start_angles[:, np.newaxis] + fov_rad * t_vals[np.newaxis, :]
+
+    # Ray directions: (M, R, 2)
+    ray_dirs = np.stack([np.cos(ray_angles), np.sin(ray_angles)], axis=-1)
+
+    # Origins: (M, 1, 2) for broadcasting
+    origins = world.positions[agent_indices][:, np.newaxis, :]  # (M, 1, 2)
+
+    # Initialize best distances to max_range
+    best_t = np.full((M, R), max_range, dtype=np.float64)
+
+    if config.two_channel:
+        best_hit_type = np.full((M, R), HIT_NONE, dtype=np.float64)
+
+    # --- Ray-wall segment intersections (vectorized) ---
+    if world.wall_segments is not None and len(world.wall_segments) > 0:
+        seg_starts = np.array([s[0] for s in world.wall_segments])  # (W, 2)
+        seg_ends = np.array([s[1] for s in world.wall_segments])  # (W, 2)
+        seg_d = seg_ends - seg_starts  # (W, 2)
+
+        # Broadcast: origins (M, 1, 1, 2), seg_starts (1, 1, W, 2)
+        # ray_dirs (M, R, 1, 2), seg_d (1, 1, W, 2)
+        o = origins[:, :, np.newaxis, :]  # (M, 1, 1, 2) → broadcast to (M, R, W, 2)
+        rd = ray_dirs[:, :, np.newaxis, :]  # (M, R, 1, 2)
+        ss = seg_starts[np.newaxis, np.newaxis, :, :]  # (1, 1, W, 2)
+        sd = seg_d[np.newaxis, np.newaxis, :, :]  # (1, 1, W, 2)
+
+        # denom = ray_dir.x * seg_d.y - ray_dir.y * seg_d.x
+        denom = rd[..., 0] * sd[..., 1] - rd[..., 1] * sd[..., 0]  # (M, R, W)
+
+        # diff = seg_start - origin
+        diff = ss - o  # (M, R, W, 2) via broadcast from (M, 1, 1, 2)
+
+        t_num = diff[..., 0] * sd[..., 1] - diff[..., 1] * sd[..., 0]
+        u_num = diff[..., 0] * rd[..., 1] - diff[..., 1] * rd[..., 0]
+
+        # Avoid division by zero
+        safe_denom = np.where(np.abs(denom) < 1e-12, 1.0, denom)
+        t_param = t_num / safe_denom
+        u_param = u_num / safe_denom
+
+        # Valid hits: t > eps, 0 <= u <= 1, and not parallel
+        valid = (np.abs(denom) >= 1e-12) & (t_param > 1e-8) & (u_param >= 0.0) & (u_param <= 1.0)
+
+        # Set invalid to max_range so they don't win the min
+        t_param = np.where(valid, t_param, max_range + 1.0)
+
+        # Best wall hit per ray: (M, R)
+        wall_best_t = t_param.min(axis=-1)
+
+        hit_wall = wall_best_t < best_t
+        best_t = np.minimum(best_t, wall_best_t)
+
+        if config.two_channel:
+            best_hit_type = np.where(hit_wall, HIT_WALL, best_hit_type)
+
+    # --- Ray-agent ellipse intersections (vectorized) ---
+    n_agents = world.n_agents
+    if n_agents > 1:
+        # Determine which agents to test as targets
+        if world.active_mask is not None:
+            target_mask = world.active_mask.copy()
+        else:
+            target_mask = np.ones(n_agents, dtype=np.bool_)
+
+        target_idx = np.where(target_mask)[0]
+        T = len(target_idx)
+
+        if T > 0:
+            target_pos = world.positions[target_idx]  # (T, 2)
+            target_widths = world.shoulder_widths[target_idx]  # (T,)
+            target_depths = world.chest_depths[target_idx]  # (T,)
+            target_angles = world.torso_orientations[target_idx]  # (T,)
+
+            # For each sensing agent, exclude self from targets
+            # Build self-exclusion mask: (M, T) — True means "test this target"
+            self_exclude = agent_indices[:, np.newaxis] != target_idx[np.newaxis, :]
+
+            # Distance pre-filter: only test agents within max_range
+            agent_origins = world.positions[agent_indices]  # (M, 2)
+            dist_to_target = np.sqrt(
+                np.sum(
+                    (agent_origins[:, np.newaxis, :] - target_pos[np.newaxis, :, :]) ** 2, axis=-1
+                )
+            )  # (M, T)
+            in_range = dist_to_target < (
+                max_range + np.maximum(target_widths, target_depths)[np.newaxis, :]
+            )
+            test_mask = self_exclude & in_range  # (M, T)
+
+            # Transform all ray origins into each target ellipse's local frame
+            # and solve the quadratic for all (agent, ray, target) combinations
+
+            cos_t = np.cos(-target_angles)  # (T,)
+            sin_t = np.sin(-target_angles)  # (T,)
+
+            # Origin relative to ellipse centre: (M, T, 2)
+            rel_origin = agent_origins[:, np.newaxis, :] - target_pos[np.newaxis, :, :]
+
+            # Rotate into ellipse-local frame: (M, T, 2)
+            rot_ox = (
+                cos_t[np.newaxis, :] * rel_origin[..., 0]
+                - sin_t[np.newaxis, :] * rel_origin[..., 1]
+            )
+            rot_oy = (
+                sin_t[np.newaxis, :] * rel_origin[..., 0]
+                + cos_t[np.newaxis, :] * rel_origin[..., 1]
+            )
+
+            # Scale to unit circle: (M, T, 2)
+            origin_sx = rot_ox / target_depths[np.newaxis, :]
+            origin_sy = rot_oy / target_widths[np.newaxis, :]
+
+            # Rotate ray directions into ellipse-local frame: (M, R, T, 2)
+            # ray_dirs is (M, R, 2), target rotation params are (T,)
+            rd_x = ray_dirs[..., 0]  # (M, R)
+            rd_y = ray_dirs[..., 1]  # (M, R)
+
+            rot_dx = (
+                cos_t[np.newaxis, np.newaxis, :] * rd_x[:, :, np.newaxis]
+                - sin_t[np.newaxis, np.newaxis, :] * rd_y[:, :, np.newaxis]
+            )  # (M, R, T)
+            rot_dy = (
+                sin_t[np.newaxis, np.newaxis, :] * rd_x[:, :, np.newaxis]
+                + cos_t[np.newaxis, np.newaxis, :] * rd_y[:, :, np.newaxis]
+            )  # (M, R, T)
+
+            # Scale ray directions: (M, R, T)
+            dir_sx = rot_dx / target_depths[np.newaxis, np.newaxis, :]
+            dir_sy = rot_dy / target_widths[np.newaxis, np.newaxis, :]
+
+            # Quadratic coefficients: (M, R, T)
+            # origin_s is (M, T) — broadcast to (M, R, T) by adding ray axis
+            o_sx = origin_sx[:, np.newaxis, :]  # (M, 1, T)
+            o_sy = origin_sy[:, np.newaxis, :]  # (M, 1, T)
+
+            qa = dir_sx**2 + dir_sy**2
+            qb = 2.0 * (o_sx * dir_sx + o_sy * dir_sy)
+            qc = o_sx**2 + o_sy**2 - 1.0
+
+            discriminant = qb**2 - 4.0 * qa * qc
+
+            # Solve for both roots
+            sqrt_disc = np.sqrt(np.maximum(discriminant, 0.0))
+            safe_qa = np.where(np.abs(qa) < 1e-15, 1.0, qa)
+            t1 = (-qb - sqrt_disc) / (2.0 * safe_qa)
+            t2 = (-qb + sqrt_disc) / (2.0 * safe_qa)
+
+            eps = 1e-8
+            # Pick nearest positive root
+            t1_valid = (discriminant >= 0) & (t1 > eps)
+            t2_valid = (discriminant >= 0) & (t2 > eps)
+
+            # Start with t1 where valid, else t2, else large value
+            agent_t = np.where(t1_valid, t1, np.where(t2_valid, t2, max_range + 1.0))
+
+            # Apply self-exclusion and range masks: (M, R, T)
+            test_mask_3d = test_mask[:, np.newaxis, :]  # (M, 1, T) → broadcast to (M, R, T)
+            agent_t = np.where(test_mask_3d, agent_t, max_range + 1.0)
+
+            # Best agent hit per ray: (M, R)
+            agent_best_t = agent_t.min(axis=-1)
+
+            hit_agent = agent_best_t < best_t
+            best_t = np.minimum(best_t, agent_best_t)
+
+            if config.two_channel:
+                best_hit_type = np.where(hit_agent, HIT_AGENT, best_hit_type)
+
+    # Normalize
+    normalised = np.minimum(best_t / max_range, 1.0)
+
+    if config.two_channel:
+        readings = np.stack([normalised, best_hit_type], axis=-1)  # (M, R, 2)
+        # No hit → HIT_NONE
+        readings[..., 1] = np.where(normalised < 1.0, readings[..., 1], HIT_NONE)
+        return readings
+    else:
+        return normalised
+
+
 def knn_social(
     world: WorldState,
     agent_idx: int,
@@ -211,5 +426,127 @@ def knn_social(
         social[i, 4] = rel_orient
         social[i, 5] = world.shoulder_widths[j]
         social[i, 6] = world.chest_depths[j]
+
+    return social
+
+
+def knn_social_batch(
+    world: WorldState,
+    agent_indices: NDArray[np.intp],
+    k: int = 8,
+) -> NDArray[np.float64]:
+    """Batch K-nearest-neighbour social sensing for multiple agents.
+
+    Parameters
+    ----------
+    world : WorldState
+    agent_indices : (M,) array of agent indices
+    k : int
+
+    Returns
+    -------
+    social : (M, K, 7) array
+    """
+    M = len(agent_indices)
+    n = world.n_agents
+
+    if n < 2 or M == 0:
+        return np.zeros((M, k, 7), dtype=np.float64)
+
+    # Determine active agents for neighbor consideration
+    if world.active_mask is not None:
+        active_mask = world.active_mask
+    else:
+        active_mask = np.ones(n, dtype=np.bool_)
+
+    ego_pos = world.positions[agent_indices]  # (M, 2)
+    ego_vel = world.velocities[agent_indices]  # (M, 2)
+    ego_heading = world.torso_orientations[agent_indices]  # (M,)
+
+    # Pairwise distances from each ego to all agents: (M, N)
+    all_pos = world.positions  # (N, 2)
+    dist_sq = np.sum((ego_pos[:, np.newaxis, :] - all_pos[np.newaxis, :, :]) ** 2, axis=-1)
+
+    # Mask out self and inactive agents
+    self_mask = agent_indices[:, np.newaxis] == np.arange(n)[np.newaxis, :]
+    inactive_mask = ~active_mask[np.newaxis, :]
+    dist_sq = np.where(self_mask | inactive_mask, np.inf, dist_sq)
+
+    # Find K nearest using argpartition (O(N) per row vs O(N log N) for sort)
+    actual_k = min(k, n - 1)
+    if actual_k <= 0:
+        return np.zeros((M, k, 7), dtype=np.float64)
+
+    # argpartition: get indices of K smallest distances
+    if actual_k < n:
+        knn_idx = np.argpartition(dist_sq, actual_k, axis=1)[:, :actual_k]  # (M, K)
+        # Sort the K nearest by distance for consistent ordering
+        knn_dists = np.take_along_axis(dist_sq, knn_idx, axis=1)
+        sort_order = np.argsort(knn_dists, axis=1)
+        knn_idx = np.take_along_axis(knn_idx, sort_order, axis=1)
+    else:
+        knn_idx = np.argsort(dist_sq, axis=1)[:, :actual_k]
+
+    # Build rotation matrices for ego frames: (M, 2, 2)
+    cos_h = np.cos(-ego_heading)
+    sin_h = np.sin(-ego_heading)
+
+    # Gather neighbor data using fancy indexing: (M, K, ...)
+    # Pad knn_idx to k columns if actual_k < k
+    if actual_k < k:
+        pad_idx = np.zeros((M, k - actual_k), dtype=np.intp)
+        knn_idx_full = np.concatenate([knn_idx, pad_idx], axis=1)
+        valid_mask = np.zeros((M, k), dtype=np.bool_)
+        valid_mask[:, :actual_k] = True
+        # Also check that distance is not inf
+        knn_dists_full = np.take_along_axis(dist_sq, knn_idx_full, axis=1)
+        valid_mask &= np.isfinite(knn_dists_full)
+    else:
+        knn_idx_full = knn_idx
+        knn_dists_full = np.take_along_axis(dist_sq, knn_idx_full, axis=1)
+        valid_mask = np.isfinite(knn_dists_full)
+
+    # Gather neighbor positions, velocities, orientations, body dims
+    nb_pos = world.positions[knn_idx_full]  # (M, K, 2)
+    nb_vel = world.velocities[knn_idx_full]  # (M, K, 2)
+    nb_orient = world.torso_orientations[knn_idx_full]  # (M, K)
+    nb_widths = world.shoulder_widths[knn_idx_full]  # (M, K)
+    nb_depths = world.chest_depths[knn_idx_full]  # (M, K)
+
+    # Relative positions in global frame: (M, K, 2)
+    rel_pos_global = nb_pos - ego_pos[:, np.newaxis, :]
+    rel_vel_global = nb_vel - ego_vel[:, np.newaxis, :]
+
+    # Rotate to ego frame: (M, K, 2)
+    rel_pos_x = (
+        cos_h[:, np.newaxis] * rel_pos_global[..., 0]
+        - sin_h[:, np.newaxis] * rel_pos_global[..., 1]
+    )
+    rel_pos_y = (
+        sin_h[:, np.newaxis] * rel_pos_global[..., 0]
+        + cos_h[:, np.newaxis] * rel_pos_global[..., 1]
+    )
+
+    rel_vel_x = (
+        cos_h[:, np.newaxis] * rel_vel_global[..., 0]
+        - sin_h[:, np.newaxis] * rel_vel_global[..., 1]
+    )
+    rel_vel_y = (
+        sin_h[:, np.newaxis] * rel_vel_global[..., 0]
+        + cos_h[:, np.newaxis] * rel_vel_global[..., 1]
+    )
+
+    # Relative orientation normalized to [-pi, pi]
+    rel_orient = (nb_orient - ego_heading[:, np.newaxis] + np.pi) % (2 * np.pi) - np.pi
+
+    # Assemble: (M, K, 7)
+    social = np.zeros((M, k, 7), dtype=np.float64)
+    social[..., 0] = np.where(valid_mask, rel_pos_x, 0.0)
+    social[..., 1] = np.where(valid_mask, rel_pos_y, 0.0)
+    social[..., 2] = np.where(valid_mask, rel_vel_x, 0.0)
+    social[..., 3] = np.where(valid_mask, rel_vel_y, 0.0)
+    social[..., 4] = np.where(valid_mask, rel_orient, 0.0)
+    social[..., 5] = np.where(valid_mask, nb_widths, 0.0)
+    social[..., 6] = np.where(valid_mask, nb_depths, 0.0)
 
     return social
