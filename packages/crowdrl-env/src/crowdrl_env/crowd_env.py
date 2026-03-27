@@ -62,15 +62,25 @@ class CrowdEnvConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
 
     # Physics
-    dt: float = 0.1
+    dt: float = 0.01
     """Timestep duration (seconds)."""
     contact_stiffness: float = 2000.0
     contact_damping: float = 50.0
     velocity_damping: float = 0.8
     """Velocity damping factor: v_new = damping * v_desired + (1-damping) * v_old."""
 
+    max_speed_multiplier: float = 2.0
+    """Velocity magnitude clamp as a multiple of action.max_speed.
+
+    After contact forces are applied, agent speeds are clamped to
+    ``max_speed_multiplier * action.max_speed``.  This prevents contact
+    forces from launching agents at unrealistic velocities while still
+    allowing brief bursts above the desired-speed ceiling (e.g. being
+    pushed by a crowd).
+    """
+
     # Episode
-    max_steps: int = 500
+    max_steps: int = 5000
     """Maximum timesteps per episode."""
 
 
@@ -230,6 +240,14 @@ class CrowdEnv(gym.Env):
         # --- 4. Physics integration (semi-implicit Euler) ---
         # Apply contact forces as velocity impulse — vectorized
         self._world.velocities[mask] += contact_forces[mask] * cfg.dt
+
+        # Clamp velocity magnitudes to prevent contact-force blow-up
+        max_vel = cfg.max_speed_multiplier * cfg.action.max_speed
+        speeds = np.linalg.norm(self._world.velocities[mask], axis=1)
+        too_fast = speeds > max_vel
+        if np.any(too_fast):
+            scale = np.where(too_fast, max_vel / np.maximum(speeds, 1e-10), 1.0)
+            self._world.velocities[mask] *= scale[:, np.newaxis]
 
         # Position update
         self._world.positions[self._active_mask] += (

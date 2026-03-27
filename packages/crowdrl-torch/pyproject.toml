@@ -1,0 +1,28 @@
+[project]
+name = "crowdrl-torch"
+version = "0.1.0"
+description = "PyTorch-accelerated GPU environments for CrowdRL training"
+requires-python = ">=3.12"
+dependencies = [
+    "crowdrl-core",
+    "crowdrl-env",
+    "torch>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.uv.sources]
+crowdrl-core = { workspace = true }
+crowdrl-env = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crowdrl_torch"]
