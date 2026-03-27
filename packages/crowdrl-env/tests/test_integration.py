@@ -217,9 +217,8 @@ class TestFullPipelineTier2:
             world.torso_orientations,
             world.head_orientations,
         )
-        assert len(results) == 5
-        for r in results:
-            assert np.all(np.isfinite(r.desired_velocity))
+        assert results.desired_velocities.shape == (5, 2)
+        assert np.all(np.isfinite(results.desired_velocities))
 
 
 class TestObservationConsistency:
@@ -348,12 +347,11 @@ class TestActionCycleIntegration:
             action_config,
         )
 
-        # Update state
+        # Update state (vectorized)
         dt = 0.1
-        for i, r in enumerate(results):
-            world.positions[i] += r.desired_velocity * dt
-            world.torso_orientations[i] = r.new_torso_orientation
-            world.head_orientations[i] = r.new_head_orientation
+        world.positions += results.desired_velocities * dt
+        world.torso_orientations[:] = results.new_torso_orientations
+        world.head_orientations[:] = results.new_head_orientations
 
         # Observe again — should still be finite
         obs2 = build_observations_batch(world, obs_config)
@@ -391,11 +389,10 @@ class TestActionCycleIntegration:
 
             forces = compute_contact_forces(world)
 
-            for i, r in enumerate(results):
-                world.velocities[i] = r.desired_velocity + forces[i] * dt
-                world.positions[i] += world.velocities[i] * dt
-                world.torso_orientations[i] = r.new_torso_orientation
-                world.head_orientations[i] = r.new_head_orientation
+            world.velocities = results.desired_velocities + forces * dt
+            world.positions += world.velocities * dt
+            world.torso_orientations[:] = results.new_torso_orientations
+            world.head_orientations[:] = results.new_head_orientations
 
         # Final state should still be finite
         assert np.all(np.isfinite(world.positions))
