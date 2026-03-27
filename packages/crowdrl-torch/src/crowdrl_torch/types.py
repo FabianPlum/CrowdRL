@@ -58,7 +58,9 @@ class TorchWorldState:
 
     def clone(self) -> "TorchWorldState":
         """Return a copy with all tensors cloned (breaks CUDA graph aliasing)."""
-        return TorchWorldState(**{f.name: getattr(self, f.name).clone() for f in self.__dataclass_fields__.values()})
+        return TorchWorldState(
+            **{f.name: getattr(self, f.name).clone() for f in self.__dataclass_fields__.values()}
+        )
 
 
 class EnvConfig(NamedTuple):
@@ -153,43 +155,25 @@ def make_initial_state(
     return TorchWorldState(
         positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
         velocities=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
-        torso_orientations=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
-        head_orientations=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
-        shoulder_widths=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
+        torso_orientations=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
+        head_orientations=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
+        shoulder_widths=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         chest_depths=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
-        goal_positions=torch.zeros(
-            (n_envs, max_agents, 2), dtype=torch.float32, device=device
-        ),
-        preferred_speeds=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
+        goal_positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
+        preferred_speeds=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         active_mask=torch.zeros((n_envs, max_agents), dtype=torch.bool, device=device),
-        cumulative_terminated=torch.zeros(
-            (n_envs, max_agents), dtype=torch.bool, device=device
-        ),
+        cumulative_terminated=torch.zeros((n_envs, max_agents), dtype=torch.bool, device=device),
         wall_segments=torch.zeros(
             (n_envs, max_segments, 2, 2), dtype=torch.float32, device=device
         ),
         n_segments=torch.zeros(n_envs, dtype=torch.int32, device=device),
-        prev_velocities=torch.zeros(
-            (n_envs, max_agents, 2), dtype=torch.float32, device=device
-        ),
-        prev_goal_distances=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
+        prev_velocities=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
+        prev_goal_distances=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         prev_accelerations=torch.zeros(
             (n_envs, max_agents, 2), dtype=torch.float32, device=device
         ),
         prev_headings=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
-        prev_heading_changes=torch.zeros(
-            (n_envs, max_agents), dtype=torch.float32, device=device
-        ),
+        prev_heading_changes=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         n_agents=torch.zeros(n_envs, dtype=torch.int32, device=device),
         step_count=torch.zeros(n_envs, dtype=torch.int32, device=device),
     )

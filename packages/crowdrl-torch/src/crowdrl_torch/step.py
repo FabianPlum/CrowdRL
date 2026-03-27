@@ -62,12 +62,8 @@ def batched_step(
         + (1.0 - config.velocity_damping) * state.velocities,
         state.velocities,
     )
-    new_torso_orientations = torch.where(
-        state.active_mask, new_torsos, state.torso_orientations
-    )
-    new_head_orientations = torch.where(
-        state.active_mask, new_heads, state.head_orientations
-    )
+    new_torso_orientations = torch.where(state.active_mask, new_torsos, state.torso_orientations)
+    new_head_orientations = torch.where(state.active_mask, new_heads, state.head_orientations)
 
     # --- 3. Collision detection ---
     overlap_matrix, collision_mask = detect_collisions_pairwise(
@@ -102,7 +98,9 @@ def batched_step(
     # Clamp velocity magnitudes to prevent contact-force blow-up
     max_vel = config.max_speed_multiplier * config.max_speed
     speeds = (new_velocities**2).sum(dim=-1, keepdim=True).sqrt()
-    scale = torch.where(speeds > max_vel, max_vel / torch.clamp(speeds, min=1e-10), torch.ones_like(speeds))
+    scale = torch.where(
+        speeds > max_vel, max_vel / torch.clamp(speeds, min=1e-10), torch.ones_like(speeds)
+    )
     new_velocities = new_velocities * scale
 
     # --- 5. Position update ---
@@ -141,7 +139,9 @@ def batched_step(
     new_active_mask = state.active_mask & ~newly_done
 
     # Zero velocities for inactive agents
-    new_velocities = torch.where(new_active_mask.unsqueeze(-1), new_velocities, torch.zeros_like(new_velocities))
+    new_velocities = torch.where(
+        new_active_mask.unsqueeze(-1), new_velocities, torch.zeros_like(new_velocities)
+    )
 
     # --- 9. Termination / truncation ---
     terminated = reached_goal

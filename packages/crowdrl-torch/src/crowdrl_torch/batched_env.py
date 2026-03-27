@@ -177,15 +177,16 @@ class BatchedTorchEnv:
             return False
 
         actions = torch.zeros(
-            self.n_envs, self.config.max_agents, 4,
-            device=self.device, dtype=torch.float32,
+            self.n_envs,
+            self.config.max_agents,
+            4,
+            device=self.device,
+            dtype=torch.float32,
         )
         try:
             for _ in range(n_steps):
                 torch.compiler.cudagraph_mark_step_begin()
-                self.states, _, _, _, _ = self._step_fn(
-                    self.states, actions, self.config
-                )
+                self.states, _, _, _, _ = self._step_fn(self.states, actions, self.config)
                 self.states = self.states.clone()
             return True
         except Exception as e:
@@ -240,9 +241,7 @@ class BatchedTorchEnv:
             "shoulder_widths": torch.tensor(
                 data["shoulder_widths"], dtype=torch.float32, device=dev
             ),
-            "chest_depths": torch.tensor(
-                data["chest_depths"], dtype=torch.float32, device=dev
-            ),
+            "chest_depths": torch.tensor(data["chest_depths"], dtype=torch.float32, device=dev),
             "goal_positions": torch.tensor(
                 data["goal_positions"], dtype=torch.float32, device=dev
             ),
@@ -250,9 +249,7 @@ class BatchedTorchEnv:
                 data["preferred_speeds"], dtype=torch.float32, device=dev
             ),
             "active_mask": torch.tensor(data["active_mask"], dtype=torch.bool, device=dev),
-            "wall_segments": torch.tensor(
-                data["wall_segments"], dtype=torch.float32, device=dev
-            ),
+            "wall_segments": torch.tensor(data["wall_segments"], dtype=torch.float32, device=dev),
             "n_segments": torch.tensor(data["n_segments"], dtype=torch.int32, device=dev),
             "n_agents": torch.tensor(data["n_agents"], dtype=torch.int32, device=dev),
             "goal_distances": torch.tensor(

@@ -53,7 +53,9 @@ def build_observations(
     goal_dist = (goal_diff**2).sum(dim=-1).sqrt()  # (E, N)
     safe_dist = torch.where(goal_dist > 1e-10, goal_dist, torch.ones_like(goal_dist))
     goal_unit = goal_diff / safe_dist.unsqueeze(-1)
-    goal_unit = torch.where((goal_dist > 1e-10).unsqueeze(-1), goal_unit, torch.zeros_like(goal_unit))
+    goal_unit = torch.where(
+        (goal_dist > 1e-10).unsqueeze(-1), goal_unit, torch.zeros_like(goal_unit)
+    )
 
     goal_dir_x = cos_h * goal_unit[..., 0] - sin_h * goal_unit[..., 1]
     goal_dir_y = sin_h * goal_unit[..., 0] + cos_h * goal_unit[..., 1]

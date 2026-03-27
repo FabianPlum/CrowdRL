@@ -506,7 +506,9 @@ def collect_episode_frames(
     torso_list = [world.torso_orientations.copy()]
     head_list = [world.head_orientations.copy()]
     active_list = [
-        world.active_mask.copy() if world.active_mask is not None else np.ones(n_agents, dtype=bool)
+        world.active_mask.copy()
+        if world.active_mask is not None
+        else np.ones(n_agents, dtype=bool)
     ]
     reached_goal = np.zeros(n_agents, dtype=bool)
 

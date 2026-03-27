@@ -134,8 +134,10 @@ class TorchRunningNormalizer:
     ) -> "TorchRunningNormalizer":
         """Create from an existing CPU RunningNormalizer."""
         tn = TorchRunningNormalizer(
-            shape=cpu_norm.mean.shape, device=device,
-            clip=cpu_norm.clip, epsilon=cpu_norm.epsilon,
+            shape=cpu_norm.mean.shape,
+            device=device,
+            clip=cpu_norm.clip,
+            epsilon=cpu_norm.epsilon,
         )
         tn.load_state_dict(cpu_norm.state_dict())
         return tn

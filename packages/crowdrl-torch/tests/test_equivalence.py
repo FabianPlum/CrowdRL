@@ -136,9 +136,7 @@ class TestActionEquivalence:
         npt.assert_allclose(
             torch_vel[0].numpy(), np_result.desired_velocities, atol=ATOL, rtol=RTOL
         )
-        npt.assert_allclose(
-            torch_h[0].numpy(), np_result.new_headings, atol=ATOL, rtol=RTOL
-        )
+        npt.assert_allclose(torch_h[0].numpy(), np_result.new_headings, atol=ATOL, rtol=RTOL)
         npt.assert_allclose(
             torch_t[0].numpy(), np_result.new_torso_orientations, atol=ATOL, rtol=RTOL
         )
@@ -260,9 +258,7 @@ class TestSensingEquivalence:
         np_rays = cast_rays_batch(world, agent_indices, ray_config)
 
         # PyTorch
-        config = EnvConfig(
-            max_agents=6, max_segments=128, n_rays=16, fov_deg=200.0, max_range=5.0
-        )
+        config = EnvConfig(max_agents=6, max_segments=128, n_rays=16, fov_deg=200.0, max_range=5.0)
         td = _world_to_torch(world, config)
         torch_rays = torch_cast_rays(
             td["positions"],

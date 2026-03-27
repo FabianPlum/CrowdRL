@@ -52,9 +52,7 @@ def detect_collisions_pairwise(
     dy_a = sin_a.unsqueeze(2) * diff[..., 0] + cos_a.unsqueeze(2) * diff[..., 1]
 
     # Algebraic distance in A's ellipse: (E, N, N)
-    dist_a = (dx_a / chest_depths.unsqueeze(2)) ** 2 + (
-        dy_a / shoulder_widths.unsqueeze(2)
-    ) ** 2
+    dist_a = (dx_a / chest_depths.unsqueeze(2)) ** 2 + (dy_a / shoulder_widths.unsqueeze(2)) ** 2
 
     # --- Check A centre in B's ellipse frame ---
     neg_diff = -diff
@@ -64,18 +62,20 @@ def detect_collisions_pairwise(
     dx_b = cos_b.unsqueeze(1) * neg_diff[..., 0] - sin_b.unsqueeze(1) * neg_diff[..., 1]
     dy_b = sin_b.unsqueeze(1) * neg_diff[..., 0] + cos_b.unsqueeze(1) * neg_diff[..., 1]
 
-    dist_b = (dx_b / chest_depths.unsqueeze(1)) ** 2 + (
-        dy_b / shoulder_widths.unsqueeze(1)
-    ) ** 2
+    dist_b = (dx_b / chest_depths.unsqueeze(1)) ** 2 + (dy_b / shoulder_widths.unsqueeze(1)) ** 2
 
     min_dist = torch.minimum(dist_a, dist_b)
-    overlap_matrix = torch.where(min_dist < 1.0, 1.0 - torch.sqrt(min_dist), torch.zeros_like(min_dist))
+    overlap_matrix = torch.where(
+        min_dist < 1.0, 1.0 - torch.sqrt(min_dist), torch.zeros_like(min_dist)
+    )
 
     # Mask: no self-collision, only active agents
     i_idx = torch.arange(N, device=positions.device)
     self_mask = i_idx.unsqueeze(0) == i_idx.unsqueeze(1)  # (N, N)
     active_pair = active_mask.unsqueeze(2) & active_mask.unsqueeze(1)  # (E, N, N)
-    overlap_matrix = torch.where(self_mask.unsqueeze(0) | ~active_pair, torch.zeros_like(overlap_matrix), overlap_matrix)
+    overlap_matrix = torch.where(
+        self_mask.unsqueeze(0) | ~active_pair, torch.zeros_like(overlap_matrix), overlap_matrix
+    )
 
     # Quick distance pre-filter
     pair_dist_sq = (diff**2).sum(dim=-1)  # (E, N, N)
@@ -131,7 +131,9 @@ def compute_contact_forces(
     # Force magnitude per pair
     has_overlap = overlap_matrix > 0
     force_mag = config.contact_stiffness * overlap_matrix + torch.where(
-        has_overlap, config.contact_damping * torch.clamp(rel_vel_normal, min=0.0), torch.zeros_like(rel_vel_normal)
+        has_overlap,
+        config.contact_damping * torch.clamp(rel_vel_normal, min=0.0),
+        torch.zeros_like(rel_vel_normal),
     )
 
     # Pairwise force vectors: (E, N, N, 2)
@@ -190,9 +192,7 @@ def _compute_wall_repulsion(
     radii = torch.maximum(shoulder_widths, chest_depths)  # (E, N)
 
     # Exponential repulsion: (E, N, S)
-    f_mag = config.wall_strength * torch.exp(
-        (radii.unsqueeze(2) - distances) / config.wall_range
-    )
+    f_mag = config.wall_strength * torch.exp((radii.unsqueeze(2) - distances) / config.wall_range)
 
     # Mask padding segments
     f_mag = torch.where(seg_mask.unsqueeze(1), f_mag, torch.zeros_like(f_mag))

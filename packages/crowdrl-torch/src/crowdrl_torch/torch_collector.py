@@ -124,8 +124,8 @@ class TorchRolloutCollector:
 
             # --- Step all envs on device ---
             actions_gpu = actions_t.reshape(E, N, A)
-            self.env.states, obs_t, rewards_t, terminated_t, truncated_t = (
-                self.env.step(actions_gpu)
+            self.env.states, obs_t, rewards_t, terminated_t, truncated_t = self.env.step(
+                actions_gpu
             )
 
             # --- Single bulk transfer to CPU ---
@@ -143,9 +143,7 @@ class TorchRolloutCollector:
                 # Use mean across all active agents as the scalar signal
                 active_rewards = rewards_np[real_active]
                 if active_rewards.size > 0:
-                    rewards_np = self._normalize_rewards_batched(
-                        rewards_np, dones_np, real_active
-                    )
+                    rewards_np = self._normalize_rewards_batched(rewards_np, dones_np, real_active)
 
             # --- Append padded arrays (one append, no per-env loop) ---
             step_obs.append(obs_norm_np)

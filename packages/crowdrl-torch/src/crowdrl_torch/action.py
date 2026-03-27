@@ -58,9 +58,7 @@ def interpret_actions(
 
     # 4. Head orientation change relative to torso
     new_heads = current_heads + actions[..., 3] * config.max_head_change
-    head_rel_torso = torch.clamp(
-        new_heads - new_torsos, -config.head_limit, config.head_limit
-    )
+    head_rel_torso = torch.clamp(new_heads - new_torsos, -config.head_limit, config.head_limit)
     new_heads = new_torsos + head_rel_torso
 
     # Normalize all angles to [-pi, pi]

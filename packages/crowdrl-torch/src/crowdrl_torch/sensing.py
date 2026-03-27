@@ -179,14 +179,12 @@ def _ray_agent_intersections(
     rd_x = ray_dirs[..., 0]  # (E, N, R)
     rd_y = ray_dirs[..., 1]
 
-    rot_dx = (
-        cos_t[:, None, None, :] * rd_x.unsqueeze(3)
-        - sin_t[:, None, None, :] * rd_y.unsqueeze(3)
-    )  # (E, N, R, N)
-    rot_dy = (
-        sin_t[:, None, None, :] * rd_x.unsqueeze(3)
-        + cos_t[:, None, None, :] * rd_y.unsqueeze(3)
-    )
+    rot_dx = cos_t[:, None, None, :] * rd_x.unsqueeze(3) - sin_t[
+        :, None, None, :
+    ] * rd_y.unsqueeze(3)  # (E, N, R, N)
+    rot_dy = sin_t[:, None, None, :] * rd_x.unsqueeze(3) + cos_t[
+        :, None, None, :
+    ] * rd_y.unsqueeze(3)
 
     dir_sx = rot_dx / chest_depths[:, None, None, :]
     dir_sy = rot_dy / shoulder_widths[:, None, None, :]
@@ -208,7 +206,9 @@ def _ray_agent_intersections(
     eps = 1e-8
     t1_valid = (discriminant >= 0) & (t1 > eps)
     t2_valid = (discriminant >= 0) & (t2 > eps)
-    agent_t = torch.where(t1_valid, t1, torch.where(t2_valid, t2, torch.full_like(t1, max_range + 1.0)))
+    agent_t = torch.where(
+        t1_valid, t1, torch.where(t2_valid, t2, torch.full_like(t1, max_range + 1.0))
+    )
 
     # Self-exclusion mask: (N, N)
     i_idx = torch.arange(N, device=positions.device)
@@ -260,7 +260,11 @@ def knn_social(
     self_mask = i_idx.unsqueeze(0) == i_idx.unsqueeze(1)  # (N, N)
     agent_valid = active_mask & (i_idx.unsqueeze(0) < n_agents.unsqueeze(1))  # (E, N)
     invalid_target = ~agent_valid.unsqueeze(1)  # (E, 1, N) — broadcast over sensor dim
-    dist_sq = torch.where(self_mask.unsqueeze(0) | invalid_target, torch.tensor(float("inf"), device=positions.device), dist_sq)
+    dist_sq = torch.where(
+        self_mask.unsqueeze(0) | invalid_target,
+        torch.tensor(float("inf"), device=positions.device),
+        dist_sq,
+    )
 
     # Find K nearest using topk (negate for bottom-K)
     # topk returns largest; we want smallest, so negate
@@ -292,10 +296,18 @@ def knn_social(
     rel_vel_global = nb_vel - velocities.unsqueeze(2)
 
     # Rotate to ego frame
-    rel_pos_x = cos_h.unsqueeze(2) * rel_pos_global[..., 0] - sin_h.unsqueeze(2) * rel_pos_global[..., 1]
-    rel_pos_y = sin_h.unsqueeze(2) * rel_pos_global[..., 0] + cos_h.unsqueeze(2) * rel_pos_global[..., 1]
-    rel_vel_x = cos_h.unsqueeze(2) * rel_vel_global[..., 0] - sin_h.unsqueeze(2) * rel_vel_global[..., 1]
-    rel_vel_y = sin_h.unsqueeze(2) * rel_vel_global[..., 0] + cos_h.unsqueeze(2) * rel_vel_global[..., 1]
+    rel_pos_x = (
+        cos_h.unsqueeze(2) * rel_pos_global[..., 0] - sin_h.unsqueeze(2) * rel_pos_global[..., 1]
+    )
+    rel_pos_y = (
+        sin_h.unsqueeze(2) * rel_pos_global[..., 0] + cos_h.unsqueeze(2) * rel_pos_global[..., 1]
+    )
+    rel_vel_x = (
+        cos_h.unsqueeze(2) * rel_vel_global[..., 0] - sin_h.unsqueeze(2) * rel_vel_global[..., 1]
+    )
+    rel_vel_y = (
+        sin_h.unsqueeze(2) * rel_vel_global[..., 0] + cos_h.unsqueeze(2) * rel_vel_global[..., 1]
+    )
 
     # Relative orientation
     rel_orient = (nb_orient - ego_heading.unsqueeze(2) + math.pi) % (2 * math.pi) - math.pi

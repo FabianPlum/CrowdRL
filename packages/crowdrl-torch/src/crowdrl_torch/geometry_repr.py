@@ -65,9 +65,7 @@ def prepare_reset_data(
     """
     n_agents = len(positions)
     if n_agents > max_agents:
-        raise ValueError(
-            f"Episode has {n_agents} agents, exceeds MAX_AGENTS={max_agents}."
-        )
+        raise ValueError(f"Episode has {n_agents} agents, exceeds MAX_AGENTS={max_agents}.")
 
     def pad_1d(arr: NDArray, size: int) -> NDArray[np.float32]:
         out = np.zeros(size, dtype=np.float32)

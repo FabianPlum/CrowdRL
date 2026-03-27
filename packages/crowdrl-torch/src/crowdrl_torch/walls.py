@@ -63,7 +63,9 @@ def points_to_segments_nearest(
     # For near-zero distances, use edge perpendicular
     edge_normals = torch.stack([-edges[..., 1], edges[..., 0]], dim=-1)  # (E, S, 2)
     edge_norm_len = (edge_normals**2).sum(dim=-1, keepdim=True).sqrt()
-    safe_edge_len = torch.where(edge_norm_len < 1e-12, torch.ones_like(edge_norm_len), edge_norm_len)
+    safe_edge_len = torch.where(
+        edge_norm_len < 1e-12, torch.ones_like(edge_norm_len), edge_norm_len
+    )
     edge_normals = edge_normals / safe_edge_len
 
     close_mask = distances < 1e-10  # (E, N, S)
@@ -174,7 +176,9 @@ def enforce_wall_boundaries(
 
     # Mask padding segments with large distance
     seg_mask = torch.arange(S, device=wall_segments.device).unsqueeze(0) < n_segments.unsqueeze(1)
-    distances = torch.where(seg_mask.unsqueeze(1), distances, torch.tensor(1e10, device=distances.device))
+    distances = torch.where(
+        seg_mask.unsqueeze(1), distances, torch.tensor(1e10, device=distances.device)
+    )
 
     # Find closest segment per agent
     closest_seg = distances.argmin(dim=2)  # (E, N)
