@@ -21,6 +21,7 @@ members = [
     "packages/crowdrl-core",
     "packages/crowdrl-env",
     "packages/crowdrl-train",
+    "packages/crowdrl-torch",
     "packages/crowdrl-jupedsim",
 ]
 
@@ -28,6 +29,7 @@ members = [
 crowdrl-core = { workspace = true }
 crowdrl-env = { workspace = true }
 crowdrl-train = { workspace = true }
+crowdrl-torch = { workspace = true }
 crowdrl-jupedsim = { workspace = true }
 
 [[tool.uv.index]]
