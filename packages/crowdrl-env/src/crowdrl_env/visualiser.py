@@ -7,6 +7,9 @@ generating figures for papers/documentation.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -24,6 +27,8 @@ if TYPE_CHECKING:
     from crowdrl_core.world_state import NavMesh, WorldState
 
     from crowdrl_env.geometry_generator import GeneratedGeometry
+
+logger = logging.getLogger(__name__)
 
 
 def _polygon_to_patch(polygon: Polygon, **kwargs) -> mpatches.Polygon:
@@ -408,3 +413,290 @@ def visualise_world_state(
 
     ax.set_title(title)
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Episode video rendering
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EpisodeFrames:
+    """Per-frame snapshot data collected during an episode for video rendering.
+
+    All arrays have shape ``(n_frames, n_agents, ...)`` unless noted.
+    """
+
+    positions: NDArray[np.float64]
+    """(n_frames, n_agents, 2)"""
+
+    torso_orientations: NDArray[np.float64]
+    """(n_frames, n_agents)"""
+
+    head_orientations: NDArray[np.float64]
+    """(n_frames, n_agents)"""
+
+    shoulder_widths: NDArray[np.float64]
+    """(n_agents,) — constant across frames."""
+
+    chest_depths: NDArray[np.float64]
+    """(n_agents,) — constant across frames."""
+
+    goal_positions: NDArray[np.float64]
+    """(n_agents, 2) — constant across frames."""
+
+    polygon: Polygon
+    """Walkable polygon for this episode."""
+
+    active_masks: NDArray[np.bool_]
+    """(n_frames, n_agents)"""
+
+    reached_goal: NDArray[np.bool_]
+    """(n_agents,) — whether each agent reached its goal by episode end."""
+
+    dt: float = 0.01
+    """Simulation timestep in seconds (used for timestamp display)."""
+
+    title: str = ""
+    """Optional title shown above the plot."""
+
+    @property
+    def n_frames(self) -> int:
+        return self.positions.shape[0]
+
+    @property
+    def n_agents(self) -> int:
+        return self.positions.shape[1]
+
+
+def collect_episode_frames(
+    env,
+    actor_critic,
+    obs_normalizer=None,
+    device=None,
+    max_steps: int = 200,
+) -> EpisodeFrames:
+    """Run one episode and collect per-frame data for video rendering.
+
+    Parameters
+    ----------
+    env : CrowdEnv
+        The environment to run.
+    actor_critic
+        Policy network (must have ``get_action_and_value``).
+    obs_normalizer
+        Optional observation normalizer with ``.normalize()`` method.
+    device
+        Torch device for policy inference.
+    max_steps : int
+        Maximum number of steps.
+
+    Returns
+    -------
+    EpisodeFrames
+        Snapshot data suitable for ``render_episode_video``.
+    """
+    import torch
+
+    obs, info = env.reset()
+    n_agents = info["n_agents"]
+    world = env._world
+
+    pos_list = [world.positions.copy()]
+    torso_list = [world.torso_orientations.copy()]
+    head_list = [world.head_orientations.copy()]
+    active_list = [
+        world.active_mask.copy() if world.active_mask is not None else np.ones(n_agents, dtype=bool)
+    ]
+    reached_goal = np.zeros(n_agents, dtype=bool)
+
+    for _step in range(max_steps):
+        obs_norm = obs_normalizer.normalize(obs) if obs_normalizer is not None else obs
+
+        with torch.no_grad():
+            obs_t = torch.as_tensor(obs_norm, dtype=torch.float32, device=device)
+            actions, _, _, _, _ = actor_critic.get_action_and_value(obs_t)
+
+        obs, _rewards, terminated, _truncated, step_info = env.step(actions.cpu().numpy())
+
+        pos_list.append(world.positions.copy())
+        torso_list.append(world.torso_orientations.copy())
+        head_list.append(world.head_orientations.copy())
+        active_list.append(
+            world.active_mask.copy()
+            if world.active_mask is not None
+            else np.ones(n_agents, dtype=bool)
+        )
+        reached_goal |= terminated
+
+        if step_info.get("episode_over", False):
+            break
+
+    return EpisodeFrames(
+        positions=np.stack(pos_list),
+        torso_orientations=np.stack(torso_list),
+        head_orientations=np.stack(head_list),
+        shoulder_widths=world.shoulder_widths.copy(),
+        chest_depths=world.chest_depths.copy(),
+        goal_positions=world.goal_positions.copy(),
+        polygon=world.walkable_polygon,
+        active_masks=np.stack(active_list),
+        reached_goal=reached_goal,
+        dt=env.config.dt if hasattr(env.config, "dt") else 0.01,
+    )
+
+
+def render_episode_video(
+    frames: EpisodeFrames,
+    output_path: str | Path,
+    *,
+    fps: int = 20,
+    trail_length: int = 20,
+    figsize: tuple[float, float] = (10, 8),
+    dpi: int = 100,
+    agent_color: str = "#e74c3c",
+    goal_color: str = "#2ecc71",
+    inactive_color: str = "#cccccc",
+    orientation_length: float = 0.4,
+    show_trails: bool = True,
+) -> Path:
+    """Render an episode as an MP4 video.
+
+    Parameters
+    ----------
+    frames : EpisodeFrames
+        Collected frame data from ``collect_episode_frames``.
+    output_path : str or Path
+        Where to write the MP4 file. Parent directory is created if needed.
+    fps : int
+        Frames per second in the output video.
+    trail_length : int
+        Number of past positions to show as a fading trail per agent.
+    figsize, dpi : tuple, int
+        Figure size and resolution.
+    show_trails : bool
+        Whether to draw trajectory trails behind agents.
+
+    Returns
+    -------
+    Path
+        The output file path.
+    """
+    from matplotlib.animation import FuncAnimation
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_frames = frames.n_frames
+    n_agents = frames.n_agents
+    cmap = plt.get_cmap("tab20", max(n_agents, 1))
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    plot_geometry(frames.polygon, ax=ax)
+
+    # Plot goal markers (static)
+    for i in range(n_agents):
+        color = cmap(i % 20)
+        ax.plot(
+            frames.goal_positions[i, 0],
+            frames.goal_positions[i, 1],
+            "*",
+            color=color,
+            markersize=8,
+            markeredgecolor="black",
+            markeredgewidth=0.3,
+            zorder=5,
+        )
+
+    # Pre-create artist lists for agents
+    ellipses = []
+    torso_arrows = []
+    trail_lines = []
+
+    for i in range(n_agents):
+        color = cmap(i % 20)
+        e = mpatches.Ellipse(
+            (0, 0),
+            width=2 * frames.chest_depths[i],
+            height=2 * frames.shoulder_widths[i],
+            angle=0,
+            facecolor=color,
+            edgecolor="black",
+            linewidth=0.6,
+            alpha=0.8,
+            zorder=10,
+        )
+        ax.add_patch(e)
+        ellipses.append(e)
+
+        (arrow,) = ax.plot([], [], color="black", linewidth=1.2, solid_capstyle="round", zorder=11)
+        torso_arrows.append(arrow)
+
+        (trail,) = ax.plot([], [], color=color, linewidth=1.0, alpha=0.5, zorder=6)
+        trail_lines.append(trail)
+
+    time_text = ax.text(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        fontfamily="monospace",
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.8},
+        zorder=20,
+    )
+
+    if frames.title:
+        ax.set_title(frames.title, fontsize=12)
+
+    def _update(frame_idx: int):
+        pos = frames.positions[frame_idx]
+        torso = frames.torso_orientations[frame_idx]
+        active = frames.active_masks[frame_idx]
+
+        for i in range(n_agents):
+            if not active[i]:
+                ellipses[i].set_visible(False)
+                torso_arrows[i].set_data([], [])
+                continue
+
+            ellipses[i].set_visible(True)
+            ellipses[i].set_center(pos[i])
+            ellipses[i].set_angle(np.degrees(torso[i]))
+
+            # Torso direction indicator
+            dx = np.cos(torso[i]) * orientation_length
+            dy = np.sin(torso[i]) * orientation_length
+            torso_arrows[i].set_data(
+                [pos[i, 0], pos[i, 0] + dx],
+                [pos[i, 1], pos[i, 1] + dy],
+            )
+
+            # Trail
+            if show_trails:
+                start = max(0, frame_idx - trail_length)
+                trail = frames.positions[start : frame_idx + 1, i]
+                trail_lines[i].set_data(trail[:, 0], trail[:, 1])
+
+        t = frame_idx * frames.dt
+        n_reached = frames.reached_goal.sum()
+        time_text.set_text(
+            f"t = {t:.1f}s  |  frame {frame_idx}/{n_frames - 1}"
+            f"  |  {n_reached}/{n_agents} reached goal"
+        )
+
+        return ellipses + torso_arrows + trail_lines + [time_text]
+
+    anim = FuncAnimation(fig, _update, frames=n_frames, interval=1000 / fps, blit=True)
+
+    writer = "ffmpeg"
+    try:
+        anim.save(str(output_path), writer=writer, fps=fps, dpi=dpi)
+    except Exception:
+        logger.warning("ffmpeg not available, falling back to pillow (.gif)")
+        output_path = output_path.with_suffix(".gif")
+        anim.save(str(output_path), writer="pillow", fps=fps, dpi=dpi)
+
+    plt.close(fig)
+    return output_path
