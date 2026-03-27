@@ -168,6 +168,10 @@ def collect_episode(
 def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
     """Main training loop.
 
+    When ``config.vec_env.n_envs > 1``, uses subprocess-parallel environments
+    with central GPU inference for higher throughput. Falls back to the
+    single-env sequential path when ``n_envs == 1``.
+
     Parameters
     ----------
     config : full training configuration
@@ -216,11 +220,9 @@ def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
     config_path = Path(config.checkpoint_dir) / "config.json"
     config.save_json(config_path)
 
-    # --- Create initial environment ---
-    env_config = curriculum.make_env_config(config.env)
-    env = CrowdEnv(config=env_config, seed=config.seed)
+    n_envs = config.vec_env.n_envs
 
-    print(f"Training MAPPO | device={device} | seed={config.seed}")
+    print(f"Training MAPPO | device={device} | seed={config.seed} | n_envs={n_envs}")
     print(
         f"Network: actor {config.network.actor_hidden_sizes}, "
         f"critic {config.network.critic_hidden_sizes}"
@@ -230,25 +232,76 @@ def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
 
     start_time = time.time()
 
-    # --- Main loop ---
+    if n_envs > 1:
+        _train_vec(
+            config,
+            device,
+            actor_critic,
+            updater,
+            buffer,
+            curriculum,
+            obs_normalizer,
+            reward_normalizer,
+            logger,
+            total_steps,
+            rollout_count,
+            start_time,
+        )
+    else:
+        _train_single(
+            config,
+            device,
+            actor_critic,
+            updater,
+            buffer,
+            curriculum,
+            obs_normalizer,
+            reward_normalizer,
+            logger,
+            total_steps,
+            rollout_count,
+            start_time,
+        )
+
+    # --- Final checkpoint and export ---
+    # (total_steps is local to the sub-functions; re-read from closure isn't
+    #  possible, so final checkpoint is saved inside each sub-function)
+
+    logger.close()
+    onnx_path = Path(config.checkpoint_dir) / "policy.onnx"
+    return onnx_path
+
+
+def _train_single(
+    config: TrainConfig,
+    device: torch.device,
+    actor_critic: ActorCritic,
+    updater: MAPPOUpdater,
+    buffer: RolloutBuffer,
+    curriculum: CurriculumManager,
+    obs_normalizer: RunningNormalizer | None,
+    reward_normalizer: RewardNormalizer | None,
+    logger,
+    total_steps: int,
+    rollout_count: int,
+    start_time: float,
+) -> None:
+    """Single-env sequential training loop (original path)."""
+    env_config = curriculum.make_env_config(config.env)
+    env = CrowdEnv(config=env_config, seed=config.seed)
+
     while total_steps < config.total_timesteps:
-        # Collect one episode
         ep_stats = collect_episode(
             env, actor_critic, buffer, obs_normalizer, reward_normalizer, device
         )
 
-        # Count active agent-steps in this episode
         ep_agent_steps = buffer.total_active_agent_steps
-        # Note: buffer may contain multiple episodes if we batch later;
-        # for now we process one episode at a time.
 
-        # GAE computation (episode ended, so bootstrap values = 0)
         n_agents = ep_stats["n_agents"]
         last_values = np.zeros(n_agents, dtype=np.float64)
         last_dones = np.ones(n_agents, dtype=np.bool_)
         buffer.compute_gae(last_values, last_dones, config.ppo.gamma, config.ppo.gae_lambda)
 
-        # PPO update
         flat_batch = buffer.flatten()
         if flat_batch.batch_size > 0:
             update_metrics = updater.update(flat_batch)
@@ -259,11 +312,9 @@ def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
         rollout_count += 1
         buffer.clear()
 
-        # LR schedule
         progress = total_steps / config.total_timesteps
         updater.update_learning_rate(progress)
 
-        # Curriculum
         curriculum_stats = EpisodeStats(
             goal_rate=ep_stats["goal_rate"],
             n_agents=ep_stats["n_agents"],
@@ -273,63 +324,253 @@ def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
         phase_advanced = curriculum.report_episode(curriculum_stats)
         if phase_advanced:
             env_config = curriculum.make_env_config(config.env)
-            env = CrowdEnv(
-                config=env_config,
-                seed=config.seed + rollout_count,
-            )
+            env = CrowdEnv(config=env_config, seed=config.seed + rollout_count)
             print(f"\n>>> Curriculum advanced to: {curriculum.current_phase.name}")
 
-        # Logging
-        if rollout_count % config.log.log_interval == 0:
-            elapsed = time.time() - start_time
-            sps = total_steps / max(elapsed, 1e-8)
+        _log_and_checkpoint(
+            config,
+            logger,
+            updater,
+            actor_critic,
+            obs_normalizer,
+            reward_normalizer,
+            curriculum,
+            ep_stats,
+            update_metrics,
+            total_steps,
+            rollout_count,
+            start_time,
+            progress,
+        )
 
-            metrics = {
-                "episode/reward_mean": ep_stats["mean_reward"],
-                "episode/goal_rate": ep_stats["goal_rate"],
-                "episode/length": ep_stats["episode_length"],
-                "episode/n_agents": ep_stats["n_agents"],
-                "train/total_steps": total_steps,
-                "train/steps_per_second": sps,
-                "train/progress": progress,
-                "curriculum/phase": curriculum.current_phase_idx,
-                "curriculum/rolling_goal_rate": curriculum.rolling_goal_rate,
-            }
-            metrics.update({f"ppo/{k}": v for k, v in update_metrics.items()})
+    _save_final(
+        config,
+        actor_critic,
+        updater,
+        obs_normalizer,
+        reward_normalizer,
+        curriculum,
+        total_steps,
+        rollout_count,
+    )
 
-            # Get current LR
-            if updater.actor_optimizer.param_groups:
-                metrics["train/lr_actor"] = updater.actor_optimizer.param_groups[0]["lr"]
 
-            logger.log_scalars(metrics, total_steps)
+def _train_vec(
+    config: TrainConfig,
+    device: torch.device,
+    actor_critic: ActorCritic,
+    updater: MAPPOUpdater,
+    buffer: RolloutBuffer,
+    curriculum: CurriculumManager,
+    obs_normalizer: RunningNormalizer | None,
+    reward_normalizer: RewardNormalizer | None,
+    logger,
+    total_steps: int,
+    rollout_count: int,
+    start_time: float,
+) -> None:
+    """Multi-env parallel training loop with central GPU inference."""
+    from crowdrl_train.rollout_collector import RolloutCollector
+    from crowdrl_train.vec_env import SubprocVecEnv
 
-        # Checkpointing
-        if rollout_count % config.checkpoint_interval == 0:
-            ckpt_path = Path(config.checkpoint_dir) / f"checkpoint_{rollout_count}.pt"
-            save_checkpoint(
-                ckpt_path,
-                actor_critic,
-                updater,
-                obs_normalizer,
-                reward_normalizer,
-                curriculum,
-                total_steps,
-                rollout_count,
+    n_envs = config.vec_env.n_envs
+    n_steps_per_collect = config.vec_env.n_steps_per_collect
+
+    env_config = curriculum.make_env_config(config.env)
+    seeds = [config.seed + i for i in range(n_envs)]
+    vec_env = SubprocVecEnv(env_config, seeds)
+
+    collector = RolloutCollector(
+        vec_env,
+        actor_critic,
+        obs_normalizer,
+        reward_normalizer,
+        device,
+        obs_dim=config.network.obs_dim,
+        action_dim=config.network.action_dim,
+    )
+
+    print(f"Vectorized training: {n_envs} workers, {n_steps_per_collect} steps/collect")
+
+    try:
+        while total_steps < config.total_timesteps:
+            # Collect rollouts from all envs (per-env buffers)
+            episode_stats_list = collector.collect(n_steps_per_collect)
+
+            # GAE per env buffer + merge into single FlatBatch
+            flat_batch = collector.compute_gae_and_flatten(
+                config.ppo.gamma,
+                config.ppo.gae_lambda,
             )
 
-        # Progress reporting
-        if rollout_count % 10 == 0:
-            elapsed = time.time() - start_time
-            print(
-                f"[{rollout_count:>5}] steps={total_steps:>10,} | "
-                f"goal_rate={ep_stats['goal_rate']:.2f} | "
-                f"reward={ep_stats['mean_reward']:>7.2f} | "
-                f"agents={ep_stats['n_agents']:>3} | "
-                f"phase={curriculum.current_phase.name} | "
-                f"sps={total_steps / max(elapsed, 1):.0f}"
-            )
+            # PPO update
+            if flat_batch.batch_size > 0:
+                update_metrics = updater.update(flat_batch)
+            else:
+                update_metrics = {}
 
-    # --- Final checkpoint and export ---
+            batch_steps = collector.total_active_agent_steps
+            total_steps += batch_steps
+            rollout_count += 1
+
+            # LR schedule
+            progress = total_steps / config.total_timesteps
+            updater.update_learning_rate(progress)
+
+            # Report all completed episodes to curriculum
+            phase_advanced = False
+            for ep_stats in episode_stats_list:
+                cs = EpisodeStats(
+                    goal_rate=ep_stats["goal_rate"],
+                    n_agents=ep_stats["n_agents"],
+                    episode_length=ep_stats["episode_length"],
+                    mean_reward=ep_stats["mean_reward"],
+                )
+                if curriculum.report_episode(cs):
+                    phase_advanced = True
+
+            if phase_advanced:
+                env_config = curriculum.make_env_config(config.env)
+                new_seeds = [config.seed + rollout_count * n_envs + i for i in range(n_envs)]
+                vec_env.update_all_configs(env_config, new_seeds[0])
+                print(f"\n>>> Curriculum advanced to: {curriculum.current_phase.name}")
+
+            # Logging — aggregate over completed episodes
+            if episode_stats_list and rollout_count % config.log.log_interval == 0:
+                agg = _aggregate_episode_stats(episode_stats_list)
+                _log_and_checkpoint(
+                    config,
+                    logger,
+                    updater,
+                    actor_critic,
+                    obs_normalizer,
+                    reward_normalizer,
+                    curriculum,
+                    agg,
+                    update_metrics,
+                    total_steps,
+                    rollout_count,
+                    start_time,
+                    progress,
+                )
+            elif rollout_count % config.log.log_interval == 0:
+                _log_and_checkpoint(
+                    config,
+                    logger,
+                    updater,
+                    actor_critic,
+                    obs_normalizer,
+                    reward_normalizer,
+                    curriculum,
+                    {"goal_rate": 0, "mean_reward": 0, "episode_length": 0, "n_agents": 0},
+                    update_metrics,
+                    total_steps,
+                    rollout_count,
+                    start_time,
+                    progress,
+                )
+
+    finally:
+        vec_env.close()
+
+    _save_final(
+        config,
+        actor_critic,
+        updater,
+        obs_normalizer,
+        reward_normalizer,
+        curriculum,
+        total_steps,
+        rollout_count,
+    )
+
+
+def _aggregate_episode_stats(stats_list: list[dict]) -> dict:
+    """Compute mean stats over a list of episode stat dicts."""
+    if not stats_list:
+        return {"goal_rate": 0, "mean_reward": 0, "episode_length": 0, "n_agents": 0}
+    return {
+        "goal_rate": np.mean([s["goal_rate"] for s in stats_list]),
+        "mean_reward": np.mean([s["mean_reward"] for s in stats_list]),
+        "episode_length": np.mean([s["episode_length"] for s in stats_list]),
+        "n_agents": np.mean([s["n_agents"] for s in stats_list]),
+    }
+
+
+def _log_and_checkpoint(
+    config,
+    logger,
+    updater,
+    actor_critic,
+    obs_normalizer,
+    reward_normalizer,
+    curriculum,
+    ep_stats,
+    update_metrics,
+    total_steps,
+    rollout_count,
+    start_time,
+    progress,
+) -> None:
+    """Shared logging and checkpointing logic."""
+    if rollout_count % config.log.log_interval == 0:
+        elapsed = time.time() - start_time
+        sps = total_steps / max(elapsed, 1e-8)
+
+        metrics = {
+            "episode/reward_mean": ep_stats["mean_reward"],
+            "episode/goal_rate": ep_stats["goal_rate"],
+            "episode/length": ep_stats["episode_length"],
+            "episode/n_agents": ep_stats["n_agents"],
+            "train/total_steps": total_steps,
+            "train/steps_per_second": sps,
+            "train/progress": progress,
+            "curriculum/phase": curriculum.current_phase_idx,
+            "curriculum/rolling_goal_rate": curriculum.rolling_goal_rate,
+        }
+        metrics.update({f"ppo/{k}": v for k, v in update_metrics.items()})
+
+        if updater.actor_optimizer.param_groups:
+            metrics["train/lr_actor"] = updater.actor_optimizer.param_groups[0]["lr"]
+
+        logger.log_scalars(metrics, total_steps)
+
+    if rollout_count % config.checkpoint_interval == 0:
+        ckpt_path = Path(config.checkpoint_dir) / f"checkpoint_{rollout_count}.pt"
+        save_checkpoint(
+            ckpt_path,
+            actor_critic,
+            updater,
+            obs_normalizer,
+            reward_normalizer,
+            curriculum,
+            total_steps,
+            rollout_count,
+        )
+
+    if rollout_count % 10 == 0:
+        elapsed = time.time() - start_time
+        print(
+            f"[{rollout_count:>5}] steps={total_steps:>10,} | "
+            f"goal_rate={ep_stats['goal_rate']:.2f} | "
+            f"reward={ep_stats['mean_reward']:>7.2f} | "
+            f"agents={int(ep_stats['n_agents']):>3} | "
+            f"phase={curriculum.current_phase.name} | "
+            f"sps={total_steps / max(elapsed, 1):.0f}"
+        )
+
+
+def _save_final(
+    config,
+    actor_critic,
+    updater,
+    obs_normalizer,
+    reward_normalizer,
+    curriculum,
+    total_steps,
+    rollout_count,
+) -> None:
+    """Save final checkpoint and export ONNX."""
     final_ckpt = Path(config.checkpoint_dir) / "checkpoint_final.pt"
     save_checkpoint(
         final_ckpt,
@@ -346,9 +587,6 @@ def train(config: TrainConfig, resume_from: str | Path | None = None) -> Path:
     export_onnx(actor_critic.actor, obs_normalizer, onnx_path)
     print(f"\nTraining complete. ONNX policy exported to: {onnx_path}")
 
-    logger.close()
-    return onnx_path
-
 
 def main() -> None:
     """CLI entry point for training."""
@@ -364,6 +602,7 @@ def main() -> None:
     parser.add_argument("--total-timesteps", type=int, default=None)
     parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
+    parser.add_argument("--n-envs", type=int, default=None, help="Parallel env workers")
     args = parser.parse_args()
 
     # Load base config
@@ -387,6 +626,14 @@ def main() -> None:
         d = config.to_dict()
         d.update(overrides)
         config = TrainConfig.from_dict(d)
+
+    # Vec env override (separate since it's a nested config)
+    if args.n_envs is not None:
+        from crowdrl_train.config import VecEnvConfig
+
+        config = TrainConfig.from_dict(
+            {**config.to_dict(), "vec_env": VecEnvConfig(n_envs=args.n_envs)}
+        )
 
     train(config, resume_from=args.resume)
 

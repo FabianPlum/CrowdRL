@@ -398,3 +398,52 @@ Implemented the full MAPPO training pipeline (9 modules, 61 tests, 100% pass rat
 - Tier 3 reward (distributional style matching)
 - Geometry Tiers 3-5
 
+## 2026-03-27 — Vectorized environments and training scaling
+
+### Parallelisation: SubprocVecEnv + RolloutCollector
+
+Added subprocess-parallel environment execution to `crowdrl-train` for higher training throughput.
+
+| Module | Purpose |
+|--------|---------|
+| `vec_env.py` | `SubprocVecEnv` — N CrowdEnv instances in separate processes (`spawn` context for Windows), communicating via `multiprocessing.Pipe`. Main process sends commands (reset/step/reconfigure/close), workers execute env logic in parallel. |
+| `rollout_collector.py` | `RolloutCollector` — collects transitions from all workers with central GPU inference (one batched forward pass per step). Uses **per-env buffers** to handle variable `n_agents` across envs. Computes GAE per buffer, then merges into a single `FlatBatch`. |
+| `config.py` | Added `VecEnvConfig(n_envs, n_steps_per_collect)` to `TrainConfig` |
+
+### Key architectural decisions
+
+- **Per-env buffers**: Each env gets its own `RolloutBuffer` because different envs have different `n_agents`. Interleaving into a shared buffer causes shape mismatches in GAE computation.
+- **Per-episode bootstrap for GAE**: `buffer.compute_gae()` extended to accept `list[NDArray]` — incomplete episodes get V(s_last) from the critic, completed episodes get zeros.
+- **Central GPU inference**: All observations concatenated into one forward pass, then split back per env. GPU cost is roughly constant regardless of N_ENVS.
+- **`train.py` dispatching**: `train()` routes to `_train_single()` (N=1) or `_train_vec()` (N>1).
+
+### Geometry sizing lesson
+
+Initial training runs with default geometry sizes (fields up to 25m, corridors up to 30m, max_steps=1000) produced only 3 completed episodes in 21M agent-steps — agents moved brownianly in vast empty spaces. Compact geometries (8–15m fields, 8–18m corridors, max_steps=200) matching notebook 05's successful runs are essential. Crowding comes from agent-to-area ratio, not absolute agent count.
+
+### Reward extension
+
+Added `inverse_distance_weight` to `RewardConfig` — continuous proximity-to-goal signal (`weight / (distance + 1.0)`). Disabled by default (weight=0.0), backward compatible.
+
+### Updated test suite: 276 tests total
+
+| Package | Tests | Pass rate |
+|---------|-------|-----------|
+| crowdrl-core | 119 | 100% |
+| crowdrl-env | 86 | 100% |
+| crowdrl-train | 71 | 100% |
+| **Total** | **276** | **100%** |
+
+### Example notebooks
+
+| # | Title | Status |
+|---|-------|--------|
+| 06 | Full Training (Vectorized) | Rewritten — 32 workers, 5000 rollouts, compact geometries, curriculum, live progress output |
+
+### What remains before deployment (Step 4):
+
+- crowdrl-jupedsim package (ONNX runtime adapter for JuPedSim)
+- Large-scale training runs with vectorized envs
+- Tier 3 reward (distributional style matching)
+- Geometry Tiers 3-5
+

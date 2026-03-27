@@ -193,6 +193,18 @@ class CurriculumConfig:
 
 
 @dataclass(frozen=True)
+class VecEnvConfig:
+    """Vectorized environment configuration."""
+
+    n_envs: int = 4
+    """Number of parallel environment workers."""
+
+    n_steps_per_collect: int = 2048
+    """Target agent-steps to collect before each PPO update.
+    Larger values improve GPU utilization but increase memory."""
+
+
+@dataclass(frozen=True)
 class LogConfig:
     """Logging configuration."""
 
@@ -218,6 +230,7 @@ class TrainConfig:
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
     log: LogConfig = field(default_factory=LogConfig)
     env: CrowdEnvConfig = field(default_factory=CrowdEnvConfig)
+    vec_env: VecEnvConfig = field(default_factory=VecEnvConfig)
 
     total_timesteps: int = 10_000_000
     """Total agent-steps to train for."""
@@ -303,6 +316,8 @@ class TrainConfig:
             d["ppo"] = PPOConfig(**d["ppo"])
         if "log" in d and isinstance(d["log"], dict):
             d["log"] = LogConfig(**d["log"])
+        if "vec_env" in d and isinstance(d["vec_env"], dict):
+            d["vec_env"] = VecEnvConfig(**d["vec_env"])
 
         # Reconstruct CrowdEnvConfig with its nested dataclasses
         if "env" in d and isinstance(d["env"], dict):

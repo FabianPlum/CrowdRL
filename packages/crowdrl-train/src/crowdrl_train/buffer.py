@@ -158,8 +158,8 @@ class RolloutBuffer:
 
     def compute_gae(
         self,
-        last_values: NDArray,
-        last_dones: NDArray,
+        last_values: NDArray | list[NDArray],
+        last_dones: NDArray | list[NDArray],
         gamma: float,
         gae_lambda: float,
     ) -> None:
@@ -171,9 +171,12 @@ class RolloutBuffer:
 
         Parameters
         ----------
-        last_values : (n_agents,) — bootstrap values for the last timestep
-            (0 if episode ended, V(s) if truncated mid-episode)
-        last_dones : (n_agents,) bool — done flags for last timestep
+        last_values : bootstrap values for the final timestep of each episode.
+            - Single array (n_agents,): applied to the last episode only;
+              completed episodes get zero bootstrap (backward compatible).
+            - List of arrays: one per episode in buffer order. Completed
+              episodes should pass zeros; incomplete episodes pass V(s_last).
+        last_dones : done flags matching ``last_values`` structure.
         gamma : discount factor
         gae_lambda : GAE lambda
         """
@@ -186,9 +189,8 @@ class RolloutBuffer:
         self._advantages = [np.zeros_like(v) for v in self._values]
         self._returns = [np.zeros_like(v) for v in self._values]
 
-        # Process each episode independently
+        # Build episode ranges
         if self._episode_starts[-1] < n_steps:
-            # Last episode not yet marked — treat the buffer end as episode end
             episode_ranges = list(
                 zip(
                     self._episode_starts,
@@ -203,21 +205,27 @@ class RolloutBuffer:
                 )
             )
 
-        for ep_start, ep_end in episode_ranges:
+        # Normalise bootstrap args to per-episode lists
+        per_episode = isinstance(last_values, list)
+
+        for ep_idx, (ep_start, ep_end) in enumerate(episode_ranges):
             if ep_start >= ep_end:
                 continue
             n_agents = self._obs[ep_start].shape[0]
 
-            # Bootstrap: use last_values if this is the final episode,
-            # otherwise bootstrap is 0 (episode completed)
-            if ep_end == n_steps:
-                bootstrap_values = (
-                    last_values[:n_agents]
-                    if len(last_values) >= n_agents
-                    else np.zeros(n_agents, dtype=np.float64)
-                )
+            if per_episode:
+                # Per-episode bootstrap provided by caller
+                bootstrap_values = last_values[ep_idx][:n_agents].astype(np.float64)
             else:
-                bootstrap_values = np.zeros(n_agents, dtype=np.float64)
+                # Legacy: single array applies to the last episode only
+                if ep_end == n_steps:
+                    bootstrap_values = (
+                        last_values[:n_agents]
+                        if len(last_values) >= n_agents
+                        else np.zeros(n_agents, dtype=np.float64)
+                    )
+                else:
+                    bootstrap_values = np.zeros(n_agents, dtype=np.float64)
 
             # Reverse sweep for GAE
             gae = np.zeros(n_agents, dtype=np.float64)
