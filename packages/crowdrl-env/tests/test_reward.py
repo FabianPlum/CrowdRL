@@ -47,7 +47,7 @@ class TestTier1Sparse:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         # Agents 0 and 2 are within goal_radius (0.5m)
@@ -79,7 +79,7 @@ class TestTier1Sparse:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         # Agent 0 has collision penalty, agent 1 does not
@@ -107,7 +107,7 @@ class TestTier1Sparse:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         assert rewards[1] == 0.0
@@ -136,7 +136,7 @@ class TestTier1Sparse:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         # Progress = 10 - 9 = 1, reward += 0.1 * 1 = 0.1
@@ -169,7 +169,7 @@ class TestTier2Smoothness:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         # Second step: smoothness kicks in
@@ -183,7 +183,7 @@ class TestTier2Smoothness:
             collision,
             state,
             cfg,
-            dt=0.1,
+            dt=0.01,
         )
 
         # Speed deviation penalty should make reward negative
@@ -194,7 +194,7 @@ class TestTier2Smoothness:
         """Constant velocity has less smoothness penalty than jerky motion."""
         cfg = default_config
         n = 1
-        dt = 0.1
+        dt = 0.01
 
         # Constant velocity run
         state_smooth = _make_state(n)
