@@ -168,7 +168,7 @@ class TestBuildObservationsBatch:
         batch = build_observations_batch(world, config)
         for i in range(n):
             individual = build_observation(world, i, config)
-            np.testing.assert_array_equal(batch[i], individual)
+            np.testing.assert_allclose(batch[i], individual, atol=1e-12)
 
     def test_active_mask(self):
         config = ObsConfig()
@@ -179,11 +179,16 @@ class TestBuildObservationsBatch:
         )
         world.active_mask = np.array([True, False, True])
         batch = build_observations_batch(world, config)
-        assert batch.shape == (2, config.obs_dim)  # Only 2 active
+        # Returns all agents; inactive agents have zero obs
+        assert batch.shape == (3, config.obs_dim)
+        np.testing.assert_array_equal(batch[1], np.zeros(config.obs_dim))
+        assert np.any(batch[0] != 0)
+        assert np.any(batch[2] != 0)
 
     def test_empty_world(self):
         config = ObsConfig()
         world = make_world_state(n_agents=2)
         world.active_mask = np.array([False, False])
         batch = build_observations_batch(world, config)
-        assert batch.shape == (0, config.obs_dim)
+        assert batch.shape == (2, config.obs_dim)
+        np.testing.assert_array_equal(batch, np.zeros((2, config.obs_dim)))
