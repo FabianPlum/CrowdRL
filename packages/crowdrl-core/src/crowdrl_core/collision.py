@@ -379,8 +379,12 @@ def enforce_wall_boundaries(world: WorldState) -> None:
             world.chest_depths[active_idx],
         )
 
-        # Generous threshold so agents near corners are not missed
-        needs_check = min_wall_dist < radii * 3.0
+        # Generous threshold so agents near corners are not missed.
+        # Also always check agents moving fast enough that they could
+        # have crossed a boundary in one step (contact forces can
+        # produce large velocity spikes).
+        speeds = np.linalg.norm(world.velocities[active_idx], axis=1)
+        needs_check = (min_wall_dist < radii * 3.0) | (speeds > radii * 10.0)
         check_idx = active_idx[needs_check]
     else:
         check_idx = active_idx
