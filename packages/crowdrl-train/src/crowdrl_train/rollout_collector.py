@@ -9,6 +9,11 @@ Per-env buffers are necessary because different envs have different
 ``n_agents``, and GAE requires consistent agent counts within an episode.
 After collection, GAE is computed per buffer and the results are merged
 into a single :class:`FlatBatch` for the PPO update.
+
+Env resets are non-blocking: when an episode finishes, the reset command is
+sent immediately but the collector does not wait for the result. The env is
+skipped for the current step and its new state is picked up on the next
+iteration. This prevents one slow reset from blocking all other envs.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ class _EnvState:
     episode_length: int = 0
     episode_rewards: NDArray = field(default_factory=lambda: np.array([]))
     info: dict = field(default_factory=dict)
+    resetting: bool = False
+    """True if this env has a pending reset (non-blocking)."""
 
 
 class RolloutCollector:
@@ -90,6 +97,22 @@ class RolloutCollector:
     def buffers(self) -> list[RolloutBuffer]:
         return self._buffers
 
+    def _finish_pending_resets(self) -> None:
+        """Collect results from any envs that were sent a reset command."""
+        for i, es in enumerate(self._env_states):
+            if not es.resetting:
+                continue
+            new_obs, new_info = self.vec_env._recv(i)
+            n_agents = new_info["n_agents"]
+            self._env_states[i] = _EnvState(
+                obs=new_obs,
+                n_agents=n_agents,
+                active_mask=np.ones(n_agents, dtype=np.bool_),
+                cumulative_terminated=np.zeros(n_agents, dtype=np.bool_),
+                episode_rewards=np.zeros(n_agents, dtype=np.float64),
+                info=new_info,
+            )
+
     def collect(self, n_agent_steps: int) -> list[dict]:
         """Collect at least *n_agent_steps* across all envs.
 
@@ -121,10 +144,22 @@ class RolloutCollector:
 
         # Collection loop
         while steps_collected < n_agent_steps:
-            # --- Normalise observations ---
+            # Pick up any pending async resets from the previous iteration
+            self._finish_pending_resets()
+
+            # Determine which envs are ready (not resetting)
+            ready_envs = [i for i in range(self._n_envs) if not self._env_states[i].resetting]
+
+            if not ready_envs:
+                # All envs are resetting — must wait for at least one
+                self._finish_pending_resets()
+                ready_envs = list(range(self._n_envs))
+
+            # --- Normalise observations for ready envs ---
             all_obs_norm = []
             n_agents_per_env = []
-            for es in self._env_states:
+            for i in ready_envs:
+                es = self._env_states[i]
                 n_agents_per_env.append(es.n_agents)
                 if self.obs_normalizer is not None:
                     active_obs = es.obs[es.active_mask]
@@ -154,14 +189,24 @@ class RolloutCollector:
             log_probs_split = np.split(log_probs_np, splits)
             values_split = np.split(values_np, splits)
 
-            # --- Step all envs ---
-            step_results = self.vec_env.step(actions_split)
+            # --- Step ready envs ---
+            # Send step commands to ready envs
+            for idx, env_i in enumerate(ready_envs):
+                self.vec_env._main_pipes[env_i].send(("step", actions_split[idx]))
+
+            # Receive results from ready envs
+            step_results = {}
+            for env_i in ready_envs:
+                obs, rewards, terminated, truncated, info = self.vec_env._recv(env_i)
+                from crowdrl_train.vec_env import StepResult
+
+                step_results[env_i] = StepResult(obs, rewards, terminated, truncated, info)
 
             # --- Process results per env ---
-            for i in range(self._n_envs):
-                es = self._env_states[i]
-                sr = step_results[i]
-                buf = self._buffers[i]
+            for idx, env_i in enumerate(ready_envs):
+                es = self._env_states[env_i]
+                sr = step_results[env_i]
+                buf = self._buffers[env_i]
 
                 rewards = sr.rewards.copy()
                 dones = sr.terminated | sr.truncated
@@ -172,11 +217,11 @@ class RolloutCollector:
 
                 # Store transition in this env's buffer
                 buf.add(
-                    obs=all_obs_norm[i],
-                    actions_raw=actions_raw_split[i],
-                    log_probs=log_probs_split[i],
+                    obs=all_obs_norm[idx],
+                    actions_raw=actions_raw_split[idx],
+                    log_probs=log_probs_split[idx],
                     rewards=rewards,
-                    values=values_split[i],
+                    values=values_split[idx],
                     dones=dones,
                     active_mask=es.active_mask.copy(),
                 )
@@ -213,21 +258,14 @@ class RolloutCollector:
                         }
                     )
 
-                    # Auto-reset this env
-                    self.vec_env._main_pipes[i].send(("reset", None))
-                    new_obs, new_info = self.vec_env._recv(i)
-
-                    n_agents = new_info["n_agents"]
-                    self._env_states[i] = _EnvState(
-                        obs=new_obs,
-                        n_agents=n_agents,
-                        active_mask=np.ones(n_agents, dtype=np.bool_),
-                        cumulative_terminated=np.zeros(n_agents, dtype=np.bool_),
-                        episode_rewards=np.zeros(n_agents, dtype=np.float64),
-                        info=new_info,
-                    )
+                    # Non-blocking reset: send command and mark as resetting
+                    self.vec_env._main_pipes[env_i].send(("reset", None))
+                    es.resetting = True
                 else:
                     es.obs = sr.obs
+
+        # Collect any remaining pending resets so state is clean
+        self._finish_pending_resets()
 
         return completed_episodes
 
