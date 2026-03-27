@@ -37,18 +37,25 @@ class PolicyForExport(nn.Module):
 
         # Bake normalization statistics as buffers (not parameters)
         if normalizer is not None:
-            self.register_buffer(
-                "obs_mean",
-                torch.tensor(normalizer.mean, dtype=torch.float32),
-            )
-            self.register_buffer(
-                "obs_std",
-                torch.tensor(np.sqrt(normalizer.var + normalizer.epsilon), dtype=torch.float32),
-            )
-            self.register_buffer(
-                "obs_clip",
-                torch.tensor(normalizer.clip, dtype=torch.float32),
-            )
+            mean = normalizer.mean
+            var = normalizer.var
+            # Handle both numpy arrays and torch tensors (possibly on GPU)
+            if isinstance(var, torch.Tensor):
+                std = torch.sqrt(var + normalizer.epsilon).cpu().float()
+            else:
+                std = torch.tensor(np.sqrt(var + normalizer.epsilon), dtype=torch.float32)
+            if isinstance(mean, torch.Tensor):
+                mean = mean.cpu().float()
+            else:
+                mean = torch.tensor(mean, dtype=torch.float32)
+            self.register_buffer("obs_mean", mean)
+            self.register_buffer("obs_std", std)
+            clip = normalizer.clip
+            if isinstance(clip, torch.Tensor):
+                clip = clip.cpu().float()
+            else:
+                clip = torch.tensor(clip, dtype=torch.float32)
+            self.register_buffer("obs_clip", clip)
             self._has_normalizer = True
         else:
             self._has_normalizer = False
