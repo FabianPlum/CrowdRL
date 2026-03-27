@@ -165,11 +165,20 @@ class TestInterpretActionsBatch:
         heads = rng.uniform(-np.pi, np.pi, n)
 
         batch_results = interpret_actions_batch(actions, headings, torsos, heads)
-        assert len(batch_results) == n
+        assert batch_results.desired_velocities.shape == (n, 2)
+        assert batch_results.new_headings.shape == (n,)
 
         for i in range(n):
             individual = interpret_action(actions[i], headings[i], torsos[i], heads[i])
             np.testing.assert_allclose(
-                batch_results[i].desired_velocity, individual.desired_velocity
+                batch_results.desired_velocities[i], individual.desired_velocity
             )
-            assert abs(batch_results[i].new_heading - individual.new_heading) < 1e-10
+            assert abs(batch_results.new_headings[i] - individual.new_heading) < 1e-10
+            assert (
+                abs(batch_results.new_torso_orientations[i] - individual.new_torso_orientation)
+                < 1e-10
+            )
+            assert (
+                abs(batch_results.new_head_orientations[i] - individual.new_head_orientation)
+                < 1e-10
+            )
