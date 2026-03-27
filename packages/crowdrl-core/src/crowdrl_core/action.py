@@ -137,14 +137,36 @@ def interpret_action(
     )
 
 
+@dataclass
+class BatchActionResult:
+    """Vectorized action output for all agents."""
+
+    desired_velocities: NDArray[np.float64]
+    """(N, 2) — desired velocity vectors."""
+
+    new_headings: NDArray[np.float64]
+    """(N,) — new heading angles."""
+
+    new_torso_orientations: NDArray[np.float64]
+    """(N,) — new torso orientations."""
+
+    new_head_orientations: NDArray[np.float64]
+    """(N,) — new absolute head orientations."""
+
+
+def _normalize_angles(angles: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Normalize angles to [-pi, pi]."""
+    return (angles + np.pi) % (2 * np.pi) - np.pi
+
+
 def interpret_actions_batch(
     raw_actions: NDArray[np.float64],
     current_headings: NDArray[np.float64],
     current_torsos: NDArray[np.float64],
     current_heads: NDArray[np.float64],
     config: ActionConfig = ActionConfig(),
-) -> list[ActionResult]:
-    """Interpret actions for a batch of agents.
+) -> BatchActionResult:
+    """Interpret actions for a batch of agents (fully vectorized).
 
     Parameters
     ----------
@@ -156,15 +178,46 @@ def interpret_actions_batch(
 
     Returns
     -------
-    results : list of ActionResult
+    BatchActionResult with (N, ...) arrays
     """
-    return [
-        interpret_action(
-            raw_actions[i],
-            float(current_headings[i]),
-            float(current_torsos[i]),
-            float(current_heads[i]),
-            config,
-        )
-        for i in range(len(raw_actions))
-    ]
+    actions = np.clip(raw_actions, -1.0, 1.0)
+
+    # 1. Desired speed: map [-1, 1] -> [0, max_speed]
+    desired_speeds = (actions[:, 0] + 1.0) / 2.0 * config.max_speed
+
+    # 2. Heading change
+    new_headings = current_headings + actions[:, 1] * config.max_heading_change
+
+    # 3. Torso orientation change
+    if config.action_dim >= 3 and actions.shape[1] >= 3:
+        new_torsos = current_torsos + actions[:, 2] * config.max_torso_change
+    else:
+        new_torsos = new_headings.copy()
+
+    # 4. Head orientation change relative to torso
+    if config.action_dim >= 4 and actions.shape[1] >= 4:
+        new_heads = current_heads + actions[:, 3] * config.max_head_change
+        head_rel_torso = np.clip(new_heads - new_torsos, -config.head_limit, config.head_limit)
+        new_heads = new_torsos + head_rel_torso
+    else:
+        new_heads = new_torsos.copy()
+
+    # Normalize all angles to [-pi, pi]
+    new_headings = _normalize_angles(new_headings)
+    new_torsos = _normalize_angles(new_torsos)
+    new_heads = _normalize_angles(new_heads)
+
+    # Desired velocity vectors from heading and speed
+    desired_velocities = np.column_stack(
+        [
+            desired_speeds * np.cos(new_headings),
+            desired_speeds * np.sin(new_headings),
+        ]
+    )
+
+    return BatchActionResult(
+        desired_velocities=desired_velocities,
+        new_headings=new_headings,
+        new_torso_orientations=new_torsos,
+        new_head_orientations=new_heads,
+    )
