@@ -67,7 +67,7 @@ def ellipse_overlap(
 
 
 def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
-    """Detect all pairwise agent-agent collisions.
+    """Detect all pairwise agent-agent collisions (vectorized).
 
     Returns
     -------
@@ -75,29 +75,74 @@ def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
         Pairs of colliding agent indices and their approximate overlap.
     """
     n = world.n_agents
-    collisions = []
+    if n < 2:
+        return []
 
-    for i in range(n):
-        if world.active_mask is not None and not world.active_mask[i]:
-            continue
-        for j in range(i + 1, n):
-            if world.active_mask is not None and not world.active_mask[j]:
-                continue
+    # Determine active agents
+    if world.active_mask is not None:
+        active = world.active_mask
+    else:
+        active = np.ones(n, dtype=np.bool_)
 
-            overlap = ellipse_overlap(
-                world.positions[i],
-                world.shoulder_widths[i],
-                world.chest_depths[i],
-                world.torso_orientations[i],
-                world.positions[j],
-                world.shoulder_widths[j],
-                world.chest_depths[j],
-                world.torso_orientations[j],
-            )
-            if overlap > 0:
-                collisions.append((i, j, overlap))
+    active_idx = np.where(active)[0]
+    n_active = len(active_idx)
+    if n_active < 2:
+        return []
 
-    return collisions
+    pos = world.positions[active_idx]  # (M, 2)
+    angles = world.torso_orientations[active_idx]  # (M,)
+    widths = world.shoulder_widths[active_idx]  # (M,)
+    depths = world.chest_depths[active_idx]  # (M,)
+
+    # Pairwise displacement vectors: diff[i,j] = pos[j] - pos[i]
+    diff = pos[np.newaxis, :, :] - pos[:, np.newaxis, :]  # (M, M, 2)
+
+    # Quick distance pre-filter: max possible contact range
+    max_radii = np.maximum(widths, depths)
+    pair_max_range = max_radii[:, np.newaxis] + max_radii[np.newaxis, :]  # (M, M)
+    pair_dist_sq = np.sum(diff**2, axis=-1)  # (M, M)
+
+    # Upper triangle mask + distance filter
+    ii, jj = np.triu_indices(n_active, k=1)
+    close_mask = pair_dist_sq[ii, jj] < (pair_max_range[ii, jj] ** 2) * 4.0
+    ii = ii[close_mask]
+    jj = jj[close_mask]
+
+    if len(ii) == 0:
+        return []
+
+    # Vectorized ellipse overlap for candidate pairs
+    d = diff[ii, jj]  # (P, 2)
+
+    # Direction A: check B's centre in A's ellipse frame
+    cos_a = np.cos(-angles[ii])
+    sin_a = np.sin(-angles[ii])
+    dx_a = cos_a * d[:, 0] - sin_a * d[:, 1]
+    dy_a = sin_a * d[:, 0] + cos_a * d[:, 1]
+    dist_a = (dx_a / depths[ii]) ** 2 + (dy_a / widths[ii]) ** 2
+
+    # Direction B: check A's centre in B's ellipse frame
+    neg_d = -d
+    cos_b = np.cos(-angles[jj])
+    sin_b = np.sin(-angles[jj])
+    dx_b = cos_b * neg_d[:, 0] - sin_b * neg_d[:, 1]
+    dy_b = sin_b * neg_d[:, 0] + cos_b * neg_d[:, 1]
+    dist_b = (dx_b / depths[jj]) ** 2 + (dy_b / widths[jj]) ** 2
+
+    min_dist = np.minimum(dist_a, dist_b)
+    overlap_mask = min_dist < 1.0
+    overlaps = np.where(overlap_mask, 1.0 - np.sqrt(min_dist), 0.0)
+
+    # Collect results
+    col_ii = ii[overlap_mask]
+    col_jj = jj[overlap_mask]
+    col_overlaps = overlaps[overlap_mask]
+
+    # Map back to original indices
+    return [
+        (int(active_idx[i]), int(active_idx[j]), float(o))
+        for i, j, o in zip(col_ii, col_jj, col_overlaps)
+    ]
 
 
 def _point_to_segment_nearest(
@@ -115,6 +160,67 @@ def _point_to_segment_nearest(
     return nearest, float(np.linalg.norm(point - nearest))
 
 
+def _points_to_segments_nearest_batch(
+    points: NDArray[np.float64],
+    seg_starts: NDArray[np.float64],
+    seg_ends: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Batch nearest-point-on-segment for all points x all segments.
+
+    Parameters
+    ----------
+    points : (N, 2)
+    seg_starts : (W, 2)
+    seg_ends : (W, 2)
+
+    Returns
+    -------
+    nearest_points : (N, W, 2) — nearest point on each segment for each agent
+    distances : (N, W) — distances
+    normals : (N, W, 2) — unit vectors from nearest point toward agent (or edge normal)
+    """
+    # edges: (W, 2)
+    edges = seg_ends - seg_starts
+    edge_len_sq = np.sum(edges**2, axis=-1)  # (W,)
+
+    # diff from each point to each segment start: (N, W, 2)
+    diff = points[:, np.newaxis, :] - seg_starts[np.newaxis, :, :]
+
+    # Project: t = dot(diff, edge) / edge_len_sq, clamped to [0, 1]
+    dot_prod = np.sum(diff * edges[np.newaxis, :, :], axis=-1)  # (N, W)
+    safe_len_sq = np.where(edge_len_sq < 1e-12, 1.0, edge_len_sq)
+    t = np.clip(dot_prod / safe_len_sq, 0.0, 1.0)
+
+    # Handle degenerate segments
+    t = np.where(edge_len_sq[np.newaxis, :] < 1e-12, 0.0, t)
+
+    # Nearest points on segments: (N, W, 2)
+    nearest = seg_starts[np.newaxis, :, :] + t[:, :, np.newaxis] * edges[np.newaxis, :, :]
+
+    # Vectors from nearest to point: (N, W, 2)
+    to_point = points[:, np.newaxis, :] - nearest
+    distances = np.sqrt(np.sum(to_point**2, axis=-1))  # (N, W)
+
+    # Normals: from nearest toward point (or edge normal if too close)
+    safe_dist = np.where(distances < 1e-10, 1.0, distances)
+    normals = to_point / safe_dist[:, :, np.newaxis]
+
+    # For near-zero distances, use edge perpendicular
+    edge_normals = np.stack([-edges[:, 1], edges[:, 0]], axis=-1)  # (W, 2)
+    edge_norm_len = np.sqrt(np.sum(edge_normals**2, axis=-1, keepdims=True))
+    safe_edge_norm = np.where(edge_norm_len < 1e-12, 1.0, edge_norm_len)
+    edge_normals = edge_normals / safe_edge_norm
+
+    close_mask = distances < 1e-10  # (N, W)
+    normals = np.where(
+        close_mask[:, :, np.newaxis],
+        edge_normals[np.newaxis, :, :],
+        normals,
+    )
+
+    return nearest, distances, normals
+
+
 # ---------------------------------------------------------------------------
 # Agent-agent + wall forces
 # ---------------------------------------------------------------------------
@@ -126,6 +232,7 @@ def compute_contact_forces(
     damping: float = 50.0,
     wall_strength: float = 5.0,
     wall_range: float = 0.3,
+    collisions: list[tuple[int, int, float]] | None = None,
 ) -> NDArray[np.float64]:
     """Compute repulsive forces for all agents (agent-agent + wall repulsion).
 
@@ -140,9 +247,11 @@ def compute_contact_forces(
     damping : float
         Agent-agent damping coefficient (N·s/m).
     wall_strength : float
-        Wall repulsion amplitude (m/s²).
+        Wall repulsion amplitude (m/s^2).
     wall_range : float
-        Wall repulsion length scale (m). Force ∝ exp((radius − dist) / range).
+        Wall repulsion length scale (m). Force = exp((radius - dist) / range).
+    collisions : list of (i, j, overlap), optional
+        Pre-computed collision list. If None, detect_collisions() is called.
 
     Returns
     -------
@@ -153,44 +262,68 @@ def compute_contact_forces(
     forces = np.zeros((n, 2), dtype=np.float64)
 
     # --- Agent-agent contact forces ---
-    collisions = detect_collisions(world)
-    for i, j, overlap in collisions:
-        diff = world.positions[j] - world.positions[i]
-        dist = np.linalg.norm(diff)
-        if dist < 1e-10:
-            normal = np.array([1.0, 0.0])
+    if collisions is None:
+        collisions = detect_collisions(world)
+
+    if collisions:
+        col_arr = np.asarray(collisions)  # (C, 3)
+        ci = col_arr[:, 0].astype(np.intp)
+        cj = col_arr[:, 1].astype(np.intp)
+        overlaps = col_arr[:, 2]
+
+        diff = world.positions[cj] - world.positions[ci]  # (C, 2)
+        dist = np.sqrt(np.sum(diff**2, axis=-1))  # (C,)
+
+        # Normal vectors (fallback to [1, 0] for coincident agents)
+        safe_dist = np.where(dist < 1e-10, 1.0, dist)
+        normals = diff / safe_dist[:, np.newaxis]
+        normals = np.where(
+            (dist < 1e-10)[:, np.newaxis],
+            np.array([[1.0, 0.0]]),
+            normals,
+        )
+
+        rel_vel = world.velocities[ci] - world.velocities[cj]  # (C, 2)
+        rel_vel_normal = np.sum(rel_vel * normals, axis=-1)  # (C,)
+
+        force_mag = stiffness * overlaps + damping * np.maximum(0.0, rel_vel_normal)
+        force_vectors = force_mag[:, np.newaxis] * normals  # (C, 2)
+
+        # Accumulate forces using np.add.at for correct handling of duplicates
+        np.add.at(forces, ci, -force_vectors)
+        np.add.at(forces, cj, force_vectors)
+
+    # --- Smooth exponential wall repulsion (vectorized) ---
+    if world.wall_segments is not None and len(world.wall_segments) > 0:
+        if world.active_mask is not None:
+            active_idx = np.where(world.active_mask)[0]
         else:
-            normal = diff / dist
+            active_idx = np.arange(n)
 
-        rel_vel = world.velocities[i] - world.velocities[j]
-        rel_vel_normal = np.dot(rel_vel, normal)
+        if len(active_idx) > 0:
+            seg_starts = np.array([s[0] for s in world.wall_segments])  # (W, 2)
+            seg_ends = np.array([s[1] for s in world.wall_segments])  # (W, 2)
 
-        force_magnitude = stiffness * overlap + damping * max(0.0, rel_vel_normal)
-        force = force_magnitude * normal
+            active_pos = world.positions[active_idx]  # (M, 2)
+            _, distances, normals = _points_to_segments_nearest_batch(
+                active_pos,
+                seg_starts,
+                seg_ends,
+            )
 
-        forces[i] -= force
-        forces[j] += force
+            # Radii per active agent: (M,)
+            radii = np.maximum(
+                world.shoulder_widths[active_idx],
+                world.chest_depths[active_idx],
+            )
 
-    # --- Smooth exponential wall repulsion ---
-    if world.wall_segments is not None:
-        for i in range(n):
-            if world.active_mask is not None and not world.active_mask[i]:
-                continue
-            radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
-            pos = world.positions[i]
-            for seg in world.wall_segments:
-                nearest, dist = _point_to_segment_nearest(pos, seg[0], seg[1])
-                if dist < 1e-10:
-                    edge = seg[1] - seg[0]
-                    normal = np.array([-edge[1], edge[0]], dtype=np.float64)
-                    norm_len = np.linalg.norm(normal)
-                    if norm_len < 1e-12:
-                        continue
-                    normal /= norm_len
-                else:
-                    normal = (pos - nearest) / dist
-                f_mag = wall_strength * np.exp((radius - dist) / wall_range)
-                forces[i] += f_mag * normal
+            # Exponential repulsion: (M, W)
+            f_mag = wall_strength * np.exp((radii[:, np.newaxis] - distances) / wall_range)
+
+            # Sum over all wall segments: (M, 2)
+            wall_forces = np.sum(f_mag[:, :, np.newaxis] * normals, axis=1)
+
+            forces[active_idx] += wall_forces
 
     return forces
 
@@ -203,14 +336,8 @@ def compute_contact_forces(
 def enforce_wall_boundaries(world: WorldState) -> None:
     """Project agents to stay inside the walkable polygon with body clearance.
 
-    For each agent, computes the distance from the agent centre to the
-    polygon boundary.  If the agent is outside or closer than its body
-    radius, the position is snapped to exactly *radius* distance inside
-    the boundary and the velocity component into the wall is zeroed.
-
-    The polygon's signed geometry (Shapely ``contains``) determines
-    inside vs outside unambiguously — there is no directional ambiguity
-    from undirected wall segments.
+    Uses vectorized numpy geometry for the fast path (distance to nearest
+    wall segment). Falls back to Shapely for agents that need correction.
 
     Call **after** physics integration every step.
     Modifies ``world.positions`` and ``world.velocities`` in place.
@@ -220,12 +347,48 @@ def enforce_wall_boundaries(world: WorldState) -> None:
         return
 
     n = world.n_agents
+    if world.active_mask is not None:
+        active_idx = np.where(world.active_mask)[0]
+    else:
+        active_idx = np.arange(n)
+
+    if len(active_idx) == 0:
+        return
+
+    # Quick vectorized pre-filter: agents far from all wall segments in a
+    # simple (convex, no-holes) polygon are certainly safe.  When the polygon
+    # has holes the distance-to-nearest-segment test is not sufficient because
+    # an agent inside a hole can be far from exterior walls yet outside the
+    # walkable area.  Detect holes cheaply and skip the pre-filter in that case.
+    has_holes = hasattr(polygon, "interiors") and len(list(polygon.interiors)) > 0
+
+    if not has_holes and world.wall_segments is not None and len(world.wall_segments) > 0:
+        seg_starts = np.array([s[0] for s in world.wall_segments])
+        seg_ends = np.array([s[1] for s in world.wall_segments])
+
+        active_pos = world.positions[active_idx]
+        _, distances, _ = _points_to_segments_nearest_batch(
+            active_pos,
+            seg_starts,
+            seg_ends,
+        )
+        min_wall_dist = distances.min(axis=1)  # (M,)
+
+        radii = np.maximum(
+            world.shoulder_widths[active_idx],
+            world.chest_depths[active_idx],
+        )
+
+        # Generous threshold so agents near corners are not missed
+        needs_check = min_wall_dist < radii * 3.0
+        check_idx = active_idx[needs_check]
+    else:
+        check_idx = active_idx
+
+    # Detailed Shapely check only for agents near walls
     boundary = polygon.boundary
 
-    for i in range(n):
-        if world.active_mask is not None and not world.active_mask[i]:
-            continue
-
+    for i in check_idx:
         radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
         pos = world.positions[i]
         p = Point(pos[0], pos[1])
@@ -234,25 +397,22 @@ def enforce_wall_boundaries(world: WorldState) -> None:
         inside = polygon.contains(p)
 
         if inside and boundary_dist >= radius:
-            continue  # Agent safely inside — nothing to do
+            continue
 
         # Find nearest point on boundary
         nearest_pt = nearest_points(boundary, p)[0]
         nearest_pos = np.array([nearest_pt.x, nearest_pt.y], dtype=np.float64)
 
-        # Compute inward normal (always pointing toward polygon interior)
+        # Compute inward normal
         diff = pos - nearest_pos
         diff_len = np.linalg.norm(diff)
 
         if diff_len > 1e-10:
             if inside:
-                # Inside but too close — inward direction is away from boundary
                 inward = diff / diff_len
             else:
-                # Outside — inward direction is toward boundary and beyond
                 inward = -diff / diff_len
         else:
-            # Exactly on boundary — use polygon interior point as reference
             ref = polygon.representative_point()
             inward = np.array([ref.x, ref.y]) - nearest_pos
             inward_len = np.linalg.norm(inward)
@@ -260,10 +420,8 @@ def enforce_wall_boundaries(world: WorldState) -> None:
                 continue
             inward /= inward_len
 
-        # Place agent at radius distance inside the boundary
         world.positions[i] = nearest_pos + inward * radius
 
-        # Kill velocity component into the wall
         vel_into_wall = np.dot(world.velocities[i], -inward)
         if vel_into_wall > 0:
             world.velocities[i] += vel_into_wall * inward
