@@ -62,7 +62,7 @@ class CrowdEnvConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
 
     # Physics
-    dt: float = 0.1
+    dt: float = 0.01
     """Timestep duration (seconds)."""
     contact_stiffness: float = 2000.0
     contact_damping: float = 50.0
@@ -80,7 +80,7 @@ class CrowdEnvConfig:
     """
 
     # Episode
-    max_steps: int = 500
+    max_steps: int = 5000
     """Maximum timesteps per episode."""
 
 
