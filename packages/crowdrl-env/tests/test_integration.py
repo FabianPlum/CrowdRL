@@ -348,7 +348,7 @@ class TestActionCycleIntegration:
         )
 
         # Update state (vectorized)
-        dt = 0.1
+        dt = 0.01
         world.positions += results.desired_velocities * dt
         world.torso_orientations[:] = results.new_torso_orientations
         world.head_orientations[:] = results.new_head_orientations
@@ -372,7 +372,7 @@ class TestActionCycleIntegration:
 
         obs_config = ObsConfig()
         action_config = ActionConfig()
-        dt = 0.1
+        dt = 0.01
 
         for step in range(50):
             obs = build_observations_batch(world, obs_config)
