@@ -199,7 +199,7 @@ class VecEnvConfig:
     n_envs: int = 4
     """Number of parallel environment workers."""
 
-    n_steps_per_collect: int = 2048
+    n_steps_per_collect: int = 4096
     """Target agent-steps to collect before each PPO update.
     Larger values improve GPU utilization but increase memory."""
 
