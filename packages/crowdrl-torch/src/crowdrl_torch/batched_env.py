@@ -227,7 +227,6 @@ class BatchedTorchEnv:
 
     def _data_to_tensors(self, data: dict[str, NDArray]) -> dict[str, torch.Tensor]:
         """Convert padded numpy arrays to tensors on device."""
-        max_agents = self.config.max_agents
         dev = self.device
         return {
             "positions": torch.tensor(data["positions"], dtype=torch.float32, device=dev),
@@ -307,7 +306,6 @@ class BatchedTorchEnv:
             if future.done():
                 data = future.result()
                 tensors = self._data_to_tensors(data)
-                max_agents = self.config.max_agents
 
                 # Direct slice assignment — simpler than JAX's tree.map
                 self.states.positions[env_idx] = tensors["positions"]

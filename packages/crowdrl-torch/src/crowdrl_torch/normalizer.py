@@ -10,9 +10,14 @@ arrays with the same keys.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from crowdrl_train.normalizer import RunningNormalizer
 
 
 class TorchRunningNormalizer:
@@ -125,7 +130,7 @@ class TorchRunningNormalizer:
 
     @staticmethod
     def from_cpu_normalizer(
-        cpu_norm: "RunningNormalizer", device: torch.device | str = "cpu"
+        cpu_norm: RunningNormalizer, device: torch.device | str = "cpu"
     ) -> "TorchRunningNormalizer":
         """Create from an existing CPU RunningNormalizer."""
         tn = TorchRunningNormalizer(

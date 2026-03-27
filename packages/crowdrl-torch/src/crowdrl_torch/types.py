@@ -10,10 +10,13 @@ EnvConfig holds static configuration scalars passed to all functions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from crowdrl_env.crowd_env import CrowdEnvConfig
 
 
 @dataclass
@@ -102,7 +105,7 @@ class EnvConfig(NamedTuple):
 
     @staticmethod
     def from_crowd_env_config(
-        cfg: "CrowdEnvConfig",
+        cfg: CrowdEnvConfig,
         max_agents: int = 64,
         max_segments: int = 128,
     ) -> "EnvConfig":

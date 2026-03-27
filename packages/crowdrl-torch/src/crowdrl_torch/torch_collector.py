@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from crowdrl_train.buffer import FlatBatch, RolloutBuffer
+from crowdrl_train.buffer import FlatBatch
 from crowdrl_train.networks import ActorCritic
 from crowdrl_train.normalizer import RewardNormalizer
 
@@ -142,7 +142,6 @@ class TorchRolloutCollector:
             if self.reward_normalizer is not None:
                 # Use mean across all active agents as the scalar signal
                 active_rewards = rewards_np[real_active]
-                active_dones = dones_np[real_active]
                 if active_rewards.size > 0:
                     rewards_np = self._normalize_rewards_batched(
                         rewards_np, dones_np, real_active
