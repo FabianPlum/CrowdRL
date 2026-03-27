@@ -26,7 +26,7 @@ from crowdrl_core.collision import (
     enforce_wall_boundaries,
 )
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
-from crowdrl_core.observation import ObsConfig, build_observation
+from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
 from crowdrl_env.geometry_generator import GeometryConfig, GeometryTier, generate_geometry
@@ -191,7 +191,7 @@ class CrowdEnv(gym.Env):
         cfg = self.config
 
         # --- 1. Interpret actions → desired velocities and orientations ---
-        results = interpret_actions_batch(
+        batch_result = interpret_actions_batch(
             actions,
             self._world.torso_orientations,
             self._world.torso_orientations,
@@ -199,39 +199,37 @@ class CrowdEnv(gym.Env):
             cfg.action,
         )
 
-        # --- 2. Apply velocity update (damped blending) ---
-        for i in range(self._n_agents):
-            if not self._active_mask[i]:
-                continue
-            desired_vel = results[i].desired_velocity
-            self._world.velocities[i] = (
-                cfg.velocity_damping * desired_vel
-                + (1.0 - cfg.velocity_damping) * self._world.velocities[i]
-            )
-            self._world.torso_orientations[i] = results[i].new_torso_orientation
-            self._world.head_orientations[i] = results[i].new_head_orientation
+        # --- 2. Apply velocity update (damped blending) — vectorized ---
+        mask = self._active_mask
+        self._world.velocities[mask] = (
+            cfg.velocity_damping * batch_result.desired_velocities[mask]
+            + (1.0 - cfg.velocity_damping) * self._world.velocities[mask]
+        )
+        self._world.torso_orientations[mask] = batch_result.new_torso_orientations[mask]
+        self._world.head_orientations[mask] = batch_result.new_head_orientations[mask]
 
         # --- 3. Collision detection and contact forces ---
+        # Detect collisions once, pass to both force computation and reward
+        collisions = detect_collisions(self._world)
         contact_forces = compute_contact_forces(
             self._world,
             stiffness=cfg.contact_stiffness,
             damping=cfg.contact_damping,
+            collisions=collisions,
         )
 
         # Collision mask for reward computation
-        collisions = detect_collisions(self._world)
         collision_mask = np.zeros(self._n_agents, dtype=np.bool_)
-        for i, j, _overlap in collisions:
-            collision_mask[i] = True
-            collision_mask[j] = True
+        if collisions:
+            col_arr = np.asarray(collisions)
+            col_i = col_arr[:, 0].astype(np.intp)
+            col_j = col_arr[:, 1].astype(np.intp)
+            collision_mask[col_i] = True
+            collision_mask[col_j] = True
 
         # --- 4. Physics integration (semi-implicit Euler) ---
-        # Apply contact forces as velocity impulse
-        for i in range(self._n_agents):
-            if not self._active_mask[i]:
-                continue
-            # F = ma, assume unit mass → a = F, v += a * dt
-            self._world.velocities[i] += contact_forces[i] * cfg.dt
+        # Apply contact forces as velocity impulse — vectorized
+        self._world.velocities[mask] += contact_forces[mask] * cfg.dt
 
         # Position update
         self._world.positions[self._active_mask] += (
@@ -411,11 +409,5 @@ class CrowdEnv(gym.Env):
 
     def _build_all_observations(self) -> NDArray[np.float64]:
         """Build observations for all agents (zero for inactive)."""
-        obs_dim = self.config.obs.obs_dim
-        obs = np.zeros((self._n_agents, obs_dim), dtype=np.float64)
-
-        for i in range(self._n_agents):
-            if self._active_mask[i]:
-                obs[i] = build_observation(self._world, i, self.config.obs)
-
-        return obs
+        self._world.active_mask = self._active_mask
+        return build_observations_batch(self._world, self.config.obs)
