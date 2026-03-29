@@ -49,4 +49,6 @@ extend-exclude = ["examples/"]
 [dependency-groups]
 dev = [
     "jupyter>=1.1.1",
+    "matplotlib-inline>=0.2.1",
+    "onnxscript>=0.6.2",
 ]
