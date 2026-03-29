@@ -12,10 +12,11 @@ in [JuPedSim](https://www.jupedsim.org/).
 
 ## Architecture
 
-The project is organised as a uv workspace with four packages that build in strict dependency order:
+The project is organised as a uv workspace with five packages that build in strict dependency order:
 
 ```
 crowdrl-core  ->  crowdrl-env  ->  crowdrl-train  -.onnx->  crowdrl-jupedsim
+                                \-> crowdrl-torch
 ```
 
 <p align="center">
@@ -26,7 +27,8 @@ crowdrl-core  ->  crowdrl-env  ->  crowdrl-train  -.onnx->  crowdrl-jupedsim
 |---------|---------|-----------------|
 | **crowdrl-core** | Shared geometry, perception, and action library. No RL or JuPedSim dependencies. | NumPy, Shapely, SciPy |
 | **crowdrl-env** | Gymnasium training environment with procedural geometry generation (Tiers 0-5) and multi-tier reward. | core + Gymnasium, Matplotlib |
-| **crowdrl-train** | MAPPO training loop, curriculum manager, ONNX/TorchScript policy export. | env + PyTorch |
+| **crowdrl-train** | MAPPO training loop, curriculum manager, ONNX policy export. | env + PyTorch |
+| **crowdrl-torch** | GPU-vectorised environments: batched PyTorch re-implementation of the env step for high-throughput training. | core + env + PyTorch |
 | **crowdrl-jupedsim** | `LearnedPolicyModel` adapter that plugs trained policies into JuPedSim's simulation loop. | core + JuPedSim, ONNX Runtime |
 
 The only artefact crossing from training to deployment is an `.onnx` policy file.
@@ -81,6 +83,7 @@ All observations are in egocentric frame.
 
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/) (recommended package manager)
+- CUDA-capable GPU (recommended for training; CPU-only works but is much slower)
 
 ### Installation
 
@@ -90,11 +93,24 @@ git clone https://github.com/FabianPlum/CrowdRL.git
 cd CrowdRL
 
 # Install all workspace packages in development mode
-uv sync --all-packages
+uv sync --all-packages --extra dev
 
 # Or install with notebook dependencies for running examples
 uv sync --all-packages --extra notebooks
 ```
+
+### GPU training and Triton
+
+The GPU-vectorised training pipeline (`crowdrl-torch`) uses `torch.compile` for
+kernel fusion and CUDA graph capture, which requires [Triton](https://github.com/triton-lang/triton).
+
+- **Linux**: Triton ships bundled with PyTorch -- no extra install needed.
+- **Windows**: Triton is **not available** (Linux x86_64 only). `torch.compile`
+  falls back to eager execution automatically. Training still works, just without
+  the fused-kernel speedup. For full performance on Windows, use
+  [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) with a Linux
+  PyTorch install.
+- **macOS**: Triton is not supported. Use CPU training or a Linux remote.
 
 ### Running tests
 
@@ -131,6 +147,9 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `01_geometry_and_navmesh.ipynb` | Build walkable polygons, construct navmeshes, run A\* + funnel pathfinding |
 | `02_sensing_and_observations.ipynb` | Raycasting, K-NN social queries, full observation assembly |
 | `03_mini_simulation.ipynb` | End-to-end mini simulation with procedural geometry and agent stepping |
+| `04_gymnasium_env.ipynb` | CrowdEnv Gymnasium environment: reset/step loop, reward tiers, visualisation |
+| `05_mappo_training.ipynb` | MAPPO training loop with curriculum progression |
+| `06_full_training.ipynb` | Full GPU-vectorised training with `crowdrl-torch`, async resets, ONNX export |
 
 ```bash
 uv sync --all-packages --extra notebooks
@@ -139,8 +158,8 @@ uv run jupyter lab
 
 ## Current status
 
-- **Active**: `crowdrl-core` (WorldState, geometry, navmesh, sensing, observation, action, collision) and `crowdrl-env` (procedural generator Tiers 0-2, visualiser)
-- **Not started**: `crowdrl-train`, `crowdrl-jupedsim`, Tier 3+ reward
+- **Active**: `crowdrl-core`, `crowdrl-env` (procedural generator Tiers 0-2, visualiser), `crowdrl-train` (MAPPO + curriculum), `crowdrl-torch` (GPU-vectorised environments)
+- **Not started**: `crowdrl-jupedsim`, Tier 3+ geometry, Tier 3 reward (distributional style matching)
 
 ## License
 

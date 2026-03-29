@@ -30,11 +30,11 @@ class ActionConfig:
     max_speed: float = 1.5
     """Maximum desired speed (m/s). Typical preferred pedestrian speed ~1.34 m/s."""
 
-    max_heading_change: float = np.pi / 4
-    """Maximum heading change per step (radians). π/4 = 45° per step."""
+    max_heading_change: float = np.pi / 12
+    """Maximum heading change per step (radians). π/12 = 15° per step."""
 
-    max_torso_change: float = np.pi / 6
-    """Maximum torso orientation change per step (radians). π/6 = 30° per step."""
+    max_torso_change: float = np.pi / 12
+    """Maximum torso orientation change per step (radians). π/12 = 15° per step."""
 
     max_head_change: float = np.pi / 3
     """Maximum head orientation change per step (radians). π/3 = 60° per step."""

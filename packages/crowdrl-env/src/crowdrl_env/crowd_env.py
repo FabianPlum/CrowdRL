@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 from crowdrl_core.action import ActionConfig, interpret_actions_batch
 from crowdrl_core.collision import (
     compute_contact_forces,
+    compute_min_wall_distances,
     detect_collisions,
     enforce_wall_boundaries,
 )
@@ -258,6 +259,10 @@ class CrowdEnv(gym.Env):
         enforce_wall_boundaries(self._world)
 
         # --- 5. Compute rewards ---
+        # Wall distances for proximity penalty
+        wall_distances = compute_min_wall_distances(self._world)
+        agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
+
         rewards, reached_goal = compute_rewards(
             positions=self._world.positions,
             velocities=self._world.velocities,
@@ -269,6 +274,9 @@ class CrowdEnv(gym.Env):
             state=self._reward_state,
             config=cfg.reward,
             dt=cfg.dt,
+            wall_distances=wall_distances,
+            agent_radii=agent_radii,
+            actions=actions,
         )
 
         # --- 6. Update active mask ---

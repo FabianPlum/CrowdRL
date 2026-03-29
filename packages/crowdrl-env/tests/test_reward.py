@@ -248,6 +248,215 @@ class TestTier2Smoothness:
         assert r_smooth[0] >= r_jerky[0]
 
 
+class TestWallProximityPenalty:
+    def test_wall_proximity_penalty_applied(self):
+        """Agents close to walls receive a penalty."""
+        cfg = RewardConfig(use_smoothness=False, wall_proximity_penalty=-0.3)
+        n = 2
+        positions = np.array([[0.0, 0.0], [5.0, 0.0]])
+        goals = np.array([[10.0, 0.0], [10.0, 0.0]])
+        velocities = np.ones((n, 2))
+        headings = np.zeros(n)
+        preferred_speeds = np.ones(n) * 1.34
+        active = np.ones(n, dtype=np.bool_)
+        collision = np.zeros(n, dtype=np.bool_)
+        state = _make_state(n)
+
+        # Agent 0 is very close to a wall, agent 1 is far
+        wall_distances = np.array([0.1, 5.0])
+        agent_radii = np.array([0.22, 0.22])  # threshold = 0.22 * 1.5 = 0.33
+
+        rewards, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state,
+            cfg,
+            dt=0.01,
+            wall_distances=wall_distances,
+            agent_radii=agent_radii,
+        )
+
+        # Agent 0 should have the wall penalty, agent 1 should not
+        assert rewards[0] < rewards[1]
+
+    def test_wall_proximity_disabled_when_zero(self):
+        """No wall penalty when weight is 0."""
+        cfg = RewardConfig(use_smoothness=False, wall_proximity_penalty=0.0)
+        n = 1
+        positions = np.array([[0.0, 0.0]])
+        goals = np.array([[10.0, 0.0]])
+        velocities = np.ones((n, 2))
+        headings = np.zeros(n)
+        preferred_speeds = np.ones(n) * 1.34
+        active = np.ones(n, dtype=np.bool_)
+        collision = np.zeros(n, dtype=np.bool_)
+        state = _make_state(n)
+
+        wall_distances = np.array([0.05])
+        agent_radii = np.array([0.22])
+
+        rewards_with, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state,
+            cfg,
+            dt=0.01,
+            wall_distances=wall_distances,
+            agent_radii=agent_radii,
+        )
+
+        state2 = _make_state(n)
+        rewards_without, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state2,
+            cfg,
+            dt=0.01,
+        )
+
+        np.testing.assert_allclose(rewards_with, rewards_without)
+
+
+class TestActionRatePenalty:
+    def test_action_rate_penalty_applied(self):
+        """Large action changes are penalised."""
+        cfg = RewardConfig(use_smoothness=False, action_rate_weight=-0.05)
+        n = 1
+        positions = np.array([[0.0, 0.0]])
+        goals = np.array([[10.0, 0.0]])
+        velocities = np.ones((n, 2))
+        headings = np.zeros(n)
+        preferred_speeds = np.ones(n) * 1.34
+        active = np.ones(n, dtype=np.bool_)
+        collision = np.zeros(n, dtype=np.bool_)
+        state = _make_state(n)
+
+        # First step: set prev_actions
+        actions_t0 = np.array([[0.0, 0.0, 0.0, 0.0]])
+        compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state,
+            cfg,
+            dt=0.01,
+            actions=actions_t0,
+        )
+
+        # Second step: large change
+        actions_t1 = np.array([[1.0, 1.0, 1.0, 1.0]])
+        rewards_big, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state,
+            cfg,
+            dt=0.01,
+            actions=actions_t1,
+        )
+
+        # Reset and do small change
+        state2 = _make_state(n)
+        compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state2,
+            cfg,
+            dt=0.01,
+            actions=actions_t0,
+        )
+        actions_t1_small = np.array([[0.01, 0.01, 0.01, 0.01]])
+        rewards_small, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state2,
+            cfg,
+            dt=0.01,
+            actions=actions_t1_small,
+        )
+
+        # Big action change should produce more penalty
+        assert rewards_big[0] < rewards_small[0]
+
+    def test_action_rate_no_penalty_first_step(self):
+        """No action rate penalty on the first step (no prev_actions)."""
+        cfg = RewardConfig(use_smoothness=False, action_rate_weight=-0.05)
+        n = 1
+        positions = np.array([[0.0, 0.0]])
+        goals = np.array([[10.0, 0.0]])
+        velocities = np.ones((n, 2))
+        headings = np.zeros(n)
+        preferred_speeds = np.ones(n) * 1.34
+        active = np.ones(n, dtype=np.bool_)
+        collision = np.zeros(n, dtype=np.bool_)
+        state = _make_state(n)
+
+        actions = np.array([[1.0, 1.0, 1.0, 1.0]])
+        rewards_with, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state,
+            cfg,
+            dt=0.01,
+            actions=actions,
+        )
+
+        state2 = _make_state(n)
+        rewards_without, _ = compute_rewards(
+            positions,
+            velocities,
+            headings,
+            goals,
+            preferred_speeds,
+            active,
+            collision,
+            state2,
+            cfg,
+            dt=0.01,
+        )
+
+        # First step should have no action rate penalty
+        np.testing.assert_allclose(rewards_with, rewards_without)
+
+
 class TestRewardState:
     def test_reset_clears_state(self):
         state = RewardState()

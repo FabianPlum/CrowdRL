@@ -221,6 +221,32 @@ def _points_to_segments_nearest_batch(
     return nearest, distances, normals
 
 
+def compute_min_wall_distances(world: WorldState) -> NDArray[np.float64]:
+    """Return the minimum distance from each agent to the nearest wall segment.
+
+    Parameters
+    ----------
+    world : WorldState
+
+    Returns
+    -------
+    min_distances : (n_agents,) — distance to nearest wall per agent.
+        Returns ``inf`` for agents with no wall segments available.
+    """
+    n = world.n_agents
+    if world.wall_segments is None or len(world.wall_segments) == 0:
+        return np.full(n, np.inf, dtype=np.float64)
+
+    seg_starts = np.array([s[0] for s in world.wall_segments])  # (W, 2)
+    seg_ends = np.array([s[1] for s in world.wall_segments])  # (W, 2)
+
+    _, distances, _ = _points_to_segments_nearest_batch(
+        world.positions, seg_starts, seg_ends
+    )  # distances: (N, W)
+
+    return distances.min(axis=1)  # (N,)
+
+
 # ---------------------------------------------------------------------------
 # Agent-agent + wall forces
 # ---------------------------------------------------------------------------

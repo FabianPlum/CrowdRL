@@ -292,6 +292,9 @@ class BatchedTorchEnv:
             prev_heading_changes=torch.zeros(
                 (self.n_envs, max_agents), dtype=torch.float32, device=dev
             ),
+            prev_actions=torch.zeros(
+                (self.n_envs, max_agents, 4), dtype=torch.float32, device=dev
+            ),
             n_agents=stack_field("n_agents"),
             step_count=torch.zeros(self.n_envs, dtype=torch.int32, device=dev),
         )
@@ -322,6 +325,7 @@ class BatchedTorchEnv:
                 self.states.prev_accelerations[env_idx] = 0.0
                 self.states.prev_headings[env_idx] = tensors["torso_orientations"]
                 self.states.prev_heading_changes[env_idx] = 0.0
+                self.states.prev_actions[env_idx] = 0.0
                 self.states.n_agents[env_idx] = tensors["n_agents"]
                 self.states.step_count[env_idx] = 0
 

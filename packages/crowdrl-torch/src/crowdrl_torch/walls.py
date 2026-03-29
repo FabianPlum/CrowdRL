@@ -78,6 +78,40 @@ def points_to_segments_nearest(
     return nearest, distances, normals
 
 
+def compute_min_wall_distances(
+    positions: Tensor,
+    wall_segments: Tensor,
+    n_segments: Tensor,
+) -> Tensor:
+    """Return minimum distance from each agent to nearest wall segment.
+
+    Parameters
+    ----------
+    positions : (E, N, 2)
+    wall_segments : (E, S, 2, 2)
+    n_segments : (E,) int
+
+    Returns
+    -------
+    min_distances : (E, N)
+    """
+    seg_starts = wall_segments[:, :, 0, :]  # (E, S, 2)
+    seg_ends = wall_segments[:, :, 1, :]  # (E, S, 2)
+    _, distances, _ = points_to_segments_nearest(positions, seg_starts, seg_ends)  # (E, N, S)
+
+    # Mask out padding segments (beyond n_segments per env)
+    S = wall_segments.shape[1]
+    seg_idx = torch.arange(S, device=wall_segments.device).unsqueeze(0)  # (1, S)
+    valid_mask = seg_idx < n_segments.unsqueeze(1)  # (E, S)
+    # Set invalid segment distances to a large value
+    distances = torch.where(
+        valid_mask.unsqueeze(1),  # (E, 1, S)
+        distances,
+        torch.full_like(distances, 1e6),
+    )
+    return distances.min(dim=-1).values  # (E, N)
+
+
 def point_in_polygon(
     points: Tensor,
     wall_segments: Tensor,

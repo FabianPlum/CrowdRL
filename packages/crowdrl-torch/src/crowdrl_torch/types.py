@@ -52,6 +52,9 @@ class TorchWorldState:
     prev_headings: Tensor  # (E, N)
     prev_heading_changes: Tensor  # (E, N)
 
+    # Previous actions (for action rate penalty)
+    prev_actions: Tensor  # (E, N, 4)
+
     # Bookkeeping
     n_agents: Tensor  # (E,) int32
     step_count: Tensor  # (E,) int32
@@ -81,8 +84,8 @@ class EnvConfig(NamedTuple):
 
     # Action
     max_speed: float = 1.5
-    max_heading_change: float = 0.7853981633974483  # pi/4
-    max_torso_change: float = 0.5235987755982988  # pi/6
+    max_heading_change: float = 0.2617993877991494  # pi/12
+    max_torso_change: float = 0.2617993877991494  # pi/12
     max_head_change: float = 1.0471975511965976  # pi/3
     head_limit: float = 1.5707963267948966  # pi/2
 
@@ -101,6 +104,9 @@ class EnvConfig(NamedTuple):
     timeout_penalty: float = -5.0
     goal_radius: float = 0.5
     progress_weight: float = 0.1
+    wall_proximity_penalty: float = -0.3
+    wall_proximity_threshold: float = 1.5
+    action_rate_weight: float = 0.0
 
     # Episode
     max_steps: int = 5000
@@ -141,6 +147,9 @@ class EnvConfig(NamedTuple):
             timeout_penalty=cfg.reward.timeout_penalty,
             goal_radius=cfg.reward.goal_radius,
             progress_weight=cfg.reward.progress_weight,
+            wall_proximity_penalty=cfg.reward.wall_proximity_penalty,
+            wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
+            action_rate_weight=cfg.reward.action_rate_weight,
             max_steps=cfg.max_steps,
         )
 
@@ -174,6 +183,7 @@ def make_initial_state(
         ),
         prev_headings=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         prev_heading_changes=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
+        prev_actions=torch.zeros((n_envs, max_agents, 4), dtype=torch.float32, device=device),
         n_agents=torch.zeros(n_envs, dtype=torch.int32, device=device),
         step_count=torch.zeros(n_envs, dtype=torch.int32, device=device),
     )

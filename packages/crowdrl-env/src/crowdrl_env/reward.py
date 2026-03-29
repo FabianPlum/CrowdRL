@@ -34,6 +34,18 @@ class RewardConfig:
     goal_radius: float = 0.5
     """Distance threshold (metres) for goal reached."""
 
+    # Wall collision penalty
+    wall_proximity_penalty: float = -0.3
+    """Penalty for agents too close to walls (smooth, distance-based)."""
+
+    wall_proximity_threshold: float = 1.5
+    """Wall proximity threshold as a multiple of agent radius."""
+
+    # Action rate penalty
+    action_rate_weight: float = 0.0
+    """Weight for penalising large changes in raw policy output between steps.
+    Negative value (e.g. -0.05). 0.0 = disabled."""
+
     # Tier 2: smoothness
     use_smoothness: bool = True
     """Whether to apply Tier 2 smoothness penalties."""
@@ -79,6 +91,9 @@ class RewardState:
     prev_goal_distances: NDArray[np.float64] | None = None
     """(n_agents,) — distances to goal from the previous step (for progress)."""
 
+    prev_actions: NDArray[np.float64] | None = None
+    """(n_agents, action_dim) — raw actions from the previous step (for action rate)."""
+
     def reset(self, n_agents: int, goal_distances: NDArray[np.float64]) -> None:
         """Reset reward state for a new episode."""
         self.prev_velocities = None
@@ -86,6 +101,7 @@ class RewardState:
         self.prev_headings = None
         self.prev_heading_changes = None
         self.prev_goal_distances = goal_distances.copy()
+        self.prev_actions = None
 
 
 def compute_rewards(
@@ -99,6 +115,10 @@ def compute_rewards(
     state: RewardState,
     config: RewardConfig,
     dt: float,
+    *,
+    wall_distances: NDArray[np.float64] | None = None,
+    agent_radii: NDArray[np.float64] | None = None,
+    actions: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
     """Compute per-agent rewards for one timestep.
 
@@ -114,6 +134,9 @@ def compute_rewards(
     state : RewardState — mutable, updated in-place
     config : RewardConfig
     dt : float — timestep duration
+    wall_distances : (n_agents,) optional — min distance to nearest wall per agent
+    agent_radii : (n_agents,) optional — agent body radii (for wall proximity threshold)
+    actions : (n_agents, action_dim) optional — raw policy output this step
 
     Returns
     -------
@@ -135,6 +158,22 @@ def compute_rewards(
 
     # Collision penalty
     rewards[collision_mask & active_mask] += config.collision_penalty
+
+    # Wall proximity penalty (smooth, distance-based)
+    if (
+        config.wall_proximity_penalty != 0.0
+        and wall_distances is not None
+        and agent_radii is not None
+    ):
+        threshold = agent_radii * config.wall_proximity_threshold
+        wall_proximity = (wall_distances < threshold) & active_mask
+        rewards[wall_proximity] += config.wall_proximity_penalty
+
+    # Action rate penalty (change in raw policy output between steps)
+    if config.action_rate_weight != 0.0 and actions is not None:
+        if state.prev_actions is not None:
+            action_change = np.linalg.norm(actions - state.prev_actions, axis=1)
+            rewards[active_mask] += config.action_rate_weight * action_change[active_mask]
 
     # Progress reward (potential-based shaping): r = prev_dist - curr_dist
     if state.prev_goal_distances is not None:
@@ -187,5 +226,7 @@ def compute_rewards(
     state.prev_velocities = velocities.copy()
     state.prev_headings = headings.copy()
     state.prev_goal_distances = goal_distances.copy()
+    if actions is not None:
+        state.prev_actions = actions.copy()
 
     return rewards, reached_goal

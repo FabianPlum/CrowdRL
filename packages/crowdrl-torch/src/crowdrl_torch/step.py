@@ -18,7 +18,7 @@ from crowdrl_torch.collision import compute_contact_forces, detect_collisions_pa
 from crowdrl_torch.observation import build_observations
 from crowdrl_torch.reward import compute_rewards
 from crowdrl_torch.types import EnvConfig, TorchWorldState
-from crowdrl_torch.walls import enforce_wall_boundaries
+from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
 
 
 def batched_step(
@@ -123,6 +123,12 @@ def batched_step(
     )
 
     # --- 7. Rewards ---
+    # Compute wall distances for proximity penalty
+    wall_distances = compute_min_wall_distances(
+        new_positions, state.wall_segments, state.n_segments
+    )
+    agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
+
     rewards, reached_goal, new_goal_distances = compute_rewards(
         new_positions,
         new_velocities,
@@ -131,6 +137,10 @@ def batched_step(
         collision_mask,
         state.prev_goal_distances,
         config,
+        wall_distances=wall_distances,
+        agent_radii=agent_radii,
+        actions=actions,
+        prev_actions=state.prev_actions,
     )
 
     # --- 8. Update active mask ---
@@ -184,6 +194,7 @@ def batched_step(
         prev_accelerations=new_prev_accelerations,
         prev_headings=new_torso_orientations,
         prev_heading_changes=state.prev_heading_changes,
+        prev_actions=actions,
         n_agents=state.n_agents,
         step_count=step_count,
     )
