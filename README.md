@@ -102,11 +102,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 git clone https://github.com/FabianPlum/CrowdRL.git
 cd CrowdRL
 
-# Install all workspace packages in development mode
+# Install all workspace packages in development mode (includes Jupyter)
 uv sync --all-packages --extra dev
-
-# Or install with notebook dependencies for running examples
-uv sync --all-packages --extra notebooks
 ```
 
 ### GPU training and Triton
@@ -162,7 +159,6 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `06_full_training.ipynb` | Full GPU-vectorised training with `crowdrl-torch`, async resets, ONNX export |
 
 ```bash
-uv sync --all-packages --extra notebooks
 uv run jupyter lab
 ```
 
