@@ -82,8 +82,18 @@ All observations are in egocentric frame.
 ### Prerequisites
 
 - Python >= 3.12
-- [uv](https://docs.astral.sh/uv/) (recommended package manager)
+- [uv](https://docs.astral.sh/uv/) package manager
 - CUDA-capable GPU (recommended for training; CPU-only works but is much slower)
+
+If you don't have uv installed ([full instructions](https://docs.astral.sh/uv/getting-started/installation/)):
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
 ### Installation
 
