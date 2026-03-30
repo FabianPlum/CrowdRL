@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master, main]
 
+env:
+  # CI runners have no GPU — redirect the CUDA pytorch index to CPU-only wheels
+  UV_INDEX_PYTORCH_CU126: https://download.pytorch.org/whl/cpu
+
 jobs:
   lint:
     runs-on: ubuntu-latest
