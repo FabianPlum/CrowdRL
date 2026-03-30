@@ -38,6 +38,9 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
+# Example outputs (generated GIFs, videos, etc.)
+examples/outputs/
+
 # Logs
 *.log
 wandb/
