@@ -31,4 +31,4 @@ jobs:
       - run: uv sync --all-packages --extra dev
       # Replace CUDA torch with CPU-only build (CI runners have no GPU)
       - run: uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu --reinstall
-      - run: uv run pytest --tb=short -q
+      - run: uv run --no-sync pytest --tb=short -q
