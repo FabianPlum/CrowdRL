@@ -112,11 +112,15 @@ The GPU-vectorised training pipeline (`crowdrl-torch`) uses `torch.compile` for
 kernel fusion and CUDA graph capture, which requires [Triton](https://github.com/triton-lang/triton).
 
 - **Linux**: Triton ships bundled with PyTorch -- no extra install needed.
-- **Windows**: Triton is **not available** (Linux x86_64 only). `torch.compile`
-  falls back to eager execution automatically. Training still works, just without
-  the fused-kernel speedup. For full performance on Windows, use
-  [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) with a Linux
-  PyTorch install.
+- **Windows**: Supported via [triton-windows](https://github.com/triton-lang/triton-windows),
+  included as a dev dependency. `torch.compile` works natively with CUDA GPUs.
+  The package automatically sets a short `TORCHINDUCTOR_CACHE_DIR` (`C:\tmp\torchinductor`)
+  to avoid Windows MAX_PATH (260 character) errors from Triton's generated filenames.
+  For best results, also enable long path support system-wide (requires reboot):
+  ```powershell
+  # Run in an admin PowerShell
+  reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+  ```
 - **macOS**: Triton is not supported. Use CPU training or a Linux remote.
 
 ### Running tests
