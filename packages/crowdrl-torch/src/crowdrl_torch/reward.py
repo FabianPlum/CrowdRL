@@ -91,6 +91,14 @@ def compute_rewards(
             rewards,
         )
 
+    # Existence penalty: every step alive costs you
+    if config.existence_penalty != 0.0:
+        rewards = torch.where(
+            active_mask,
+            rewards + config.existence_penalty,
+            rewards,
+        )
+
     # Progress reward (potential-based shaping)
     progress = prev_goal_distances - goal_distances
     rewards = torch.where(active_mask, rewards + config.progress_weight * progress, rewards)
