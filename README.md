@@ -161,6 +161,7 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `04_gymnasium_env.ipynb` | CrowdEnv Gymnasium environment: reset/step loop, reward tiers, visualisation |
 | `05_mappo_training.ipynb` | MAPPO training loop with curriculum progression |
 | `06_full_training.ipynb` | Full GPU-vectorised training with `crowdrl-torch`, async resets, ONNX export |
+| `07_complex_geometry.ipynb` | Tier 3a/3b procedural geometry: rooms with obstacles, multi-room layouts, navmesh pathfinding |
 
 ```bash
 uv run jupyter lab
@@ -168,8 +169,8 @@ uv run jupyter lab
 
 ## Current status
 
-- **Active**: `crowdrl-core`, `crowdrl-env` (procedural generator Tiers 0-2, visualiser), `crowdrl-train` (MAPPO + curriculum), `crowdrl-torch` (GPU-vectorised environments)
-- **Not started**: `crowdrl-jupedsim`, Tier 3+ geometry, Tier 3 reward (distributional style matching)
+- **Active**: `crowdrl-core`, `crowdrl-env` (procedural generator Tiers 0-3b, visualiser), `crowdrl-train` (MAPPO + curriculum), `crowdrl-torch` (GPU-vectorised environments)
+- **Not started**: `crowdrl-jupedsim`, Tier 4-5 geometry, Tier 3 reward (distributional style matching)
 
 ## License
 
