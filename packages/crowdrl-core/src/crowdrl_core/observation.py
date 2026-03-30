@@ -49,6 +49,9 @@ class ObsConfig:
     use_navmesh: bool = False
     """Whether to include navmesh signals (next-waypoint direction + path deviation)."""
 
+    navmesh_max_waypoints: int = 16
+    """Maximum number of pre-computed waypoints per agent for GPU waypoint lookup."""
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""
