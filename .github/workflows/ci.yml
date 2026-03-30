@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: [master, main]
 
-env:
-  # CI runners have no GPU — redirect the CUDA pytorch index to CPU-only wheels
-  UV_INDEX_PYTORCH_CU126: https://download.pytorch.org/whl/cpu
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -17,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-packages --extra dev
+      # Replace CUDA torch with CPU-only build (CI runners have no GPU)
+      - run: uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu --reinstall
       - run: uv run ruff check .
       - run: uv run ruff format --check .
 
@@ -31,4 +29,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-packages --extra dev
+      # Replace CUDA torch with CPU-only build (CI runners have no GPU)
+      - run: uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu --reinstall
       - run: uv run pytest --tb=short -q
