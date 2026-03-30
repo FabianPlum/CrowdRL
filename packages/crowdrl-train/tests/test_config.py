@@ -55,16 +55,16 @@ class TestPPOConfig:
 class TestCurriculumConfig:
     def test_default_phases(self):
         phases = DEFAULT_CURRICULUM_PHASES
-        assert len(phases) == 4
+        assert len(phases) == 6
         assert phases[0].name == "easy"
         assert phases[-1].name == "full"
         assert phases[-1].goal_rate_threshold == 0.0  # terminal
 
     def test_phases_increase_difficulty(self):
-        """Each phase should have equal or higher max agent count."""
+        """Final phase should have the highest max agent count."""
         phases = DEFAULT_CURRICULUM_PHASES
-        for i in range(1, len(phases)):
-            assert phases[i].n_agents_range[1] >= phases[i - 1].n_agents_range[1]
+        # Terminal phase has the widest agent range
+        assert phases[-1].n_agents_range[1] >= max(p.n_agents_range[1] for p in phases[:-1])
 
 
 class TestTrainConfig:

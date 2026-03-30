@@ -163,8 +163,26 @@ DEFAULT_CURRICULUM_PHASES: tuple[CurriculumPhase, ...] = (
         goal_rate_threshold=0.5,
     ),
     CurriculumPhase(
+        name="rooms",
+        geometry_tiers=(GeometryTier.TIER_2, GeometryTier.TIER_3A),
+        n_agents_range=(15, 40),
+        goal_rate_threshold=0.5,
+    ),
+    CurriculumPhase(
+        name="complex",
+        geometry_tiers=(GeometryTier.TIER_3A, GeometryTier.TIER_3B),
+        n_agents_range=(20, 60),
+        goal_rate_threshold=0.4,
+    ),
+    CurriculumPhase(
         name="full",
-        geometry_tiers=(GeometryTier.TIER_0, GeometryTier.TIER_1, GeometryTier.TIER_2),
+        geometry_tiers=(
+            GeometryTier.TIER_0,
+            GeometryTier.TIER_1,
+            GeometryTier.TIER_2,
+            GeometryTier.TIER_3A,
+            GeometryTier.TIER_3B,
+        ),
         n_agents_range=(20, 100),
         goal_rate_threshold=0.0,
     ),
