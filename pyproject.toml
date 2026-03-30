@@ -53,5 +53,6 @@ dev = [
     "matplotlib-inline>=0.2.1",
     "onnxscript>=0.6.2",
     "torch==2.6.0",
+    "triton>=3.1.0,<3.2.0; sys_platform == 'linux'",
     "triton-windows>=3.2.0,<3.3.0; sys_platform == 'win32'",
 ]
