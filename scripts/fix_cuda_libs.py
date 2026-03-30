@@ -19,11 +19,11 @@ from pathlib import Path
 
 PTH_NAME = "_nvidia_cuda_preload.pth"
 PTH_CONTENT = (
-    'import ctypes, importlib.util, os;'
+    "import ctypes, importlib.util, os;"
     ' spec = importlib.util.find_spec("nvidia.cusparselt");'
-    ' ctypes.cdll.LoadLibrary('
+    " ctypes.cdll.LoadLibrary("
     'os.path.join(spec.submodule_search_locations[0], "lib", "libcusparseLt.so.0")'
-    ') if spec else None\n'
+    ") if spec else None\n"
 )
 
 
