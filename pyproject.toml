@@ -55,4 +55,19 @@ dev = [
     "torch==2.6.0",
     "triton>=3.1.0,<3.2.0; sys_platform == 'linux'",
     "triton-windows>=3.2.0,<3.3.0; sys_platform == 'win32'",
+    # CUDA runtime libs — PyTorch cu126 wheel needs these but the index
+    # strips them from metadata, so we list them explicitly.
+    "nvidia-cublas-cu12; sys_platform == 'linux'",
+    "nvidia-cuda-cupti-cu12; sys_platform == 'linux'",
+    "nvidia-cuda-nvrtc-cu12; sys_platform == 'linux'",
+    "nvidia-cuda-runtime-cu12; sys_platform == 'linux'",
+    "nvidia-cudnn-cu12; sys_platform == 'linux'",
+    "nvidia-cufft-cu12; sys_platform == 'linux'",
+    "nvidia-curand-cu12; sys_platform == 'linux'",
+    "nvidia-cusolver-cu12; sys_platform == 'linux'",
+    "nvidia-cusparse-cu12; sys_platform == 'linux'",
+    "nvidia-cusparselt-cu12; sys_platform == 'linux'",
+    "nvidia-nccl-cu12; sys_platform == 'linux'",
+    "nvidia-nvjitlink-cu12; sys_platform == 'linux'",
+    "nvidia-nvtx-cu12; sys_platform == 'linux'",
 ]
