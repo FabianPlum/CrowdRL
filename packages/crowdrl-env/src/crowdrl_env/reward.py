@@ -59,6 +59,11 @@ class RewardConfig:
     speed_deviation_weight: float = -0.1
     """Weight for deviation from preferred speed."""
 
+    # Existence penalty (per-step cost for being alive)
+    existence_penalty: float = -0.01
+    """Small negative reward every step an agent is active.
+    Pressures agents to reach their goal quickly. 0.0 = disabled."""
+
     # Progress reward (shaped)
     progress_weight: float = 0.1
     """Reward for getting closer to goal (potential-based shaping)."""
@@ -174,6 +179,10 @@ def compute_rewards(
         if state.prev_actions is not None:
             action_change = np.linalg.norm(actions - state.prev_actions, axis=1)
             rewards[active_mask] += config.action_rate_weight * action_change[active_mask]
+
+    # Existence penalty: every step alive costs you
+    if config.existence_penalty != 0.0:
+        rewards[active_mask] += config.existence_penalty
 
     # Progress reward (potential-based shaping): r = prev_dist - curr_dist
     if state.prev_goal_distances is not None:
