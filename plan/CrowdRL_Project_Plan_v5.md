@@ -581,3 +581,95 @@ The plan's "path deviation scalar" was described as "perpendicular distance from
 - [ ] crowdrl-jupedsim package (ONNX runtime adapter)
 - [ ] Integration tests (obs parity between training and deployment)
 
+## 2026-03-30 — Tier 3 geometry + existence penalty + curriculum expansion
+
+### Tier 3 procedural geometry (crowdrl-env)
+
+Implemented two new geometry tiers completing the "rooms with obstacles" layer from the project plan (Section 3.2, Tier 3).
+
+**Tier 3a — Rooms with obstacles:**
+- Starts from a random Tier 0–2 base room
+- Places random obstacles via rejection sampling: rectangular furniture blocks (random rotation) and circular columns, buffered 0.3m from walls
+- Obstacle coverage configurable (default 5–20% of floor area)
+- Cuts 1–2 door openings in bounding-box walls (configurable width 0.8–2.0m)
+- Optional shared-goal mode (configurable probability, default 40%): all agents target one evacuation exit
+- Metadata tracks: base tier/shape, obstacle count, door count, shared-goal flag
+
+**Tier 3b — Composed multi-room layouts:**
+- Generates 2–3 rooms from Tier 0–2 primitives (configurable range)
+- Arranges rooms side-by-side with connecting corridor links (1.5–4.0m gap, 1.5–3.0m wide)
+- Places obstacles inside merged walkable area
+- Cuts 1–2 exterior evacuation doors
+- Spawn regions: translated room interiors; goal regions: evacuation doors + connector corridors
+- Metadata tracks: room count/shapes, connector count, evacuation door count
+
+**Statistics (50 samples each):**
+- Tier 3a: 76.6 ± 67.8 m² area, 14.4 ± 9.5 holes, 248.9 ± 159.6 navmesh triangles
+- Tier 3b: 64.0 ± 35.6 m² area, 9.2 ± 6.1 holes, 166.5 ± 101.6 navmesh triangles
+- Solvability (30 geometries × 20 pairs): 3a mean 81.7%, 3b mean 77.5% — validates need for prune/regenerate modes
+
+**New config fields on `GeometryConfig`:**
+- `obstacle_coverage_range`, `obstacle_min_size`, `obstacle_max_size`, `column_radius_range`
+- `door_width_range`, `shared_goal_probability`, `n_rooms_range`
+
+### Existence penalty (crowdrl-env + crowdrl-torch)
+
+Added `existence_penalty` to `RewardConfig` (default -0.01): a small negative reward every step an agent is active. Pressures agents to reach goals quickly rather than drifting. Applied to both CPU (`crowdrl-env/reward.py`) and GPU (`crowdrl-torch/reward.py`) reward paths, threaded through `EnvConfig`.
+
+### Curriculum expansion (crowdrl-train)
+
+Extended `DEFAULT_CURRICULUM_PHASES` from 4 to 6 phases:
+
+| Phase | Name | Tiers | Agents | Threshold |
+|-------|------|-------|--------|-----------|
+| 1 | easy | 0 | 5–10 | 0.6 |
+| 2 | medium | 0–1 | 8–20 | 0.5 |
+| 3 | hard | 1–2 | 20–50 | 0.5 |
+| 4 | rooms | 2, 3a | 15–40 | 0.5 |
+| 5 | complex | 3a, 3b | 20–60 | 0.4 |
+| 6 | full | 0–3b | 20–100 | 0.0 |
+
+The "rooms" phase introduces obstacles in familiar corridor shapes; "complex" adds multi-room composition. The terminal "full" phase now covers all implemented tiers.
+
+### Example notebook 07 — Complex Geometry
+
+New notebook `examples/07_complex_geometry.ipynb` demonstrating:
+- Tier 3a generation with obstacle and door visualisation
+- Tier 3a forced shared-goal (evacuation) mode
+- Tier 3b multi-room composition (2 and 3 rooms)
+- Navmesh construction on cluttered polygons with holes
+- A* + funnel shortest paths through obstacles and corridor links
+- Solvability statistics across 30 geometries per tier
+- Geometry summary statistics (area, holes, wall segments, triangles)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `crowdrl-env/geometry_generator.py` | +395 LOC: Tier 3a/3b generators, obstacle placement, door cutting |
+| `crowdrl-env/tests/test_geometry_generator.py` | +117 LOC: TestTier3a (5 tests) + TestTier3b (7 tests) |
+| `crowdrl-env/reward.py` | Added `existence_penalty` field + computation |
+| `crowdrl-torch/reward.py` | Ported existence penalty to GPU |
+| `crowdrl-torch/types.py` | Added `existence_penalty` to EnvConfig |
+| `crowdrl-train/config.py` | 2 new curriculum phases, expanded "full" phase |
+| `crowdrl-train/tests/test_config.py` | Updated phase count + relaxed monotonicity assertion |
+| `examples/07_complex_geometry.ipynb` | New notebook for Tier 3 demonstration |
+| `examples/06_full_training.ipynb` | Minor cleanup (cell IDs, output clearing) |
+
+### Updated "what remains"
+
+**Immediate (training validation):**
+- [ ] Large-scale training runs with GPU env + navmesh waypoints
+- [ ] Verify agents learn to follow waypoints in Tier 1-2 geometries
+- [ ] Verify curriculum progresses through Tier 3a/3b phases
+- [ ] Document emergent behaviours (M4)
+
+**Medium-term:**
+- [ ] Geometry Tiers 4-5 (building floors, multi-floor evacuation)
+- [ ] External geometry importer (IAS-7 test geometries)
+- [ ] Tier 3 reward (distributional style matching from PeTrack data)
+
+**Deployment:**
+- [ ] crowdrl-jupedsim package (ONNX runtime adapter)
+- [ ] Integration tests (obs parity between training and deployment)
+
