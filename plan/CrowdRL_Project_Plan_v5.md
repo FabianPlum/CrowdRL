@@ -447,3 +447,137 @@ Added `inverse_distance_weight` to `RewardConfig` — continuous proximity-to-go
 - Tier 3 reward (distributional style matching)
 - Geometry Tiers 3-5
 
+## 2026-03-28 — crowdrl-torch: GPU-vectorised environments
+
+### New package: crowdrl-torch
+
+A full GPU-vectorised re-implementation of the environment step, replacing `SubprocVecEnv` with batched tensor operations on a single GPU. All N_ENVS environments are processed in one call with shapes `(E, N, ...)`. No subprocess pipes, no IPC overhead.
+
+| Module | Purpose |
+|--------|---------|
+| `types.py` | `EnvConfig` (frozen dataclass from `CrowdEnvConfig`) + `TorchWorldState` (NamedTuple of all state tensors) |
+| `action.py` | Vectorised action interpretation (speed, heading, torso, head) |
+| `collision.py` | Pairwise elliptical collision detection + Hertzian contact forces |
+| `walls.py` | Wall distance computation + boundary enforcement |
+| `sensing.py` | Batched raycasting (head-anchored FOV) + KNN social query |
+| `observation.py` | Full observation builder (ego + social + rays), mirrors `crowdrl-core` |
+| `reward.py` | Vectorised reward computation (all Tier 1+2 terms) |
+| `step.py` | `batched_step()` — the complete step function, `torch.compile`-compatible |
+| `batched_env.py` | `BatchedTorchEnv` — manages N_ENVS on GPU with async CPU reset thread pool |
+| `episode_factory.py` | CPU-side episode generation (geometry, spawning, solvability, navmesh) |
+| `geometry_repr.py` | NumPy padding for CPU→GPU transfer |
+| `normalizer.py` | Welford running stats for obs/reward normalisation (GPU tensors) |
+| `torch_collector.py` | Rollout collection + GAE computation on GPU |
+
+**Key capabilities:**
+- `torch.compile(mode="reduce-overhead")` for kernel fusion + CUDA graph capture
+- Async CPU episode generation via `ThreadPoolExecutor` (no step-blocking resets)
+- >100k steps/sec on single laptop GPU (target met)
+- Windows support via `triton-windows` package with MAX_PATH workaround
+- `test_equivalence.py` validates numerical parity with CPU `crowdrl-core`
+
+**Deviations from original plan:**
+- The plan described a 5th package (`crowdrl-torch`) not in the original 4-package architecture. It sits alongside `crowdrl-train` rather than replacing it — `crowdrl-train` handles the PPO/curriculum logic, `crowdrl-torch` handles the GPU environment. The `torch_collector.py` bridges the two.
+- `SubprocVecEnv` (added 2026-03-27) was superseded within days by the GPU-vectorised approach. It remains in `crowdrl-train` as a CPU fallback but is no longer the primary training path.
+
+### Reward extensions
+
+Added to `crowdrl-env` and ported to `crowdrl-torch`:
+- `wall_proximity_penalty` — smooth gradient penalty before hard wall contact (configurable threshold as multiple of agent body radius)
+- `action_rate_penalty` — penalises frame-to-frame action change, targeting policy output directly (more direct than jerk/angular-acceleration smoothness terms)
+- `inverse_distance_weight` — continuous proximity-to-goal signal
+
+### CI fixes
+
+- Pinned `torch==2.6.0+cu126` with GPU index for training, CPU-only override in CI
+- `triton-windows` restricted to `sys_platform == "win32"` to avoid breaking Linux CI
+- CI uses `--no-sync` for pytest to preserve CPU torch override
+
+### Updated test suite: 288 tests total
+
+| Package | Tests | Pass rate |
+|---------|-------|-----------|
+| crowdrl-core | 119 | 100% |
+| crowdrl-env | 86 | 100% |
+| crowdrl-train | 71 | 100% |
+| crowdrl-torch | 12 | 100% |
+| **Total** | **288** | **100%** |
+
+### Example notebooks
+
+| # | Title | Status |
+|---|-------|--------|
+| 06 | Full Training | Rewritten for GPU-vectorised `crowdrl-torch`, async resets, ONNX export, MP4 video rendering |
+
+## 2026-03-30 — GPU-native navmesh waypoint signals
+
+### Problem
+
+Agents in Tier 1-2 geometries (corridors, T-junctions, bottlenecks) only see a straight-line goal direction that points through walls. They need shortest-path guidance (navmesh waypoints) in their observation vector, but CPU navmesh code cannot be called per-step without destroying GPU throughput.
+
+### Solution: pre-compute + pure tensor lookup
+
+Sparse waypoints (typically 1-8 turning points) are pre-computed once at episode reset via A* + funnel on CPU, then stored as padded GPU tensors. Each step uses a pure-tensor lookup with zero CPU involvement:
+
+1. **Pre-compute at reset (CPU, amortised):** `shortest_path()` per agent → waypoint sequence + cumulative remaining path lengths. ~1ms added to episode reset.
+2. **Per-step GPU lookup:** `torch.gather` for current + next waypoints, distance-weighted blending (closer waypoint = less influence for smooth gradient), ego-frame rotation, path deviation from pre-computed cumulative lengths. Monotonic cursor advancement via `torch.where`.
+3. **Observation signal:** 3D — `[waypoint_dir_ego_x, waypoint_dir_ego_y, path_deviation]`, concatenated to produce 82D obs (up from 79D).
+
+All operations are pure tensor ops, fully `torch.compile`-compatible. Computational cost: ~10 element-wise ops on (E, N) tensors — comparable to one layer of contact force computation.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `crowdrl-core/observation.py` | Added `navmesh_max_waypoints` to `ObsConfig` |
+| `crowdrl-torch/types.py` | Added waypoint fields to `EnvConfig` + `TorchWorldState` |
+| `crowdrl-torch/episode_factory.py` | Pre-compute waypoints per agent at reset |
+| `crowdrl-torch/geometry_repr.py` | Pad waypoint arrays to fixed shape |
+| `crowdrl-torch/batched_env.py` | Thread waypoints through full reset/step pipeline |
+| `crowdrl-torch/observation.py` | `compute_navmesh_signals()` — pure tensor ops |
+| `crowdrl-torch/step.py` | Waypoint cursor advancement + wiring |
+| `examples/06_full_training.ipynb` | Enable `use_navmesh=True`, infer `obs_dim`, document all reward terms |
+
+### Deviation from plan
+
+The original plan (Section 3.2) described navmesh waypoint signals as computed per-step from the A* router. The implementation pre-computes sparse waypoints at episode reset and uses GPU tensor lookups per step. This was necessary to maintain >100k steps/sec throughput. The observation signal content (next-waypoint direction + path deviation) matches the plan, but the computation path is fundamentally different. See `plan/gpu_navmesh_waypoints.md` for the full implementation design.
+
+The plan's "path deviation scalar" was described as "perpendicular distance from the agent's current position to the planned path, normalised by corridor width." The implementation uses `(remaining_path_length / euclidean_distance_to_goal) - 1` instead — a ratio that captures how much longer the actual path is vs. a straight line. This is more informative (tells the agent how "windy" its remaining path is) and doesn't require computing point-to-polyline distance, which would be expensive on GPU.
+
+### Current status summary
+
+**Milestone M1 (Environment prototype): COMPLETE**
+- All geometry tiers 0-2 implemented and tested
+- Solvability verification with 3 modes
+- Navmesh router providing waypoint signals
+- GPU-vectorised environment with >100k steps/sec
+
+**Milestone M2 (Baseline RL agent): COMPLETE**
+- Single-agent PPO verified during M3 development
+
+**Milestone M3 (MARL training): SUBSTANTIALLY COMPLETE**
+- MAPPO with parameter sharing, 20-100 agents
+- Tier 1+2 rewards including wall proximity, action rate, inverse distance
+- GPU-vectorised training with `torch.compile` + CUDA graphs
+- Curriculum manager with success-rate-driven phase advancement
+- ONNX export pipeline verified
+- **Remaining:** Large-scale training runs (10M+ timesteps) to validate convergence and emergent behaviour
+
+**Milestones M4-M9: NOT STARTED**
+
+### What remains
+
+**Immediate (training validation):**
+- [ ] Large-scale training runs with GPU env + navmesh waypoints
+- [ ] Verify agents learn to follow waypoints in Tier 1-2 geometries
+- [ ] Document emergent behaviours (M4)
+
+**Medium-term:**
+- [ ] Geometry Tiers 3-5
+- [ ] External geometry importer (IAS-7 test geometries)
+- [ ] Tier 3 reward (distributional style matching from PeTrack data)
+
+**Deployment:**
+- [ ] crowdrl-jupedsim package (ONNX runtime adapter)
+- [ ] Integration tests (obs parity between training and deployment)
+
