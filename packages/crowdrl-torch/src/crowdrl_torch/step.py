@@ -167,7 +167,29 @@ def batched_step(
         new_active_mask,
     )
 
-    # --- 10. Update reward temporal state ---
+    # --- 10. Advance waypoint cursor ---
+    # An agent's cursor advances when it gets close enough to the current waypoint.
+    # This is a monotonic index — once passed, a waypoint is never reconsidered.
+    if config.use_navmesh:
+        wp_cursor = state.waypoint_cursor.long()
+        wp_max_idx = (state.n_waypoints.long() - 1).clamp(min=0)
+        cur_idx = wp_cursor.clamp(min=0, max=config.max_waypoints - 1).clamp(max=wp_max_idx)
+
+        # Gather current waypoint position: (E, N, 2)
+        gather_idx = cur_idx.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
+        cur_wp = state.waypoints.gather(2, gather_idx).squeeze(2)
+
+        # Distance to current waypoint
+        dist_to_wp = ((new_positions - cur_wp) ** 2).sum(dim=-1).sqrt()
+
+        # Advance cursor where agent is within crossing threshold
+        advance = (dist_to_wp < config.waypoint_crossing_threshold) & new_active_mask
+        new_wp_cursor = torch.where(advance, wp_cursor + 1, wp_cursor)
+        new_wp_cursor = new_wp_cursor.clamp(max=wp_max_idx).to(state.waypoint_cursor.dtype)
+    else:
+        new_wp_cursor = state.waypoint_cursor
+
+    # --- 11. Update reward temporal state ---
     has_prev = state.prev_velocities.any(dim=-1, keepdim=True)
     new_prev_accelerations = torch.where(
         has_prev,
@@ -175,7 +197,7 @@ def batched_step(
         state.prev_accelerations,
     )
 
-    # --- 11. Build new state ---
+    # --- 12. Build new state ---
     new_state = TorchWorldState(
         positions=new_positions,
         velocities=new_velocities,
@@ -195,11 +217,15 @@ def batched_step(
         prev_headings=new_torso_orientations,
         prev_heading_changes=state.prev_heading_changes,
         prev_actions=actions,
+        waypoints=state.waypoints,
+        n_waypoints=state.n_waypoints,
+        waypoint_cursor=new_wp_cursor,
+        waypoint_path_lengths=state.waypoint_path_lengths,
         n_agents=state.n_agents,
         step_count=step_count,
     )
 
-    # --- 12. Build observations ---
+    # --- 13. Build observations ---
     observations = build_observations(
         new_positions,
         new_velocities,
@@ -213,6 +239,10 @@ def batched_step(
         state.wall_segments,
         state.n_segments,
         config,
+        waypoints=state.waypoints,
+        n_waypoints=state.n_waypoints,
+        waypoint_cursor=new_wp_cursor,
+        waypoint_path_lengths=state.waypoint_path_lengths,
     )
 
     return new_state, observations, rewards, terminated, truncated
