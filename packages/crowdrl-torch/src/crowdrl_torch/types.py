@@ -55,6 +55,12 @@ class TorchWorldState:
     # Previous actions (for action rate penalty)
     prev_actions: Tensor  # (E, N, 4)
 
+    # Navmesh waypoints (static per episode, pre-computed at reset)
+    waypoints: Tensor  # (E, N, MAX_WP, 2) world-frame XY
+    n_waypoints: Tensor  # (E, N) int32 — actual count per agent
+    waypoint_cursor: Tensor  # (E, N) int32 — current progress index
+    waypoint_path_lengths: Tensor  # (E, N, MAX_WP) cumulative remaining distance to goal
+
     # Bookkeeping
     n_agents: Tensor  # (E,) int32
     step_count: Tensor  # (E,) int32
@@ -81,6 +87,9 @@ class EnvConfig(NamedTuple):
     max_range: float = 5.0
     k_neighbours: int = 8
     obs_dim: int = 79  # 7 + 8*7 + 16
+    use_navmesh: bool = False
+    max_waypoints: int = 16
+    waypoint_crossing_threshold: float = 0.5
 
     # Action
     max_speed: float = 1.5
@@ -151,6 +160,7 @@ class EnvConfig(NamedTuple):
             wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
             action_rate_weight=cfg.reward.action_rate_weight,
             max_steps=cfg.max_steps,
+            use_navmesh=cfg.obs.use_navmesh,
         )
 
 
@@ -158,6 +168,7 @@ def make_initial_state(
     n_envs: int = 1,
     max_agents: int = 64,
     max_segments: int = 128,
+    max_waypoints: int = 16,
     device: torch.device | str = "cpu",
 ) -> TorchWorldState:
     """Create a zeroed-out TorchWorldState with the given sizes."""
@@ -184,6 +195,14 @@ def make_initial_state(
         prev_headings=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         prev_heading_changes=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         prev_actions=torch.zeros((n_envs, max_agents, 4), dtype=torch.float32, device=device),
+        waypoints=torch.zeros(
+            (n_envs, max_agents, max_waypoints, 2), dtype=torch.float32, device=device
+        ),
+        n_waypoints=torch.zeros((n_envs, max_agents), dtype=torch.int32, device=device),
+        waypoint_cursor=torch.zeros((n_envs, max_agents), dtype=torch.int32, device=device),
+        waypoint_path_lengths=torch.zeros(
+            (n_envs, max_agents, max_waypoints), dtype=torch.float32, device=device
+        ),
         n_agents=torch.zeros(n_envs, dtype=torch.int32, device=device),
         step_count=torch.zeros(n_envs, dtype=torch.int32, device=device),
     )
