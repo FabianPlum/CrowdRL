@@ -105,6 +105,10 @@ class BatchedTorchEnv:
             self.states.wall_segments,
             self.states.n_segments,
             self.config,
+            waypoints=self.states.waypoints,
+            n_waypoints=self.states.n_waypoints,
+            waypoint_cursor=self.states.waypoint_cursor,
+            waypoint_path_lengths=self.states.waypoint_path_lengths,
         )
 
         return self.states, obs
@@ -224,6 +228,10 @@ class BatchedTorchEnv:
             wall_segments=raw["wall_segments"],
             max_agents=self.config.max_agents,
             max_segments=self.config.max_segments,
+            waypoints=raw.get("waypoints"),
+            n_waypoints=raw.get("n_waypoints"),
+            waypoint_path_lengths=raw.get("waypoint_path_lengths"),
+            max_waypoints=self.config.max_waypoints,
         )
 
     def _data_to_tensors(self, data: dict[str, NDArray]) -> dict[str, torch.Tensor]:
@@ -254,6 +262,11 @@ class BatchedTorchEnv:
             "n_agents": torch.tensor(data["n_agents"], dtype=torch.int32, device=dev),
             "goal_distances": torch.tensor(
                 data["goal_distances"], dtype=torch.float32, device=dev
+            ),
+            "waypoints": torch.tensor(data["waypoints"], dtype=torch.float32, device=dev),
+            "n_waypoints": torch.tensor(data["n_waypoints"], dtype=torch.int32, device=dev),
+            "waypoint_path_lengths": torch.tensor(
+                data["waypoint_path_lengths"], dtype=torch.float32, device=dev
             ),
         }
 
@@ -295,6 +308,10 @@ class BatchedTorchEnv:
             prev_actions=torch.zeros(
                 (self.n_envs, max_agents, 4), dtype=torch.float32, device=dev
             ),
+            waypoints=stack_field("waypoints"),
+            n_waypoints=stack_field("n_waypoints"),
+            waypoint_cursor=torch.zeros((self.n_envs, max_agents), dtype=torch.int32, device=dev),
+            waypoint_path_lengths=stack_field("waypoint_path_lengths"),
             n_agents=stack_field("n_agents"),
             step_count=torch.zeros(self.n_envs, dtype=torch.int32, device=dev),
         )
@@ -326,6 +343,10 @@ class BatchedTorchEnv:
                 self.states.prev_headings[env_idx] = tensors["torso_orientations"]
                 self.states.prev_heading_changes[env_idx] = 0.0
                 self.states.prev_actions[env_idx] = 0.0
+                self.states.waypoints[env_idx] = tensors["waypoints"]
+                self.states.n_waypoints[env_idx] = tensors["n_waypoints"]
+                self.states.waypoint_cursor[env_idx] = 0
+                self.states.waypoint_path_lengths[env_idx] = tensors["waypoint_path_lengths"]
                 self.states.n_agents[env_idx] = tensors["n_agents"]
                 self.states.step_count[env_idx] = 0
 
