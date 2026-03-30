@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
+from crowdrl_core.navmesh import shortest_path
 from crowdrl_env.crowd_env import CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, generate_geometry
 from crowdrl_env.solvability import verify_solvability
@@ -114,6 +115,34 @@ def make_episode_factory(
                 goal_positions = spawn_result.goal_positions
                 preferred_speeds = spawn_result.preferred_speeds
 
+            # Pre-compute funnel waypoints per agent (CPU, amortised over episode)
+            n_agents = len(positions)
+            max_wp = env_config.obs.navmesh_max_waypoints
+            wp_array = np.zeros((n_agents, max_wp, 2), dtype=np.float64)
+            wp_counts = np.zeros(n_agents, dtype=np.int32)
+            wp_path_lengths = np.zeros((n_agents, max_wp), dtype=np.float64)
+
+            if env_config.obs.use_navmesh and navmesh is not None:
+                for i in range(n_agents):
+                    radius = float(max(shoulder_widths[i], chest_depths[i]))
+                    path = shortest_path(navmesh, positions[i], goal_positions[i], radius)
+                    if path is not None and len(path) >= 2:
+                        # Drop start position, keep intermediate + goal
+                        wps = path[1:]
+                        n_wp = min(len(wps), max_wp)
+                        for k in range(n_wp):
+                            wp_array[i, k] = wps[k]
+                        wp_counts[i] = n_wp
+
+                        # Cumulative remaining path length from each waypoint
+                        # to the goal (last waypoint has distance 0)
+                        for k in range(n_wp - 1, -1, -1):
+                            if k == n_wp - 1:
+                                wp_path_lengths[i, k] = 0.0
+                            else:
+                                seg = float(np.linalg.norm(wps[k + 1] - wps[k]))
+                                wp_path_lengths[i, k] = wp_path_lengths[i, k + 1] + seg
+
             return {
                 "positions": positions,
                 "velocities": velocities,
@@ -124,6 +153,9 @@ def make_episode_factory(
                 "goal_positions": goal_positions,
                 "preferred_speeds": preferred_speeds,
                 "wall_segments": wall_segments,
+                "waypoints": wp_array,
+                "n_waypoints": wp_counts,
+                "waypoint_path_lengths": wp_path_lengths,
                 "tier": geom.tier.name,
             }
 
