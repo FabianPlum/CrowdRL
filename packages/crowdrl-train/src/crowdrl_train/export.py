@@ -105,7 +105,7 @@ def export_onnx(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     export_model = PolicyForExport(actor, normalizer)
-    export_model.eval()
+    export_model.cpu().eval()
 
     obs_dim = actor.config.obs_dim
     dummy_input = torch.randn(1, obs_dim)
@@ -150,7 +150,7 @@ def verify_onnx(
     import onnxruntime as ort
 
     export_model = PolicyForExport(actor, normalizer)
-    export_model.eval()
+    export_model.cpu().eval()
 
     session = ort.InferenceSession(str(onnx_path))
     obs_dim = actor.config.obs_dim
