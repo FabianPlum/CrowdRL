@@ -474,7 +474,7 @@ def collect_episode_frames(
     actor_critic,
     obs_normalizer=None,
     device=None,
-    max_steps: int = 200,
+    max_steps: int | None = None,
 ) -> EpisodeFrames:
     """Run one episode and collect per-frame data for video rendering.
 
@@ -488,8 +488,9 @@ def collect_episode_frames(
         Optional observation normalizer with ``.normalize()`` method.
     device
         Torch device for policy inference.
-    max_steps : int
-        Maximum number of steps.
+    max_steps : int or None
+        Maximum number of steps. If None, uses the environment's
+        ``config.max_steps``.
 
     Returns
     -------
@@ -497,6 +498,9 @@ def collect_episode_frames(
         Snapshot data suitable for ``render_episode_video``.
     """
     import torch
+
+    if max_steps is None:
+        max_steps = getattr(env.config, "max_steps", 2000)
 
     obs, info = env.reset()
     n_agents = info["n_agents"]
@@ -531,7 +535,7 @@ def collect_episode_frames(
         )
         reached_goal |= terminated
 
-        if step_info.get("episode_over", False):
+        if step_info.get("episode_over", False) or reached_goal.all():
             break
 
     return EpisodeFrames(
@@ -553,6 +557,7 @@ def render_episode_video(
     output_path: str | Path,
     *,
     fps: int = 20,
+    frame_skip: int = 5,
     trail_length: int = 20,
     figsize: tuple[float, float] = (10, 8),
     dpi: int = 100,
@@ -572,8 +577,11 @@ def render_episode_video(
         Where to write the MP4 file. Parent directory is created if needed.
     fps : int
         Frames per second in the output video.
+    frame_skip : int
+        Only render every *frame_skip*-th simulation frame (default 5).
+        A value of 1 renders every frame.
     trail_length : int
-        Number of past positions to show as a fading trail per agent.
+        Number of past *rendered* positions to show as a fading trail per agent.
     figsize, dpi : tuple, int
         Figure size and resolution.
     show_trails : bool
@@ -589,7 +597,9 @@ def render_episode_video(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    n_frames = frames.n_frames
+    # Sub-sample frames according to frame_skip
+    frame_indices = list(range(0, frames.n_frames, frame_skip))
+    n_frames = len(frame_indices)
     n_agents = frames.n_agents
     cmap = plt.get_cmap("tab20", max(n_agents, 1))
 
@@ -652,7 +662,8 @@ def render_episode_video(
     if frames.title:
         ax.set_title(frames.title, fontsize=12)
 
-    def _update(frame_idx: int):
+    def _update(render_idx: int):
+        frame_idx = frame_indices[render_idx]
         pos = frames.positions[frame_idx]
         torso = frames.torso_orientations[frame_idx]
         active = frames.active_masks[frame_idx]
@@ -675,16 +686,16 @@ def render_episode_video(
                 [pos[i, 1], pos[i, 1] + dy],
             )
 
-            # Trail
+            # Trail — look back over original frames for smooth trails
             if show_trails:
-                start = max(0, frame_idx - trail_length)
+                start = max(0, frame_idx - trail_length * frame_skip)
                 trail = frames.positions[start : frame_idx + 1, i]
                 trail_lines[i].set_data(trail[:, 0], trail[:, 1])
 
         t = frame_idx * frames.dt
         n_reached = frames.reached_goal.sum()
         time_text.set_text(
-            f"t = {t:.1f}s  |  frame {frame_idx}/{n_frames - 1}"
+            f"t = {t:.1f}s  |  frame {frame_idx}/{frames.n_frames - 1}"
             f"  |  {n_reached}/{n_agents} reached goal"
         )
 
@@ -692,10 +703,24 @@ def render_episode_video(
 
     anim = FuncAnimation(fig, _update, frames=n_frames, interval=1000 / fps, blit=True)
 
-    writer = "ffmpeg"
+    # Prefer imageio-ffmpeg (pip-installable, bundles its own binary)
+    # over system ffmpeg, with pillow as last-resort fallback.
+    writer = None
     try:
+        import imageio_ffmpeg
+
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        plt.rcParams["animation.ffmpeg_path"] = ffmpeg_path
+        writer = "ffmpeg"
+    except ImportError:
+        from matplotlib.animation import FFMpegWriter
+
+        if FFMpegWriter.isAvailable():
+            writer = "ffmpeg"
+
+    if writer is not None:
         anim.save(str(output_path), writer=writer, fps=fps, dpi=dpi)
-    except Exception:
+    else:
         logger.warning("ffmpeg not available, falling back to pillow (.gif)")
         output_path = output_path.with_suffix(".gif")
         anim.save(str(output_path), writer="pillow", fps=fps, dpi=dpi)
