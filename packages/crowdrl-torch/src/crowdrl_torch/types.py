@@ -116,6 +116,7 @@ class EnvConfig(NamedTuple):
     wall_proximity_penalty: float = -0.3
     wall_proximity_threshold: float = 1.5
     action_rate_weight: float = 0.0
+    existence_penalty: float = -0.01
 
     # Episode
     max_steps: int = 5000
@@ -159,6 +160,7 @@ class EnvConfig(NamedTuple):
             wall_proximity_penalty=cfg.reward.wall_proximity_penalty,
             wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
             action_rate_weight=cfg.reward.action_rate_weight,
+            existence_penalty=cfg.reward.existence_penalty,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
         )
