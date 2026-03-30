@@ -54,6 +54,10 @@ def prepare_reset_data(
     wall_segments: NDArray,
     max_agents: int,
     max_segments: int,
+    waypoints: NDArray | None = None,
+    n_waypoints: NDArray | None = None,
+    waypoint_path_lengths: NDArray | None = None,
+    max_waypoints: int = 16,
 ) -> dict[str, NDArray[np.float32]]:
     """Prepare CPU-generated episode data for GPU transfer.
 
@@ -86,6 +90,21 @@ def prepare_reset_data(
     padded_goal_dists = np.zeros(max_agents, dtype=np.float32)
     padded_goal_dists[:n_agents] = goal_dists
 
+    # Waypoint arrays — zero-padded to (MAX_AGENTS, MAX_WP, ...)
+    padded_wp = np.zeros((max_agents, max_waypoints, 2), dtype=np.float32)
+    padded_n_wp = np.zeros(max_agents, dtype=np.int32)
+    padded_wp_pl = np.zeros((max_agents, max_waypoints), dtype=np.float32)
+    if waypoints is not None:
+        n = min(n_agents, waypoints.shape[0])
+        padded_wp[:n, : waypoints.shape[1]] = waypoints[:n].astype(np.float32)
+    if n_waypoints is not None:
+        padded_n_wp[:n_agents] = n_waypoints[:n_agents].astype(np.int32)
+    if waypoint_path_lengths is not None:
+        n = min(n_agents, waypoint_path_lengths.shape[0])
+        padded_wp_pl[:n, : waypoint_path_lengths.shape[1]] = waypoint_path_lengths[:n].astype(
+            np.float32
+        )
+
     return {
         "positions": pad_2d(positions, max_agents),
         "velocities": pad_2d(velocities, max_agents),
@@ -100,4 +119,7 @@ def prepare_reset_data(
         "n_segments": n_segs,
         "n_agents": n_agents,
         "goal_distances": padded_goal_dists,
+        "waypoints": padded_wp,
+        "n_waypoints": padded_n_wp,
+        "waypoint_path_lengths": padded_wp_pl,
     }
