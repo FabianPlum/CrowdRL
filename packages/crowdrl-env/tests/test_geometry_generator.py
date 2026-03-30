@@ -18,6 +18,8 @@ from crowdrl_env.geometry_generator import (
     generate_tier0,
     generate_tier1,
     generate_tier2,
+    generate_tier3a,
+    generate_tier3b,
 )
 
 
@@ -149,6 +151,123 @@ class TestTier2:
             geom = generate_tier2(rng, config)
             _validate_generated(geom)
             assert geom.tier == GeometryTier.TIER_2
+
+
+class TestTier3a:
+    def test_basic_generation(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3A)
+        geom = generate_tier3a(rng, config)
+        _validate_generated(geom)
+        assert geom.tier == GeometryTier.TIER_3A
+        assert geom.metadata["shape"] == "room_with_obstacles"
+
+    def test_has_obstacles(self, rng):
+        """Tier 3a should generally have obstacles (polygon holes)."""
+        config = GeometryConfig(tier=GeometryTier.TIER_3A, obstacle_coverage_range=(0.10, 0.20))
+        has_obstacles = False
+        for seed in range(20):
+            geom = generate_tier3a(np.random.default_rng(seed), config)
+            _validate_generated(geom)
+            if len(list(geom.polygon.interiors)) > 0:
+                has_obstacles = True
+                break
+        assert has_obstacles, "No Tier 3a geometry had obstacles across 20 seeds"
+
+    def test_has_doors(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3A)
+        has_doors = False
+        for seed in range(20):
+            geom = generate_tier3a(np.random.default_rng(seed), config)
+            _validate_generated(geom)
+            if geom.metadata["n_doors"] > 0:
+                has_doors = True
+                break
+        assert has_doors, "No Tier 3a geometry had doors across 20 seeds"
+
+    def test_shared_goal_mode(self):
+        """When shared_goal_probability=1.0, all agents target one goal region."""
+        config = GeometryConfig(tier=GeometryTier.TIER_3A, shared_goal_probability=1.0)
+        for seed in range(10):
+            geom = generate_tier3a(np.random.default_rng(seed), config)
+            _validate_generated(geom)
+            if geom.metadata["shared_goal"]:
+                assert len(geom.goal_regions) == 1
+                break
+
+    def test_multiple_seeds(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3A)
+        for _ in range(20):
+            geom = generate_tier3a(rng, config)
+            _validate_generated(geom)
+            assert geom.tier == GeometryTier.TIER_3A
+
+    def test_metadata_fields(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3A)
+        geom = generate_tier3a(rng, config)
+        assert "base_tier" in geom.metadata
+        assert "base_shape" in geom.metadata
+        assert "n_obstacles" in geom.metadata
+        assert "n_doors" in geom.metadata
+        assert "shared_goal" in geom.metadata
+
+
+class TestTier3b:
+    def test_basic_generation(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B)
+        geom = generate_tier3b(rng, config)
+        _validate_generated(geom)
+        assert geom.tier == GeometryTier.TIER_3B
+        assert geom.metadata["shape"] == "composed_rooms"
+
+    def test_has_multiple_rooms(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B, n_rooms_range=(2, 3))
+        geom = generate_tier3b(rng, config)
+        _validate_generated(geom)
+        assert geom.metadata["n_rooms"] in (2, 3)
+
+    def test_has_connectors(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B, n_rooms_range=(2, 3))
+        has_connectors = False
+        for seed in range(20):
+            geom = generate_tier3b(np.random.default_rng(seed), config)
+            _validate_generated(geom)
+            if geom.metadata["n_connectors"] > 0:
+                has_connectors = True
+                break
+        assert has_connectors, "No Tier 3b geometry had connectors across 20 seeds"
+
+    def test_has_evacuation_doors(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B)
+        has_evac = False
+        for seed in range(20):
+            geom = generate_tier3b(np.random.default_rng(seed), config)
+            _validate_generated(geom)
+            if geom.metadata["n_evac_doors"] > 0:
+                has_evac = True
+                break
+        assert has_evac, "No Tier 3b geometry had evacuation doors across 20 seeds"
+
+    def test_multiple_seeds(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B)
+        for _ in range(20):
+            geom = generate_tier3b(rng, config)
+            _validate_generated(geom)
+            assert geom.tier == GeometryTier.TIER_3B
+
+    def test_metadata_fields(self, rng):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B)
+        geom = generate_tier3b(rng, config)
+        assert "n_rooms" in geom.metadata
+        assert "n_obstacles" in geom.metadata
+        assert "n_connectors" in geom.metadata
+        assert "n_evac_doors" in geom.metadata
+        assert "room_shapes" in geom.metadata
+
+    def test_three_rooms(self):
+        config = GeometryConfig(tier=GeometryTier.TIER_3B, n_rooms_range=(3, 3))
+        geom = generate_tier3b(np.random.default_rng(7), config)
+        _validate_generated(geom)
+        assert geom.metadata["n_rooms"] == 3
 
 
 class TestGenerateGeometry:

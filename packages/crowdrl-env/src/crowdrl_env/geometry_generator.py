@@ -1,4 +1,4 @@
-"""Procedural geometry generator (Tiers 0–2).
+"""Procedural geometry generator (Tiers 0–3b).
 
 All generators output Shapely Polygons with holes, matching JuPedSim convention.
 Walkable area = polygon exterior; obstacles = polygon holes.
@@ -6,6 +6,8 @@ Walkable area = polygon exterior; obstacles = polygon holes.
 Tier 0: Open fields (convex polygons, no obstacles)
 Tier 1: Corridors + bottlenecks (width 0.8–5.0m, aperture 0.6–2.0m)
 Tier 2: Branching corridors, T-junctions, L-bends, crossroads
+Tier 3a: Base room (Tier 0–2) + internal obstacles + doors; optional shared goal area
+Tier 3b: 2–3 composed rooms (Tier 0–2) connected by doors + obstacles + evacuation areas
 
 Higher tiers compose from lower-tier primitives.
 """
@@ -16,7 +18,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon, box
+from shapely.affinity import rotate, translate
+from shapely.geometry import MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -25,6 +28,8 @@ class GeometryTier(Enum):
     TIER_0 = 0
     TIER_1 = 1
     TIER_2 = 2
+    TIER_3A = 3
+    TIER_3B = 4
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,21 @@ class GeometryConfig:
     # Tier 2 params
     branch_width_range: tuple[float, float] = (1.5, 4.0)
     branch_length_range: tuple[float, float] = (5.0, 15.0)
+
+    # Tier 3 params (shared by 3a and 3b)
+    obstacle_coverage_range: tuple[float, float] = (0.05, 0.20)
+    """Fraction of floor area covered by obstacles."""
+    obstacle_min_size: float = 0.3
+    obstacle_max_size: float = 1.5
+    """Side length range for rectangular obstacles (metres)."""
+    column_radius_range: tuple[float, float] = (0.15, 0.4)
+    """Radius range for circular column obstacles (metres)."""
+    door_width_range: tuple[float, float] = (0.8, 2.0)
+    """Width range for door openings (metres)."""
+    shared_goal_probability: float = 0.4
+    """Probability that all agents share a single goal area (Tier 3a)."""
+    n_rooms_range: tuple[int, int] = (2, 3)
+    """Number of rooms to compose in Tier 3b."""
 
 
 @dataclass
@@ -401,6 +421,394 @@ def generate_tier2(
 
 
 # ---------------------------------------------------------------------------
+# Tier 3 helpers: obstacle placement + door cutting
+# ---------------------------------------------------------------------------
+
+
+def _place_obstacles(
+    rng: np.random.Generator,
+    walkable: Polygon,
+    config: GeometryConfig,
+    max_attempts: int = 50,
+) -> list[Polygon]:
+    """Place random obstacles (rectangles + columns) inside a walkable area.
+
+    Obstacles are placed via rejection sampling: each candidate must fit
+    entirely inside the walkable polygon (buffered inward by 0.3m to keep
+    clearance from walls) and must not overlap existing obstacles.
+
+    Returns a list of obstacle polygons (to become polygon holes).
+    """
+    target_area = walkable.area * rng.uniform(*config.obstacle_coverage_range)
+    placed: list[Polygon] = []
+    placed_area = 0.0
+    inner = walkable.buffer(-0.3)
+    if inner.is_empty or not isinstance(inner, Polygon):
+        return []
+
+    minx, miny, maxx, maxy = inner.bounds
+
+    for _ in range(max_attempts):
+        if placed_area >= target_area:
+            break
+
+        if rng.random() < 0.4:
+            # Column (circular approximation)
+            r = rng.uniform(*config.column_radius_range)
+            if maxx - minx < 2 * r or maxy - miny < 2 * r:
+                continue
+            cx = rng.uniform(minx + r, maxx - r)
+            cy = rng.uniform(miny + r, maxy - r)
+            obs = Point(cx, cy).buffer(r, quad_segs=6)
+        else:
+            # Rectangular obstacle
+            w = rng.uniform(config.obstacle_min_size, config.obstacle_max_size)
+            h = rng.uniform(config.obstacle_min_size, config.obstacle_max_size)
+            if maxx - minx < w or maxy - miny < h:
+                continue
+            ox = rng.uniform(minx, maxx - w)
+            oy = rng.uniform(miny, maxy - h)
+            obs = box(ox, oy, ox + w, oy + h)
+            # Random rotation
+            angle = rng.uniform(0, 360)
+            obs = rotate(obs, angle, origin="centroid")
+
+        # Validate: must fit inside walkable, must not overlap existing
+        if not inner.contains(obs):
+            continue
+        if any(obs.intersects(p) for p in placed):
+            continue
+
+        placed.append(obs)
+        placed_area += obs.area
+
+    return placed
+
+
+def _cut_door_in_wall(
+    rng: np.random.Generator,
+    polygon: Polygon,
+    wall_side: str,
+    door_width: float,
+) -> tuple[Polygon, Polygon]:
+    """Cut a door opening in a wall of the polygon's bounding box.
+
+    Returns (modified_polygon, door_region) where door_region is a small
+    polygon on the exterior side of the door suitable as a goal/spawn area.
+
+    wall_side: 'left', 'right', 'top', 'bottom'
+    """
+    minx, miny, maxx, maxy = polygon.bounds
+    depth = 0.5  # depth of the door cut-out and goal region
+
+    if wall_side == "left":
+        pos = rng.uniform(miny + door_width / 2 + 0.2, maxy - door_width / 2 - 0.2)
+        cut = box(minx - depth, pos - door_width / 2, minx + depth, pos + door_width / 2)
+        door_region = box(minx - depth, pos - door_width / 2, minx + 0.1, pos + door_width / 2)
+    elif wall_side == "right":
+        pos = rng.uniform(miny + door_width / 2 + 0.2, maxy - door_width / 2 - 0.2)
+        cut = box(maxx - depth, pos - door_width / 2, maxx + depth, pos + door_width / 2)
+        door_region = box(maxx - 0.1, pos - door_width / 2, maxx + depth, pos + door_width / 2)
+    elif wall_side == "bottom":
+        pos = rng.uniform(minx + door_width / 2 + 0.2, maxx - door_width / 2 - 0.2)
+        cut = box(pos - door_width / 2, miny - depth, pos + door_width / 2, miny + depth)
+        door_region = box(pos - door_width / 2, miny - depth, pos + door_width / 2, miny + 0.1)
+    else:  # top
+        pos = rng.uniform(minx + door_width / 2 + 0.2, maxx - door_width / 2 - 0.2)
+        cut = box(pos - door_width / 2, maxy - depth, pos + door_width / 2, maxy + depth)
+        door_region = box(pos - door_width / 2, maxy - 0.1, pos + door_width / 2, maxy + depth)
+
+    merged = unary_union([polygon, cut])
+    merged = _ensure_valid_polygon(merged)
+    return merged, door_region
+
+
+# ---------------------------------------------------------------------------
+# Tier 3a: Base room + obstacles + doors
+# ---------------------------------------------------------------------------
+
+
+def generate_tier3a(
+    rng: np.random.Generator,
+    config: GeometryConfig,
+) -> GeneratedGeometry:
+    """Generate a Tier 3a geometry: base room with internal obstacles and doors.
+
+    1. Generate a base room from Tier 0–2
+    2. Place random obstacles (columns, furniture blocks) inside
+    3. Cut 1–2 door openings in the walls
+    4. Optionally make all agents share one goal area (evacuation-like)
+    """
+    # Pick a base tier (0, 1, or 2) and generate the room
+    base_tier = rng.choice([GeometryTier.TIER_0, GeometryTier.TIER_1, GeometryTier.TIER_2])
+    base_config = GeometryConfig(
+        tier=base_tier,
+        min_side=config.min_side,
+        max_side=config.max_side,
+        corridor_width_range=config.corridor_width_range,
+        corridor_length_range=config.corridor_length_range,
+        bottleneck_aperture_range=config.bottleneck_aperture_range,
+        bottleneck_depth_range=config.bottleneck_depth_range,
+        branch_width_range=config.branch_width_range,
+        branch_length_range=config.branch_length_range,
+    )
+    base = generate_geometry(rng, base_config)
+    polygon = base.polygon
+
+    # Place obstacles
+    obstacles = _place_obstacles(rng, polygon, config)
+    for obs in obstacles:
+        result = polygon.difference(obs)
+        result = _ensure_valid_polygon(result)
+        if result.area > polygon.area * 0.3:  # don't let obstacles eat too much
+            polygon = result
+
+    # Cut 1–2 doors
+    n_doors = rng.integers(1, 3)
+    available_sides = ["left", "right", "top", "bottom"]
+    rng.shuffle(available_sides)
+    door_regions: list[Polygon] = []
+
+    for i in range(min(n_doors, len(available_sides))):
+        door_width = rng.uniform(*config.door_width_range)
+        side = available_sides[i]
+        try:
+            polygon, door_region = _cut_door_in_wall(rng, polygon, side, door_width)
+            if not door_region.is_empty:
+                door_regions.append(door_region)
+        except (ValueError, IndexError):
+            continue
+
+    polygon = _ensure_valid_polygon(polygon)
+
+    # Decide spawn and goal regions
+    shared_goal = rng.random() < config.shared_goal_probability
+    if shared_goal and door_regions:
+        # All agents share one goal area (the first door = evacuation exit)
+        goal_regions = [door_regions[0]]
+        # Spawn from base room's spawn regions + any remaining doors
+        spawn_regions = list(base.spawn_regions) + door_regions[1:]
+        if not spawn_regions:
+            spawn_regions = base.spawn_regions
+    else:
+        # Standard: spawn from base spawn regions, goals include base goals + doors
+        spawn_regions = list(base.spawn_regions)
+        goal_regions = list(base.goal_regions) + door_regions
+
+    # Filter to regions that actually overlap the walkable polygon
+    spawn_regions = [r for r in spawn_regions if polygon.intersects(r) and not r.is_empty]
+    goal_regions = [r for r in goal_regions if polygon.intersects(r) and not r.is_empty]
+
+    # Fallback: use buffered polygon centroid regions
+    if not spawn_regions:
+        spawn_regions = base.spawn_regions
+    if not goal_regions:
+        goal_regions = base.goal_regions
+
+    n_obstacles = len(list(polygon.interiors)) - len(list(base.polygon.interiors))
+    return GeneratedGeometry(
+        polygon=polygon,
+        spawn_regions=spawn_regions,
+        goal_regions=goal_regions,
+        tier=GeometryTier.TIER_3A,
+        metadata={
+            "shape": "room_with_obstacles",
+            "base_tier": base_tier.value,
+            "base_shape": base.metadata.get("shape", "unknown"),
+            "n_obstacles": max(n_obstacles, 0),
+            "n_doors": len(door_regions),
+            "shared_goal": shared_goal and len(door_regions) > 0,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier 3b: Composed multi-room layouts
+# ---------------------------------------------------------------------------
+
+
+def _generate_room(
+    rng: np.random.Generator,
+    config: GeometryConfig,
+) -> GeneratedGeometry:
+    """Generate a compact rectangular room for composition."""
+    w = rng.uniform(config.min_side * 0.6, config.min_side)
+    h = rng.uniform(config.min_side * 0.6, config.min_side)
+    polygon = box(0, 0, w, h)
+    margin = min(w, h) * 0.15
+    spawn = box(margin, margin, w - margin, h - margin)
+    return GeneratedGeometry(
+        polygon=polygon,
+        spawn_regions=[spawn],
+        goal_regions=[spawn],
+        tier=GeometryTier.TIER_0,
+        metadata={"width": w, "height": h, "shape": "room"},
+    )
+
+
+def _generate_base_room(
+    rng: np.random.Generator,
+    config: GeometryConfig,
+) -> GeneratedGeometry:
+    """Generate a room from Tier 0–2 for use in Tier 3b composition."""
+    base_tier = rng.choice([GeometryTier.TIER_0, GeometryTier.TIER_1, GeometryTier.TIER_2])
+    base_config = GeometryConfig(
+        tier=base_tier,
+        min_side=config.min_side * 0.6,
+        max_side=config.min_side,
+        corridor_width_range=config.corridor_width_range,
+        corridor_length_range=(
+            config.corridor_length_range[0],
+            config.corridor_length_range[0] * 1.5,
+        ),
+        bottleneck_aperture_range=config.bottleneck_aperture_range,
+        bottleneck_depth_range=config.bottleneck_depth_range,
+        branch_width_range=config.branch_width_range,
+        branch_length_range=(config.branch_length_range[0], config.branch_length_range[0] * 1.5),
+    )
+    return generate_geometry(rng, base_config)
+
+
+def generate_tier3b(
+    rng: np.random.Generator,
+    config: GeometryConfig,
+) -> GeneratedGeometry:
+    """Generate a Tier 3b geometry: 2–3 rooms connected by corridors + doors.
+
+    1. Generate 2–3 base rooms (from Tier 0–2 primitives)
+    2. Arrange them spatially (side by side or in an L-shape)
+    3. Connect with corridor links (door-width passages)
+    4. Place obstacles inside rooms
+    5. Add 1–2 evacuation doors on the exterior
+    """
+    n_rooms = int(rng.integers(config.n_rooms_range[0], config.n_rooms_range[1] + 1))
+
+    # Generate rooms
+    rooms: list[GeneratedGeometry] = []
+    for _ in range(n_rooms):
+        rooms.append(_generate_base_room(rng, config))
+
+    # Arrange rooms: place them side by side with a gap for connecting corridors
+    gap = rng.uniform(1.5, 4.0)  # corridor length between rooms
+    corridor_width = rng.uniform(1.5, 3.0)
+    placed_polygons: list[Polygon] = []
+    placed_bounds: list[tuple[float, float, float, float]] = []
+    connector_polygons: list[Polygon] = []
+    connector_regions: list[Polygon] = []
+    offset_x = 0.0
+
+    for i, room in enumerate(rooms):
+        # Translate room to its position
+        poly = translate(room.polygon, xoff=offset_x, yoff=0)
+        placed_polygons.append(poly)
+        bminx, bminy, bmaxx, bmaxy = poly.bounds
+        placed_bounds.append((bminx, bminy, bmaxx, bmaxy))
+
+        if i > 0:
+            # Connect to previous room with a corridor
+            prev_bounds = placed_bounds[i - 1]
+            # Corridor between right edge of prev and left edge of current
+            prev_right = prev_bounds[2]
+            curr_left = bminx
+
+            # Find overlapping y-range for corridor placement
+            y_overlap_min = max(prev_bounds[1], bminy) + 0.3
+            y_overlap_max = min(prev_bounds[3], bmaxy) - 0.3
+
+            if y_overlap_max - y_overlap_min >= corridor_width:
+                corr_y = rng.uniform(y_overlap_min, y_overlap_max - corridor_width)
+                corridor = box(prev_right - 0.1, corr_y, curr_left + 0.1, corr_y + corridor_width)
+                connector_polygons.append(corridor)
+                # The corridor interior serves as a transition region
+                margin = corridor_width * 0.15
+                conn_region = box(
+                    prev_right + 0.1,
+                    corr_y + margin,
+                    curr_left - 0.1,
+                    corr_y + corridor_width - margin,
+                )
+                if not conn_region.is_empty:
+                    connector_regions.append(conn_region)
+
+        # Advance offset for next room
+        offset_x = bmaxx + gap
+
+    # Merge everything into one walkable polygon
+    all_parts = placed_polygons + connector_polygons
+    merged = unary_union(all_parts)
+    merged = _ensure_valid_polygon(merged)
+
+    # Place obstacles inside the merged area
+    obstacles = _place_obstacles(rng, merged, config)
+    for obs in obstacles:
+        result = merged.difference(obs)
+        result = _ensure_valid_polygon(result)
+        if result.area > merged.area * 0.3:
+            merged = result
+
+    # Add 1–2 evacuation doors on the exterior
+    n_evac_doors = rng.integers(1, 3)
+    available_sides = ["left", "right", "top", "bottom"]
+    rng.shuffle(available_sides)
+    evac_regions: list[Polygon] = []
+
+    for i in range(min(n_evac_doors, len(available_sides))):
+        door_width = rng.uniform(*config.door_width_range)
+        side = available_sides[i]
+        try:
+            merged, door_region = _cut_door_in_wall(rng, merged, side, door_width)
+            if not door_region.is_empty:
+                evac_regions.append(door_region)
+        except (ValueError, IndexError):
+            continue
+
+    merged = _ensure_valid_polygon(merged)
+
+    # Spawn regions: interiors of all rooms (translated)
+    spawn_regions: list[Polygon] = []
+    for i, room in enumerate(rooms):
+        for sr in room.spawn_regions:
+            translated_sr = translate(sr, xoff=placed_bounds[i][0], yoff=placed_bounds[i][1])
+            if merged.intersects(translated_sr) and not translated_sr.is_empty:
+                spawn_regions.append(translated_sr)
+
+    # Goal regions: evacuation doors (primary) + connector regions
+    goal_regions = list(evac_regions) + connector_regions
+
+    # Filter to regions that intersect the walkable area
+    spawn_regions = [r for r in spawn_regions if merged.intersects(r) and not r.is_empty]
+    goal_regions = [r for r in goal_regions if merged.intersects(r) and not r.is_empty]
+
+    # Fallbacks
+    if not spawn_regions:
+        # Use first room interior
+        bnd = placed_bounds[0]
+        margin = 0.3
+        spawn_regions = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+    if not goal_regions:
+        # Use last room interior
+        bnd = placed_bounds[-1]
+        margin = 0.3
+        goal_regions = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+
+    n_obstacles = len(list(merged.interiors))
+    return GeneratedGeometry(
+        polygon=merged,
+        spawn_regions=spawn_regions,
+        goal_regions=goal_regions,
+        tier=GeometryTier.TIER_3B,
+        metadata={
+            "shape": "composed_rooms",
+            "n_rooms": n_rooms,
+            "n_obstacles": n_obstacles,
+            "n_connectors": len(connector_polygons),
+            "n_evac_doors": len(evac_regions),
+            "room_shapes": [r.metadata.get("shape", "unknown") for r in rooms],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -431,6 +839,8 @@ def generate_geometry(
         GeometryTier.TIER_0: generate_tier0,
         GeometryTier.TIER_1: generate_tier1,
         GeometryTier.TIER_2: generate_tier2,
+        GeometryTier.TIER_3A: generate_tier3a,
+        GeometryTier.TIER_3B: generate_tier3b,
     }
 
     return generators[config.tier](rng, config)
