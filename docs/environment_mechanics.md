@@ -597,7 +597,7 @@ reward      += -0.1 * |speed - preferred|
   The speed appears implicitly through this penalty signal.
 - **Implicit learning**: this is the primary "naturalism" signal. Real
   pedestrians have a strong tendency to maintain a consistent walking speed
-  ([Weidmann 1993](https://doi.org/10.3929/ethz-a-000555647)). The penalty
+  ([Weidmann 1993](https://doi.org/10.3929/ethz-a-000687810)). The penalty
   teaches the policy to avoid both dawdling (low speed, also penalised by
   existence penalty) and rushing (high speed, which increases collision risk).
 
