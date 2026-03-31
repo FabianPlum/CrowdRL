@@ -255,33 +255,42 @@ Narrow phase (per candidate pair):
 
 When agents overlap,
 [compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L255)
-applies a spring-damper impulse:
+computes a spring-damper response:
 
 ```
 For each colliding pair (i, j):
   normal      = (pos_j - pos_i) / ||pos_j - pos_i||
   rel_vel_n   = dot(vel_i - vel_j, normal)
 
-  force = 2000 * overlap  +  50 * max(rel_vel_n, 0)
+  accel = 2000 * overlap  +  50 * max(rel_vel_n, 0)
           ~~~~~~~~~~~~~~~     ~~~~~~~~~~~~~~~~~~~~~~~~
           spring term          damping (only when approaching)
 
-  Agent i is pushed away from j (force along -normal)
-  Agent j is pushed away from i (force along +normal)
+  Agent i is pushed away from j (acceleration along -normal)
+  Agent j is pushed away from i (acceleration along +normal)
 ```
+
+**A note on units:** agents have no explicit mass. The "forces" returned by
+`compute_contact_forces()` are applied directly as accelerations:
+`v += accel * dt`. This is equivalent to assuming unit mass (1 kg) for all
+agents, which is standard in pedestrian social-force models. The stiffness
+constant of 2000 has units of m/s^2 per unit overlap (not N/m), and the
+damping constant of 50 has units of 1/s (not N*s/m). The practical effect is
+the same -- overlapping agents are pushed apart -- but there is no F=ma step
+in the physics pipeline.
 
 **What this constrains:**
 
-- **Overlapping agents are forcefully separated.** The spring constant of
-  2000 N/m means even small overlaps produce large forces. An agent that walks
+- **Overlapping agents are forcefully separated.** A stiffness of 2000 m/s^2
+  means even small overlaps produce large accelerations. An agent that walks
   into another agent will be pushed backwards, making it lose progress toward
   its goal.
 
 - **Head-on collisions are worse than glancing contacts.** The damping term
-  (`50 * max(rel_vel_n, 0)`) adds extra force when agents approach each other.
-  Two agents walking toward each other at 1 m/s each get 100 N of damping
-  force on top of the spring force. This teaches the policy to avoid
-  approaching trajectories.
+  (`50 * max(rel_vel_n, 0)`) adds extra acceleration when agents approach each
+  other. Two agents walking toward each other at 1 m/s each get a combined
+  100 m/s^2 of damping acceleration on top of the spring term. This teaches
+  the policy to avoid approaching trajectories.
 
 - **One-sided damping prevents bouncing.** The `max(rel_vel_n, 0)` clamp means
   damping only applies when agents are approaching, not when separating. This
@@ -295,8 +304,9 @@ For each colliding pair (i, j):
 
 ### A.5 Wall repulsion: exponential force field
 
-Walls exert a smooth exponential repulsion force
-([collision.py:322-352](../packages/crowdrl-core/src/crowdrl_core/collision.py#L322)):
+Walls exert a smooth exponential repulsion acceleration
+([collision.py:322-352](../packages/crowdrl-core/src/crowdrl_core/collision.py#L322)),
+again with implicit unit mass:
 
 ```
 For each agent, for each wall segment:
@@ -339,7 +349,7 @@ if ||v|| > max_vel:
 **What this constrains:**
 
 - **Contact forces cannot launch agents.** Without this clamp, a stiff spring
-  (k=2000) on deep penetration could accelerate an agent to unrealistic speeds.
+  (2000 m/s^2) on deep penetration could accelerate an agent to unrealistic speeds.
   The clamp allows brief bursts above the 1.5 m/s desired ceiling (e.g. being
   pushed by a crowd) but caps the maximum at 3.0 m/s.
 
@@ -692,8 +702,8 @@ body because:
 |-----------|---------|------|------|
 | `dt` | 0.01 | s | Simulation timestep |
 | `velocity_damping` | 0.8 | -- | Blend factor: 0.8 = desired, 0.2 = carry-over |
-| `contact_stiffness` | 2000 | N/m | Agent-agent spring constant |
-| `contact_damping` | 50 | N*s/m | Agent-agent approach damping |
+| `contact_stiffness` | 2000 | m/s^2 / overlap | Agent-agent spring (implicit unit mass) |
+| `contact_damping` | 50 | 1/s | Agent-agent approach damping (implicit unit mass) |
 | `max_speed_multiplier` | 2.0 | -- | Speed clamp = 2.0 * 1.5 = 3.0 m/s |
 | `max_steps` | 5000 | steps | Episode timeout (50 seconds) |
 
