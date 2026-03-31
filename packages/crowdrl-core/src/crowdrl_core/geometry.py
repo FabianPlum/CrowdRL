@@ -14,14 +14,37 @@ from shapely.ops import triangulate as shapely_triangulate
 from crowdrl_core.world_state import NavMesh
 
 
-def extract_wall_segments(polygon: Polygon) -> NDArray[np.float64]:
+def _count_segments(polygon: Polygon) -> int:
+    """Count total wall segments (exterior + holes) without allocating arrays."""
+    n = len(polygon.exterior.coords) - 1
+    for hole in polygon.interiors:
+        n += len(hole.coords) - 1
+    return n
+
+
+def extract_wall_segments(
+    polygon: Polygon,
+    max_segments: int | None = None,
+) -> NDArray[np.float64]:
     """Extract all wall segments from a Shapely Polygon (exterior + holes).
+
+    Parameters
+    ----------
+    polygon : Polygon
+        Walkable polygon (holes = obstacles).
+    max_segments : int, optional
+        If set, progressively simplify the polygon until the segment count
+        fits within this budget.  Uses Shapely's Douglas-Peucker simplify
+        with ``preserve_topology=True`` so holes are never collapsed.
 
     Returns
     -------
     segments : (S, 2, 2) array
         Each segment is [[x1, y1], [x2, y2]].
     """
+    if max_segments is not None:
+        polygon = simplify_to_segment_budget(polygon, max_segments)
+
     segments = []
 
     # Exterior boundary
@@ -36,6 +59,37 @@ def extract_wall_segments(polygon: Polygon) -> NDArray[np.float64]:
             segments.append([coords[i], coords[i + 1]])
 
     return np.array(segments, dtype=np.float64)
+
+
+def simplify_to_segment_budget(
+    polygon: Polygon,
+    max_segments: int,
+    initial_tolerance: float = 0.01,
+    max_iterations: int = 8,
+) -> Polygon:
+    """Progressively simplify *polygon* until segment count ≤ *max_segments*.
+
+    Uses Shapely's Douglas-Peucker algorithm with ``preserve_topology=True``
+    so that holes (obstacles) are never collapsed or removed — only their
+    vertex density is reduced.
+
+    The tolerance doubles each iteration, starting from *initial_tolerance*
+    (metres).  Typical column circles go from 16-gons to 8-gons at ~0.02 m
+    tolerance, which is well below perceptible at pedestrian scale.
+    """
+    n = _count_segments(polygon)
+    if n <= max_segments:
+        return polygon
+
+    tol = initial_tolerance
+    for _ in range(max_iterations):
+        simplified = polygon.simplify(tol, preserve_topology=True)
+        if _count_segments(simplified) <= max_segments:
+            return simplified
+        tol *= 2.0
+
+    # Last resort: return whatever we have (caller's padding check will catch it)
+    return simplified
 
 
 def _polygon_vertices(polygon: Polygon) -> NDArray[np.float64]:

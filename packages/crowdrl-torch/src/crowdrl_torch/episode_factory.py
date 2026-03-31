@@ -56,13 +56,22 @@ def make_episode_factory(
                     bottleneck_depth_range=env_config.geometry.bottleneck_depth_range,
                     branch_width_range=env_config.geometry.branch_width_range,
                     branch_length_range=env_config.geometry.branch_length_range,
+                    max_wall_segments=env_config.geometry.max_wall_segments,
                 )
             else:
                 geom_config = env_config.geometry
 
             geom = generate_geometry(rng, geom_config)
             navmesh = build_navmesh(geom.polygon)
-            wall_segments = extract_wall_segments(geom.polygon)
+            wall_segments = extract_wall_segments(
+                geom.polygon,
+                max_segments=geom_config.max_wall_segments,
+            )
+
+            # Guard: if simplification still couldn't bring segments under
+            # budget, discard this geometry and regenerate.
+            if len(wall_segments) > geom_config.max_wall_segments:
+                continue
 
             # Spawn agents
             spawn_result = spawn_agents(

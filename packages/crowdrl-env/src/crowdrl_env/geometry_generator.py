@@ -60,12 +60,16 @@ class GeometryConfig:
     """Side length range for rectangular obstacles (metres)."""
     column_radius_range: tuple[float, float] = (0.15, 0.4)
     """Radius range for circular column obstacles (metres)."""
+    column_quad_segs: int = 4
+    """Segments per quadrant when discretising circular columns (total vertices = 4 × quad_segs)."""
     door_width_range: tuple[float, float] = (0.8, 2.0)
     """Width range for door openings (metres)."""
     shared_goal_probability: float = 0.4
     """Probability that all agents share a single goal area (Tier 3a)."""
     n_rooms_range: tuple[int, int] = (2, 3)
     """Number of rooms to compose in Tier 3b."""
+    max_wall_segments: int = 512
+    """Hard cap on wall segments. Polygon is progressively simplified if exceeded."""
 
 
 @dataclass
@@ -459,7 +463,7 @@ def _place_obstacles(
                 continue
             cx = rng.uniform(minx + r, maxx - r)
             cy = rng.uniform(miny + r, maxy - r)
-            obs = Point(cx, cy).buffer(r, quad_segs=6)
+            obs = Point(cx, cy).buffer(r, quad_segs=config.column_quad_segs)
         else:
             # Rectangular obstacle
             w = rng.uniform(config.obstacle_min_size, config.obstacle_max_size)
