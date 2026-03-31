@@ -121,6 +121,12 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 - **Testing**: pytest, configured in root `pyproject.toml`. Run with `uv run pytest`.
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) — ruff lint + pytest on Python 3.12/3.13.
 
+## Known issues
+
+### Mojibake in notebooks / markdown
+
+Unicode characters (em dash `—`, en dash `–`, degree `°`, arrows `→`) frequently get double-encoded in `.ipynb` files: UTF-8 bytes are misread as CP1252, then re-encoded as UTF-8, producing garbled sequences like `â€"`, `Ã‚Â°`, `â†'`. **When writing to notebooks, always use plain ASCII alternatives** (`--`, `-`, `deg`, `->`) instead of Unicode dashes, arrows, or special characters. If you spot mojibake in an existing file, fix it.
+
 ## Key design principles
 
 1. **One observation builder, used everywhere.** Never duplicate obs construction logic.
