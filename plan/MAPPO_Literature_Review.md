@@ -13,10 +13,10 @@
 | 1 | Yu, Velu, Vinitsky et al. — "The Surprising Effectiveness of PPO in Cooperative, Multi-Agent Games" (2022) | NeurIPS 2022 D&B | MAPPO: canonical reference for multi-agent PPO. [arXiv:2103.01955](https://arxiv.org/abs/2103.01955) |
 | 2 | Andrychowicz, Raichuk et al. — "What Matters In On-Policy Reinforcement Learning? A Large-Scale Empirical Study" (2021) | — | 250k-experiment ablation of PPO implementation details. [arXiv:2006.05990](https://arxiv.org/abs/2006.05990) |
 | 3 | Huang, Dossa et al. — "The 37 Implementation Details of Proximal Policy Optimization" (2022) | ICLR Blog Track | Enumerates and tests every code-level PPO detail. [Blog](https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/) |
-| 4 | Christianos, Schroeder de Witt, Albrecht — "Revisiting Parameter Sharing in Multi-Agent Deep RL" (2021) | — | When parameter sharing helps vs hurts. [arXiv:2005.13625](https://arxiv.org/abs/2005.13625) |
+| 4 | Terry, Grammel, Son, Black, Agrawal — "Revisiting Parameter Sharing in Multi-Agent Deep Reinforcement Learning" (2020) | — | When parameter sharing helps vs hurts. [arXiv:2005.13625](https://arxiv.org/abs/2005.13625) |
 | 5 | Li et al. — "Adaptive Parameter Sharing for Multi-Agent RL" (2023) | — | Heterogeneous-agent parameter sharing strategies. [arXiv:2312.09009](https://arxiv.org/abs/2312.09009) |
 | 6 | Narvekar et al. — "Curriculum Learning for RL Domains: A Framework and Survey" (2020) | JMLR 21 | Comprehensive curriculum learning survey. [Paper](https://jmlr.org/papers/volume21/20-212/20-212.pdf) |
-| 7 | Chen et al. — "Learning Progress Driven Multi-Agent Curriculum" (2022) | — | Automatic curriculum via TD-error learning progress. [arXiv:2205.10016](https://arxiv.org/abs/2205.10016) |
+| 7 | Zhao, Li, Pajarinen — "Learning Progress Driven Multi-Agent Curriculum" (2022) | — | Automatic curriculum via TD-error learning progress. [arXiv:2205.10016](https://arxiv.org/abs/2205.10016) |
 | 8 | liuliu — "5 More Implementation Details of PPO and SAC" (2022) | Blog | Additional PPO continuous-control details. [Blog](https://liuliu.me/eyes/5-more-implementation-details-of-ppo-and-sac/) |
 
 ---
@@ -193,7 +193,7 @@ Omitting local agent information from the critic is "highly detrimental."
 
 ### Full sharing is appropriate for homogeneous agent populations
 
-**Evidence**: Yu et al. [1]: parameter sharing is the standard MAPPO approach. Christianos et al. [4]: full sharing with one-hot agent ID works well for homogeneous agents. Li et al. [5]: full sharing struggles with genuinely heterogeneous agents (different action spaces or fundamentally different roles).
+**Evidence**: Yu et al. [1]: parameter sharing is the standard MAPPO approach. Terry et al. [4]: full sharing with one-hot agent ID works well for homogeneous agents. Li et al. [5]: full sharing struggles with genuinely heterogeneous agents (different action spaces or fundamentally different roles).
 
 **For CrowdRL**: Agents are functionally homogeneous — same dynamics, same observation structure, same action space. Heterogeneity enters through body dimensions and preferred speed, which are already in the observation (social sensing includes body dims). No agent-ID conditioning is needed — the body dims themselves serve as the "identity" signal.
 
@@ -220,10 +220,10 @@ Omitting local agent information from the critic is "highly detrimental."
 
 ### Success-rate-driven phase advancement with difficulty mixing
 
-**Evidence**: Narvekar et al. [6] (JMLR survey): the Zone of Proximal Development (ZPD) principle — present tasks of moderate difficulty. OpenAI (2019, Rubik's Cube): Automatic Domain Randomization (ADR) advances when success rate exceeds a threshold (typically 70–80%). Chen et al. [7]: TD-error-based learning progress is a principled automatic alternative.
+**Evidence**: Narvekar et al. [6] (JMLR survey): the Zone of Proximal Development (ZPD) principle — present tasks of moderate difficulty. OpenAI (2019, Rubik's Cube): Automatic Domain Randomization (ADR) advances when success rate exceeds a threshold (typically 70–80%). Zhao et al. [7]: TD-error-based learning progress is a principled automatic alternative.
 
 **Key findings for multi-agent curriculum**:
-- Agent count is itself a curriculum variable — start with few agents, increase gradually (Chen et al. [7]).
+- Agent count is itself a curriculum variable — start with few agents, increase gradually (Zhao et al. [7]).
 - Maintain 20–30% episodes from earlier difficulty levels to prevent catastrophic forgetting.
 - No universal threshold exists — domain-specific tuning is required.
 
@@ -274,9 +274,9 @@ Based on the above literature, here is the evidence-based starting configuration
 | **Value loss** | MSE, no clipping | Andrychowicz [2] | High |
 | **Advantage normalization** | Per-batch zero-mean unit-var | Yu [1] | Medium |
 | **Critic input** | Agent obs + compact global context (FP) | Yu [1] | High |
-| **Parameter sharing** | Full, no agent-ID (body dims serve as identity) | Yu [1], Christianos [4] | High |
+| **Parameter sharing** | Full, no agent-ID (body dims serve as identity) | Yu [1], Terry [4] | High |
 | **Variable agents** | Flatten active agent-steps, mask inactive | Standard practice | High |
-| **Curriculum** | 4 phases, success-rate advancement, 20% history mixing | Narvekar [6], Chen [7] | Medium |
+| **Curriculum** | 4 phases, success-rate advancement, 20% history mixing | Narvekar [6], Zhao [7] | Medium |
 
 ### Key contradictions in the literature (to resolve via ablation)
 
