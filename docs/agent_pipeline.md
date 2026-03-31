@@ -147,12 +147,16 @@ wall is cancelled. See section 5.
 
 ### Physics parameters
 
+All "forces" in this pipeline are accelerations (m/s^2) under an implicit
+unit-mass convention: `v += force * dt` with no mass division. This follows
+the Social Force Model tradition (Helbing & Molnar 1995).
+
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | `dt` | 0.01 s (10 ms) | `CrowdEnvConfig.dt` |
 | `velocity_damping` | 0.8 | `CrowdEnvConfig.velocity_damping` |
-| `contact_stiffness` | 2000 N/m | `CrowdEnvConfig.contact_stiffness` |
-| `contact_damping` | 50 N*s/m | `CrowdEnvConfig.contact_damping` |
+| `contact_stiffness` | 2000 m/s^2 / overlap | `CrowdEnvConfig.contact_stiffness` |
+| `contact_damping` | 50 1/s | `CrowdEnvConfig.contact_damping` |
 | `max_speed_multiplier` | 2.0 | `CrowdEnvConfig.max_speed_multiplier` |
 
 ---

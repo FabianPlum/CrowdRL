@@ -239,7 +239,7 @@ class CrowdEnv(gym.Env):
             collision_mask[col_j] = True
 
         # --- 4. Physics integration (semi-implicit Euler) ---
-        # Apply contact forces as velocity impulse — vectorized
+        # Apply contact accelerations (implicit unit mass) as velocity impulse
         self._world.velocities[mask] += contact_forces[mask] * cfg.dt
 
         # Clamp velocity magnitudes to prevent contact-force blow-up

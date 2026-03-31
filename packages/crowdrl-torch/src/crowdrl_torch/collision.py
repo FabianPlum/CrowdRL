@@ -103,11 +103,12 @@ def compute_contact_forces(
 ) -> Tensor:
     """Compute agent-agent contact forces + wall repulsion.
 
-    Uses dense (E, N, N, 2) pairwise force tensor — no scatter needed.
+    Uses dense (E, N, N, 2) pairwise force tensor -- no scatter needed.
+    All outputs are accelerations (m/s^2) under implicit unit-mass convention.
 
     Returns
     -------
-    forces : (E, N, 2) — net force per agent
+    forces : (E, N, 2) -- net acceleration per agent (m/s^2, implicit unit mass)
     """
     # --- Agent-agent spring-damper forces ---
     # Pairwise displacement: (E, N, N, 2)
@@ -170,11 +171,11 @@ def _compute_wall_repulsion(
     n_segments: Tensor,
     config: EnvConfig,
 ) -> Tensor:
-    """Smooth exponential wall repulsion force.
+    """Smooth exponential wall repulsion (m/s^2, implicit unit mass).
 
     Returns
     -------
-    forces : (E, N, 2)
+    forces : (E, N, 2) -- wall repulsion acceleration per agent
     """
     from crowdrl_torch.walls import points_to_segments_nearest
 

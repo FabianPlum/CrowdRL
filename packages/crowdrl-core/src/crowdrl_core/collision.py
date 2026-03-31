@@ -266,23 +266,27 @@ def compute_contact_forces(
     Wall: smooth exponential repulsion (following JuPedSim's BoundaryRepulsion).
     The exponential acts continuously, providing a smooth gradient for RL.
 
+    All outputs have units of acceleration (m/s^2) under an implicit unit-mass
+    convention, i.e. they are applied as ``v += force * dt`` with no mass
+    division.  This follows the Social Force Model tradition (Helbing 1995).
+
     Parameters
     ----------
     stiffness : float
-        Agent-agent spring constant (N/m).
+        Agent-agent spring constant (m/s^2 per unit overlap; implicit unit mass).
     damping : float
-        Agent-agent damping coefficient (N·s/m).
+        Agent-agent velocity-dependent damping (1/s; implicit unit mass).
     wall_strength : float
         Wall repulsion amplitude (m/s^2).
     wall_range : float
-        Wall repulsion length scale (m). Force = exp((radius - dist) / range).
+        Wall repulsion length scale (m). Magnitude = strength * exp((radius - dist) / range).
     collisions : list of (i, j, overlap), optional
         Pre-computed collision list. If None, detect_collisions() is called.
 
     Returns
     -------
     forces : (n_agents, 2) array
-        Net force on each agent.
+        Net acceleration on each agent (m/s^2, implicit unit mass).
     """
     n = world.n_agents
     forces = np.zeros((n, 2), dtype=np.float64)

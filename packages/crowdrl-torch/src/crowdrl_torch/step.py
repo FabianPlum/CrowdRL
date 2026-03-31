@@ -88,7 +88,7 @@ def batched_step(
         config,
     )
 
-    # Apply contact force impulse
+    # Apply contact accelerations (implicit unit mass) as velocity impulse
     new_velocities = torch.where(
         mask_2d,
         new_velocities + forces * config.dt,
