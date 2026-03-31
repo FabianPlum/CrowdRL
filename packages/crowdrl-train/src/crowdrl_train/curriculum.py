@@ -3,7 +3,7 @@
 Implements success-rate-driven phase advancement following:
 - Narvekar et al. (2020, JMLR): Zone of Proximal Development — moderate difficulty.
 - OpenAI (2019, ADR): advance when success rate exceeds threshold.
-- Chen et al. (2022): agent count as a curriculum variable.
+- Zhao et al. (2022): agent count as a curriculum variable.
 
 Curriculum phases control:
 1. Which geometry tiers are sampled per episode
