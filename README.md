@@ -26,9 +26,9 @@ crowdrl-core  ->  crowdrl-env  ->  crowdrl-train  -.onnx->  crowdrl-jupedsim
 | Package | Purpose | Key dependencies |
 |---------|---------|-----------------|
 | **crowdrl-core** | Shared geometry, perception, and action library. No RL or JuPedSim dependencies. | NumPy, Shapely, SciPy |
-| **crowdrl-env** | Gymnasium training environment with procedural geometry generation (Tiers 0-5) and multi-tier reward. | core + Gymnasium, Matplotlib |
+| **crowdrl-env** | Gymnasium training environment with procedural geometry generation (Tiers 0-3b) and multi-tier reward. | core + Gymnasium, Matplotlib |
 | **crowdrl-train** | MAPPO training loop, curriculum manager, ONNX policy export. | env + PyTorch |
-| **crowdrl-torch** | GPU-vectorised environments: batched PyTorch re-implementation of the env step for high-throughput training. | core + env + PyTorch |
+| **crowdrl-torch** | GPU-vectorised environments: batched PyTorch re-implementation of the env step for >100k steps/sec training. | core + env + PyTorch |
 | **crowdrl-jupedsim** | `LearnedPolicyModel` adapter that plugs trained policies into JuPedSim's simulation loop. | core + JuPedSim, ONNX Runtime |
 
 The only artefact crossing from training to deployment is an `.onnx` policy file.
@@ -37,7 +37,7 @@ The only artefact crossing from training to deployment is an `.onnx` policy file
 
 Pure geometry/perception/action library with no RL framework dependencies. Submodules:
 
-- **geometry** -- Shapely polygon handling, constrained Delaunay triangulation, navmesh construction, wall-segment extraction
+- **geometry** -- Shapely polygon handling, constrained Delaunay triangulation, navmesh construction, wall-segment extraction, progressive polygon simplification for GPU segment budgets
 - **navmesh** -- A\* on triangle adjacency graph + funnel algorithm (Simple Stupid Funnel) for shortest-path computation through portal edges
 - **sensing** -- Raycast engine (N rays, configurable FOV, head-anchored) + K-nearest-neighbour social query
 - **observation** -- Assembles the full observation vector from `WorldState`, identical in training and deployment
@@ -66,7 +66,7 @@ used during training -- no reimplementation, no drift.
 | Ego state | 7 | goal direction (2), velocity (2), heading (1), torso angle (1), head angle relative to torso (1) |
 | Social | 56 | K=8 nearest neighbours: relative position (2), relative velocity (2), body orientation (1), body dims (2) |
 | Raycasts | 16-32 | Head-anchored, 200 deg FOV, normalised distances. Optional 2-channel (distance + hit-type) |
-| Navmesh | 3 | Next-waypoint direction (2) + path deviation (1) (optional) |
+| Navmesh | 3 | Next-waypoint direction (2) + path deviation (1) -- pre-computed via A\*+funnel at episode reset, pure GPU tensor lookup per step |
 
 All observations are in egocentric frame.
 
@@ -169,8 +169,20 @@ uv run jupyter lab
 
 ## Current status
 
-- **Active**: `crowdrl-core`, `crowdrl-env` (procedural generator Tiers 0-3b, visualiser), `crowdrl-train` (MAPPO + curriculum), `crowdrl-torch` (GPU-vectorised environments)
-- **Not started**: `crowdrl-jupedsim`, Tier 4-5 geometry, Tier 3 reward (distributional style matching)
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v5.md) for details):
+
+| Milestone | Status |
+|-----------|--------|
+| M1: Environment prototype | **Complete** -- Tiers 0-3b geometry, solvability verification, navmesh router, GPU-vectorised env (>100k steps/sec) |
+| M2: Baseline RL agent | **Complete** |
+| M3: MARL training | **Substantially complete** -- MAPPO, GPU training, 6-phase curriculum (Tiers 0-3b), ONNX export. Needs large-scale training runs |
+| M4-M9 | Not started |
+
+**Active packages**: `crowdrl-core`, `crowdrl-env`, `crowdrl-train`, `crowdrl-torch`
+
+**Next up**: Large-scale training runs (10M+ timesteps), emergent behaviour documentation (M4), Tier 3 reward (distributional style matching from PeTrack data)
+
+**Not started**: `crowdrl-jupedsim`, Tier 4-5 geometry, IAS-7 geometry importer
 
 ## License
 
