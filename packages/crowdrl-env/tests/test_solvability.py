@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from shapely.geometry import Polygon, box
+from shapely.geometry import box
 
 from crowdrl_core.geometry import build_navmesh
 from crowdrl_core.navmesh import is_passable, is_reachable
@@ -94,7 +94,9 @@ class TestClearanceFactor:
         start = np.array([2.0, 3.0])
         goal = np.array([18.0, 3.0])
         # Gap is ~1m, agent radius 0.45 -> diameter 0.9m fits at factor=1.0
-        assert is_passable(bottleneck_navmesh, start, goal, agent_radius=0.45, clearance_factor=1.0)
+        assert is_passable(
+            bottleneck_navmesh, start, goal, agent_radius=0.45, clearance_factor=1.0
+        )
         # With 1.2 factor: effective diameter = 0.9 * 1.2 = 1.08m > 1.0m gap
         assert not is_passable(
             bottleneck_navmesh, start, goal, agent_radius=0.45, clearance_factor=1.2

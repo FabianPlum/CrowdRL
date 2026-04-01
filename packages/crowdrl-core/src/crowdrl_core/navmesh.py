@@ -16,7 +16,7 @@ import heapq
 
 import numpy as np
 from numpy.typing import NDArray
-from shapely.geometry import LineString, Point
+from shapely.geometry import Point
 
 from crowdrl_core.geometry import find_containing_triangle
 from crowdrl_core.world_state import NavMesh
