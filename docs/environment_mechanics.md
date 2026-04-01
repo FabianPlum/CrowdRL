@@ -73,8 +73,13 @@ spawn_agents()                -- rejection-sampled positions, heterogeneous bodi
   |                              chest_depth    ~ N(0.12, 0.015) m
   |                              preferred_speed ~ N(1.34, 0.26) m/s
   v
-verify_solvability()          -- A* confirms every (spawn, goal) pair is reachable
-  |                              with the agent's body clearance
+verify_solvability()          -- 3-stage check per (spawn, goal) pair:
+  |                              1. A* reachability on triangle graph
+  |                              2. Portal-width filter (>= 2 * effective_radius)
+  |                              3. Minkowski erosion: polygon eroded by
+  |                                 effective_radius, start/goal connectivity
+  |                              effective_radius = agent_radius * clearance_factor
+  |                              (default 1.2 = 20% margin for rotation)
   v
 filter unsolvable agents      -- prune, regenerate, or strict (configurable)
   |
@@ -90,9 +95,29 @@ Return (observations, info)
 
 Solvability verification
 ([solvability.py](../packages/crowdrl-env/src/crowdrl_env/solvability.py))
-runs A\* on the navmesh with per-agent portal-width checks, ensuring no agent
-is given an impossible task. Three modes control what happens when unsolvable
-agents are found:
+runs a 3-stage check per agent, ensuring no agent is given an impossible task:
+
+1. **A\* reachability** -- topological path exists on the triangle adjacency graph.
+2. **Portal-width filter** -- every shared edge along the corridor is at least
+   `2 * effective_radius` wide, where `effective_radius = agent_radius *
+   clearance_factor` (default 1.2). This is a fast rejection filter.
+3. **Geometric clearance (Minkowski erosion)** -- the walkable polygon is eroded
+   inward by `effective_radius` using Shapely's `buffer(-r)`. If start and goal
+   remain connected in the eroded polygon, the agent can physically traverse
+   the path. This catches narrow gaps between close obstacles where the portal
+   edge runs diagonally and overestimates the actual perpendicular clearance.
+
+The `clearance_factor` of 1.2 (configurable via
+`CrowdEnvConfig.solvability_clearance_factor`) provides a 20% safety margin,
+accounting for agent rotation -- an agent at its widest orientation (shoulder
+width) needs more clearance than the nominal radius.
+
+The geometry generator enforces `min_passage_width` (default 0.7m) on all
+openings: bottleneck apertures, door openings, corridor connectors, and gaps
+between obstacles. This works in concert with the solvability check to
+minimise wasted regeneration attempts.
+
+Three modes control what happens when unsolvable agents are found:
 
 | Mode | Behaviour |
 |------|-----------|
@@ -581,12 +606,12 @@ reward             += -0.005 * angular_accel_t
   overcorrects toward the goal. The angular acceleration penalty acts as a
   stabiliser, teaching the policy to commit to a heading and maintain it.
 
-#### Speed deviation: -0.1 * |speed - preferred_speed|
+#### Speed deviation: -0.03 * |speed - preferred_speed|
 
 ```
 speed        = ||velocity||
 preferred    = per-agent preferred speed (sampled at spawn, ~1.34 m/s)
-reward      += -0.1 * |speed - preferred|
+reward      += -0.03 * |speed - preferred|
 ```
 
 - **Incentivises**: walking at the agent's preferred speed (not too fast, not
@@ -637,14 +662,14 @@ starts 10m from its goal:
 | Goal bonus | one-time +10.0 | +10.0 | If reached |
 | Progress | ~+0.02/step | +2.0 | 10m at ~0.1 weight |
 | Existence | -0.01/step | -5.0 | 500 steps |
-| Speed deviation | ~-0.03/step | -15.0 | |speed - 1.34| ~0.3 avg |
+| Speed deviation | ~-0.009/step | -4.5 | |speed - 1.34| ~0.3 avg, weight -0.03 |
 | Collision | -1.0/step | -10.0 | If stuck for 10 steps |
 | Wall proximity | -0.3/step | -3.0 | ~10 steps near walls |
 | Jerk | ~-0.001/step | -0.5 | Varies widely |
 | Angular accel | ~-0.0005/step | -0.25 | Varies widely |
 
-The speed deviation penalty is the largest continuous signal, which means the
-policy is under strong pressure to maintain natural walking speed. The
+The existence penalty and speed deviation are comparable in magnitude as
+continuous signals, with neither dominating the reward budget. The
 collision penalty dominates during contact events. The progress reward and
 goal bonus together provide the navigational objective.
 
@@ -737,7 +762,7 @@ body because:
 | `progress_weight` | +0.1 | Yes |
 | `jerk_penalty_weight` | -0.01 | Yes (Tier 2) |
 | `angular_accel_penalty_weight` | -0.005 | Yes (Tier 2) |
-| `speed_deviation_weight` | -0.1 | Yes (Tier 2) |
+| `speed_deviation_weight` | -0.03 | Yes (Tier 2) |
 | `action_rate_weight` | 0.0 | No |
 | `inverse_distance_weight` | 0.0 | No |
 
