@@ -246,16 +246,18 @@ quantities for temporal derivatives (velocities, accelerations, headings).
 |--------|-------|-----------|
 | Goal reached | +10.0 | `||pos - goal|| < 0.5 m` |
 | Collision (agent-agent) | -1.0 per step | While overlapping another agent |
-| Timeout | -5.0 | Episode reaches 5000 steps |
+| Wall proximity | -0.3 per step | `dist_to_wall < 1.5 * agent_radius` |
+| Timeout | -5.0 | Episode reaches max_steps |
+| Existence | -0.01 per step | While agent is active (time pressure) |
 
 ### Tier 2: Progress shaping (potential-based)
 
 ```
-reward += 0.1 * (prev_goal_distance - current_goal_distance)
+reward += progress_weight * (prev_goal_distance - current_goal_distance)
 ```
 
 Positive when moving toward goal, negative when moving away. Potential-based so
-it does not introduce spurious optima.
+it does not introduce spurious optima. Default `progress_weight = 0.1`.
 
 ### Tier 3: Smoothness priors
 
@@ -263,17 +265,19 @@ it does not introduce spurious optima.
 |---------|--------|---------------------|
 | Jerk (change in acceleration) | -0.01 * \|\|da/dt\|\| | Sudden acceleration changes |
 | Angular acceleration | -0.005 * \|d_omega/dt\| | Rapid heading oscillations |
-| Speed deviation | -0.1 * \|v - v_preferred\| | Deviating from natural walking speed |
+| Speed deviation | -0.03 * \|v - v_preferred\| | Deviating from natural walking speed |
+| Action rate | -0.05 * \|\|a_t - a_{t-1}\|\| | Chattering/oscillating policy outputs |
 
-These require two steps of history to compute (acceleration needs previous
-velocity, jerk needs previous acceleration).
+Jerk and angular acceleration require two steps of history to compute
+(acceleration needs previous velocity, jerk needs previous acceleration).
+Action rate needs one step of history.
 
 ---
 
 ## 7. The full loop (single timestep)
 
 ```
-observations (N, 79)
+observations (N, 82)              79D base + 3D navmesh (when enabled)
        |
        v
   Actor network: obs -> mu (4) + sigma
@@ -282,8 +286,8 @@ observations (N, 79)
        v
   interpret_actions_batch()
   a[0] -> desired speed (0 to 1.5 m/s)
-  a[1] -> heading change (current_torso +/- 45 deg -> velocity direction)
-  a[2] -> torso change (+/- 30 deg -> rotates collision ellipse)
+  a[1] -> heading change (current_torso +/- 15 deg -> velocity direction)
+  a[2] -> torso change (+/- 15 deg -> rotates collision ellipse)
   a[3] -> head change (+/- 60 deg -> steers raycasts, clamped +/-90 from torso)
        |
        v
@@ -304,7 +308,8 @@ observations (N, 79)
        |
        v
   compute_rewards():
-    goal +10 / agent-collision -1 / progress / smoothness
+    goal +10 / collision -1 / wall proximity -0.3
+    existence -0.01 / progress / smoothness / action rate
        |
        v
   Update active mask, check termination/truncation
@@ -313,111 +318,42 @@ observations (N, 79)
   Rebuild observations from updated WorldState
 ```
 
-Critic evaluates V(s) from the same 79-D observation for GAE advantage
+Critic evaluates V(s) from the same observation for GAE advantage
 estimation (gamma=0.99, lambda=0.95). PPO updates run 10 epochs per rollout
 with clip ratio epsilon=0.2 and entropy bonus 0.01.
 
 ---
 
-## 8. Current gaps and proposed improvements
+## 8. Implemented improvements (formerly "gaps")
 
-### 8.1 Wall collision penalty (not currently penalised)
+### 8.1 Wall proximity penalty -- IMPLEMENTED
 
-**Current state**: The `collision_mask` passed to `compute_rewards` is built
-exclusively from agent-agent collisions (`crowd_env.py` lines 232-238). Wall
-contacts are resolved only through physics (exponential repulsion + hard boundary
-enforcement) but agents receive **no explicit reward penalty** for pressing
-against or colliding with walls.
-
-This means the policy has no direct incentive to avoid walls beyond the implicit
-signal from the exponential repulsion force slowing it down (which indirectly
-penalises via the speed-deviation and progress penalties). This is a weak,
-indirect signal.
-
-**Proposed fix**: Introduce a `wall_collision_penalty` in `RewardConfig` and
-build a `wall_contact_mask` from the wall boundary enforcement step. Two options:
-
-1. **Distance-based (smooth)**: Penalise agents whose distance to the nearest
-   wall segment is below a threshold (e.g., `1.5 * agent_radius`). This
-   provides a learnable gradient before hard contact.
-
-   ```python
-   wall_proximity = min_wall_distance < (agent_radius * 1.5)
-   rewards[wall_proximity & active_mask] += wall_proximity_penalty  # e.g. -0.3
-   ```
-
-2. **Binary (hard contact only)**: Flag agents that were actually projected by
-   `enforce_wall_boundaries()` and penalise them the same way as agent-agent
-   collisions.
-
-Option 1 is preferred as it gives a smoother learning signal. The penalty weight
-should be lower than agent-agent collision penalty (-1.0) since wall-hugging is
-less dangerous than interpenetration, something like -0.2 to -0.5.
-
-### 8.2 Enforcing smoother agent movements
-
-The current Tier 3 smoothness penalties (jerk, angular acceleration, speed
-deviation) are a good start. Additional mechanisms to consider:
-
-**A. Action rate penalty (simplest, highest impact)**
-
-Penalise large *changes* in the raw policy output between consecutive steps.
-This directly discourages the actor from producing oscillating or chattering
-actions, which is the root cause of jerky movement.
+Distance-based smooth penalty when agents are within `threshold * body_radius`
+of a wall. Provides a learnable gradient before hard wall contact.
 
 ```python
-action_change = actions_t - actions_{t-1}
-action_rate_penalty = -weight * ||action_change||
+wall_proximity = min_wall_distance < (agent_radius * 1.5)
+rewards[wall_proximity & active_mask] += -0.3
 ```
 
-This is more direct than penalising jerk (which is a second derivative of
-position) because it targets the policy output before it passes through the
-nonlinear action interpretation and velocity blending.
+Configurable via `RewardConfig.wall_proximity_penalty` (default -0.3) and
+`RewardConfig.wall_proximity_threshold` (default 1.5x agent radius).
 
-**B. Reduce maximum per-step orientation changes**
+### 8.2 Smoothness improvements -- IMPLEMENTED
 
-The current limits (45 deg/step heading, 30 deg/step torso) are generous at
-dt=0.01s. At 100 Hz this allows up to 4500 deg/s heading rotation, far beyond
-human capability (~120 deg/s peak). Tightening these:
-- `max_heading_change`: pi/4 -> pi/12 (~15 deg/step, ~1500 deg/s -- still generous)
-- `max_torso_change`: pi/6 -> pi/12
+**A. Action rate penalty** -- Penalises frame-to-frame changes in the raw policy
+output. Configured via `RewardConfig.action_rate_weight` (default -0.05).
+Targets the network's output before the nonlinear action interpretation.
 
-This constrains the action space mechanically rather than relying on penalties.
+**B. Tightened orientation limits** -- Heading and torso change limits reduced
+from pi/4 and pi/6 to pi/12 each (~15 deg/step, ~1500 deg/s). Still above
+human capability (~120 deg/s) but prevents physically impossible snap turns.
 
-**C. Increase velocity damping**
+### 8.3 Remaining potential improvements
 
-Raising `velocity_damping` from 0.8 toward 0.9 or 0.95 increases inertia,
-making agents heavier-feeling and naturally smoother. However, this reduces
-responsiveness and may slow training convergence.
+**C. Increase velocity damping** -- Raising `velocity_damping` from 0.8 toward
+0.9 or 0.95 increases inertia. Trades responsiveness for smoother trajectories.
 
-**D. Temporal action smoothing (exponential moving average)**
-
-Apply the same damping concept to the raw action output:
-
-```python
-smoothed_action = alpha * raw_action + (1 - alpha) * prev_action
-```
-
-This is equivalent to a low-pass filter on the policy output and guarantees
-smooth trajectories regardless of what the network produces.
-
-**E. Low-pass filter on heading**
-
-Instead of applying the heading change directly, filter it:
-
-```python
-new_heading = current + damping * (desired_change)
-```
-
-This prevents instantaneous heading reversals.
-
-### 8.3 Recommended priority
-
-1. **Wall collision penalty** (section 8.1, option 1) -- quick win, fixes a real
-   gap in the reward signal.
-2. **Action rate penalty** (section 8.2.A) -- direct, effective, one new config
-   field + ~5 lines of code in reward computation.
-3. **Tighten orientation limits** (section 8.2.B) -- mechanical constraint, zero
-   additional compute cost.
-4. **Temporal action smoothing** (section 8.2.D) -- if the above are
-   insufficient, this guarantees smoothness at the cost of reduced agility.
+**D. Temporal action smoothing** -- Low-pass filter on the policy output:
+`smoothed = alpha * raw + (1 - alpha) * prev`. Guarantees smooth trajectories
+at the cost of reduced agility. Not yet needed given action rate penalty results.
