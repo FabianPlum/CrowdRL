@@ -56,8 +56,10 @@ class RewardConfig:
     angular_accel_penalty_weight: float = -0.005
     """Weight for angular acceleration penalty."""
 
-    speed_deviation_weight: float = -0.1
-    """Weight for deviation from preferred speed."""
+    speed_deviation_weight: float = -0.03
+    """Weight for deviation from preferred speed. Kept low to avoid
+    dominating the reward budget in congested scenarios where agents
+    must slow down."""
 
     # Existence penalty (per-step cost for being alive)
     existence_penalty: float = -0.01

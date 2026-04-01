@@ -486,15 +486,35 @@ def _train_vec(
 
 
 def _aggregate_episode_stats(stats_list: list[dict]) -> dict:
-    """Compute mean stats over a list of episode stat dicts."""
+    """Compute mean stats over a list of episode stat dicts.
+
+    Includes per-tier breakdowns when geometry_tier is available.
+    """
     if not stats_list:
         return {"goal_rate": 0, "mean_reward": 0, "episode_length": 0, "n_agents": 0}
-    return {
+    agg = {
         "goal_rate": np.mean([s["goal_rate"] for s in stats_list]),
         "mean_reward": np.mean([s["mean_reward"] for s in stats_list]),
         "episode_length": np.mean([s["episode_length"] for s in stats_list]),
         "n_agents": np.mean([s["n_agents"] for s in stats_list]),
     }
+    # Per-tier breakdown
+    from collections import defaultdict
+
+    by_tier: dict[str, list[dict]] = defaultdict(list)
+    for s in stats_list:
+        tier = s.get("geometry_tier")
+        if tier is not None and tier != "unknown":
+            by_tier[str(tier)].append(s)
+    agg["per_tier"] = {
+        tier: {
+            "goal_rate": np.mean([s["goal_rate"] for s in eps]),
+            "mean_reward": np.mean([s["mean_reward"] for s in eps]),
+            "count": len(eps),
+        }
+        for tier, eps in by_tier.items()
+    }
+    return agg
 
 
 def _log_and_checkpoint(
@@ -528,6 +548,12 @@ def _log_and_checkpoint(
             "curriculum/phase": curriculum.current_phase_idx,
             "curriculum/rolling_goal_rate": curriculum.rolling_goal_rate,
         }
+        # Per-tier goal rate breakdown (when available)
+        per_tier = ep_stats.get("per_tier", {})
+        for tier, tier_stats in per_tier.items():
+            metrics[f"episode/goal_rate/{tier}"] = tier_stats["goal_rate"]
+            metrics[f"episode/reward_mean/{tier}"] = tier_stats["mean_reward"]
+
         metrics.update({f"ppo/{k}": v for k, v in update_metrics.items()})
 
         if updater.actor_optimizer.param_groups:

@@ -4,7 +4,7 @@ Implementation follows:
 - Yu et al. (2022): full-batch update (n_minibatches=1), KL early stopping,
   permissive gradient clipping (max_grad_norm=10.0).
 - Andrychowicz et al. (2021): MSE value loss (no clipping), separate actor/critic.
-- Huang et al. (2022): advantage normalization, linear LR decay.
+- Huang et al. (2022): advantage normalization, cosine/linear LR decay.
 
 The update operates on a FlatBatch of active agent-steps from the RolloutBuffer.
 Since all agents share one policy (parameter sharing), each agent-step is an
@@ -12,6 +12,8 @@ independent sample — the standard PPO update applies directly.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
@@ -189,7 +191,13 @@ class MAPPOUpdater:
         ----------
         progress : float in [0, 1] — fraction of total training complete
         """
-        if self.config.lr_schedule == "linear":
+        if self.config.lr_schedule == "cosine":
+            frac = 0.5 * (1.0 + math.cos(math.pi * progress))
+            for param_group in self.actor_optimizer.param_groups:
+                param_group["lr"] = self.config.lr_actor * frac
+            for param_group in self.critic_optimizer.param_groups:
+                param_group["lr"] = self.config.lr_critic * frac
+        elif self.config.lr_schedule == "linear":
             frac = 1.0 - progress
             for param_group in self.actor_optimizer.param_groups:
                 param_group["lr"] = self.config.lr_actor * frac

@@ -104,8 +104,8 @@ class PPOConfig:
     target_kl: float | None = 0.02
     """Early stopping on approx KL divergence. None = disabled."""
 
-    lr_schedule: str = "linear"
-    """Learning rate schedule: 'linear' (decay to 0) or 'constant'."""
+    lr_schedule: str = "cosine"
+    """Learning rate schedule: 'cosine', 'linear' (decay to 0), or 'constant'."""
 
     normalize_advantages: bool = True
     """Per-batch advantage normalization (zero mean, unit std)."""
@@ -141,6 +141,11 @@ class CurriculumPhase:
 
     goal_rate_threshold: float
     """Rolling goal rate must exceed this to advance. 0.0 = terminal phase."""
+
+    tier_weights: tuple[float, ...] | None = None
+    """Sampling weights for geometry_tiers. Must have the same length as
+    geometry_tiers. None = uniform sampling. Use higher weights for harder
+    tiers to bias toward more challenging episodes."""
 
 
 DEFAULT_CURRICULUM_PHASES: tuple[CurriculumPhase, ...] = (
@@ -185,6 +190,7 @@ DEFAULT_CURRICULUM_PHASES: tuple[CurriculumPhase, ...] = (
         ),
         n_agents_range=(20, 100),
         goal_rate_threshold=0.0,
+        tier_weights=(0.10, 0.15, 0.25, 0.25, 0.25),
     ),
 )
 
@@ -311,12 +317,16 @@ class TrainConfig:
                             GeometryTier[t] if isinstance(t, str) else GeometryTier(t)
                             for t in p["geometry_tiers"]
                         )
+                        tw = p.get("tier_weights")
+                        if tw is not None:
+                            tw = tuple(tw)
                         phases.append(
                             CurriculumPhase(
                                 name=p["name"],
                                 geometry_tiers=tiers,
                                 n_agents_range=tuple(p["n_agents_range"]),
                                 goal_rate_threshold=p["goal_rate_threshold"],
+                                tier_weights=tw,
                             )
                         )
                     cur["phases"] = tuple(phases)

@@ -114,6 +114,7 @@ class CurriculumManager:
         return CrowdEnvConfig(
             geometry=base_config.geometry,
             geometry_tiers=list(phase.geometry_tiers),
+            tier_weights=list(phase.tier_weights) if phase.tier_weights is not None else None,
             spawn=SpawnConfig(
                 n_agents_range=phase.n_agents_range,
                 shoulder_width_mean=base_config.spawn.shoulder_width_mean,
