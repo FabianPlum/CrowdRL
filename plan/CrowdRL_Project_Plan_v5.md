@@ -659,10 +659,112 @@ New notebook `examples/07_complex_geometry.ipynb` demonstrating:
 ### Updated "what remains"
 
 **Immediate (training validation):**
-- [ ] Large-scale training runs with GPU env + navmesh waypoints
-- [ ] Verify agents learn to follow waypoints in Tier 1-2 geometries
-- [ ] Verify curriculum progresses through Tier 3a/3b phases
+- [x] Large-scale training runs with GPU env + navmesh waypoints
+- [x] Verify agents learn to follow waypoints in Tier 1-2 geometries
+- [x] Verify curriculum progresses through Tier 3a/3b phases
 - [ ] Document emergent behaviours (M4)
+
+**Medium-term:**
+- [ ] Geometry Tiers 4-5 (building floors, multi-floor evacuation)
+- [ ] External geometry importer (IAS-7 test geometries)
+- [ ] Tier 3 reward (distributional style matching from PeTrack data)
+
+**Deployment:**
+- [ ] crowdrl-jupedsim package (ONNX runtime adapter)
+- [ ] Integration tests (obs parity between training and deployment)
+
+## 2026-03-31 -- Solvability overhaul + successful 200-rollout training
+
+### Problem
+
+Agents in complex geometries (Tier 3a/3b) were getting stuck in narrow gaps between close obstacles, even when a passable route existed. The solvability checker falsely approved paths where agents could not physically fit.
+
+Three root causes:
+
+1. **Portal-width checks used diagonal edges.** Delaunay triangulation creates portal edges (shared triangle edges) that can span diagonally through narrow gaps. A 1m gap between two obstacles can produce a ~1.41m diagonal portal, falsely passing the width check.
+2. **No rotation safety margin.** `is_passable` checked `portal_width >= 2 * agent_radius` exactly, with no margin for the agent's widest orientation (shoulder width).
+3. **Geometry generator created impassable openings.** Obstacle placement used 0.3m wall margin regardless of agent size. Tier 3b connector corridors used bounding-box overlap to size openings, but convex room walls can be angled, making the actual opening narrower than intended.
+
+### Solution: 3-stage solvability check + geometry enforcement
+
+**`is_passable()` now has 3 stages** (in `crowdrl-core/navmesh.py`):
+
+1. **A* reachability** -- topological path exists on the triangle graph.
+2. **Portal-width filter** -- fast rejection: every portal >= `2 * effective_radius`.
+3. **Minkowski erosion** -- the walkable polygon is eroded inward by `effective_radius` using Shapely `buffer(-r)`. Start and goal must remain connected in the eroded polygon. This is geometrically exact: if a disc of radius r can traverse between two points in a polygon, they are connected in the polygon eroded by r.
+
+`effective_radius = agent_radius * clearance_factor` (default 1.2 = 20% margin).
+
+An earlier approach (buffering the funnel path and checking if it stayed inside the polygon) was too sensitive to Shapely floating-point slivers at obstacle corners, producing false negatives that dropped Tier 3A survival from 88% to 6%. The Minkowski erosion approach is both geometrically exact and robust.
+
+**Geometry generator changes** (in `crowdrl-env/geometry_generator.py`):
+
+- New `GeometryConfig.min_passage_width` (default 0.7m) enforced on bottleneck apertures, door openings (Tier 3a and 3b), and corridor connector widths.
+- `_place_obstacles()` uses `min_passage_width` as both wall margin and inter-obstacle gap, preventing adjacent obstacles from creating impassable corridors.
+- Tier 3b connector placement validates effective opening width against actual room geometry (not just bounding box) at each junction. Retries up to 10 positions, with a fallback that extends deeply into both rooms.
+
+**NavMesh stores source polygon** (`NavMesh.polygon` field) for the erosion check.
+
+### Per-tier agent survival rates (30 agents, 10 episodes, clearance_factor=1.2)
+
+| Tier | Before | After |
+|------|--------|-------|
+| Tier 0 | ~83% | 100% |
+| Tier 1 | ~93% | 100% |
+| Tier 2 | 100% | 100% |
+| Tier 3A | ~6% | 88% |
+| Tier 3B | ~19% | 78% |
+
+### Training validation
+
+Full 200-rollout training run (`examples/06_full_training.ipynb`) with all tiers, navmesh waypoints, and the new solvability checks completed successfully with high goal rates and good movement patterns.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `crowdrl-core/world_state.py` | Added `NavMesh.polygon` field |
+| `crowdrl-core/geometry.py` | Store polygon in `build_navmesh()` |
+| `crowdrl-core/navmesh.py` | 3-stage `is_passable()` with `clearance_factor` + `_validate_path_clearance()` |
+| `crowdrl-core/tests/test_navmesh.py` | +4 test classes (polygon storage, clearance validation, geometric passability) |
+| `crowdrl-env/solvability.py` | `clearance_factor` parameter on `verify_solvability()` |
+| `crowdrl-env/crowd_env.py` | `solvability_clearance_factor` config + propagate `min_passage_width` |
+| `crowdrl-env/geometry_generator.py` | `min_passage_width`, obstacle gap enforcement, Tier 3b connector validation |
+| `crowdrl-env/tests/test_solvability.py` | +3 test classes (clearance factor, geometric clearance, close obstacles) |
+| `crowdrl-torch/episode_factory.py` | Propagate `clearance_factor` + `min_passage_width` |
+| `docs/agent_pipeline.md` | Updated reward table, action limits, obs dim, section 8 |
+| `docs/environment_mechanics.md` | Updated solvability description with 3-stage check |
+
+### Updated test suite: 315 tests total
+
+| Package | Tests | Pass rate |
+|---------|-------|-----------|
+| crowdrl-core | 130 | 100% |
+| crowdrl-env | 102 | 100% |
+| crowdrl-train | 71 | 100% |
+| crowdrl-torch | 12 | 100% |
+| **Total** | **315** | **100%** |
+
+### Updated milestone status
+
+**Milestone M3 (MARL training): COMPLETE**
+- MAPPO with parameter sharing, 20-100 agents
+- Tier 1+2 rewards including wall proximity, action rate, existence penalty
+- GPU-vectorised training with navmesh waypoint signals
+- Curriculum manager progressing through all tiers (0 through 3b)
+- 200-rollout training run validated with high goal rates
+- Solvability checker ensures agents are never given impossible paths
+
+**Milestone M4 (Emergent phenomena): IN PROGRESS**
+- High goal rates and good movement patterns observed
+- Remaining: systematic documentation of emergent behaviours
+
+### Updated "what remains"
+
+**Immediate:**
+- [ ] Document emergent behaviours from 200-rollout run (M4)
+- [ ] Run longer training (500+ rollouts) to push curriculum to later phases
+- [ ] Quantify emergent phenomena: lane formation, shoulder turning, gap exploitation
 
 **Medium-term:**
 - [ ] Geometry Tiers 4-5 (building floors, multi-floor evacuation)
