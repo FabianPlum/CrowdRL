@@ -1,12 +1,14 @@
 """Tests for navmesh A* pathfinding."""
 
 import numpy as np
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, box
 
 from crowdrl_core.geometry import build_navmesh
 from crowdrl_core.navmesh import (
+    _validate_path_clearance,
     astar_triangle_path,
     find_path,
+    is_passable,
     is_reachable,
     next_waypoint_direction,
     path_deviation,
@@ -252,3 +254,80 @@ class TestAgentRadius:
             return sum(float(np.linalg.norm(wp[i + 1] - wp[i])) for i in range(len(wp) - 1))
 
         assert path_len(wp_r) >= path_len(wp_0) - 1e-10
+
+
+class TestNavMeshStoresPolygon:
+    """Verify that build_navmesh stores the source polygon."""
+
+    def test_polygon_stored(self, simple_square_polygon):
+        nm = build_navmesh(simple_square_polygon)
+        assert nm.polygon is not None
+        assert nm.polygon.equals(simple_square_polygon)
+
+    def test_polygon_with_holes(self, square_with_obstacle):
+        nm = build_navmesh(square_with_obstacle)
+        assert nm.polygon is not None
+        assert len(list(nm.polygon.interiors)) == 1
+
+
+class TestValidatePathClearance:
+    """Tests for _validate_path_clearance (Minkowski erosion approach)."""
+
+    def test_connected_in_open_field(self, simple_square_polygon):
+        """Start and goal well inside a rectangle -- connected after erosion."""
+        start = np.array([2.0, 5.0])
+        goal = np.array([8.0, 5.0])
+        assert _validate_path_clearance(start, goal, 0.3, simple_square_polygon)
+
+    def test_narrow_polygon_rejects_wide_agent(self):
+        """Polygon too narrow for the agent radius after erosion."""
+        polygon = box(0, 0, 10, 0.4)
+        start = np.array([1.0, 0.2])
+        goal = np.array([9.0, 0.2])
+        # Radius 0.3 erodes 0.4m-wide polygon to empty
+        assert not _validate_path_clearance(start, goal, 0.3, polygon)
+
+    def test_narrow_gap_disconnects(self):
+        """Gap narrower than 2*radius disconnects start from goal."""
+        exterior = box(0, 0, 10, 6)
+        obs_a = box(4, 0.5, 5, 2.7)
+        obs_b = box(4, 3.3, 5, 5.5)
+        polygon = exterior.difference(obs_a).difference(obs_b)
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Gap is 0.6m, agent radius 0.4 -> eroded gap = -0.2m (disconnected)
+        assert not _validate_path_clearance(start, goal, 0.4, polygon)
+
+    def test_wide_gap_connects(self):
+        """Gap wider than 2*radius keeps connectivity."""
+        exterior = box(0, 0, 10, 6)
+        obs_a = box(4, 0.5, 5, 2.0)
+        obs_b = box(4, 4.0, 5, 5.5)
+        polygon = exterior.difference(obs_a).difference(obs_b)
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Gap is 2.0m, agent radius 0.3 -> eroded gap = 1.4m (connected)
+        assert _validate_path_clearance(start, goal, 0.3, polygon)
+
+
+class TestIsPassableGeometric:
+    """Tests for the full 3-stage is_passable check including geometric clearance."""
+
+    def test_diagonal_portal_does_not_fool_check(self):
+        """Two close obstacles with diagonal portal: geometric check catches it.
+
+        The portal edge between triangles in the gap may be diagonal
+        (e.g. sqrt(2) * gap_width), but the actual perpendicular clearance
+        is only gap_width.  The geometric check must reject this.
+        """
+        exterior = box(0, 0, 10, 6)
+        # Two obstacles very close together: 0.5m gap
+        obs_a = box(4, 0.5, 5.5, 2.75)
+        obs_b = box(4, 3.25, 5.5, 5.5)
+        polygon = exterior.difference(obs_a).difference(obs_b)
+        nm = build_navmesh(polygon)
+
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Agent radius 0.3 -> diameter 0.6m > 0.5m gap
+        assert not is_passable(nm, start, goal, agent_radius=0.3)

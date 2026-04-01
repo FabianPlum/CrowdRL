@@ -16,6 +16,7 @@ import heapq
 
 import numpy as np
 from numpy.typing import NDArray
+from shapely.geometry import LineString, Point
 
 from crowdrl_core.geometry import find_containing_triangle
 from crowdrl_core.world_state import NavMesh
@@ -476,29 +477,97 @@ def _min_portal_width(
     return min_width
 
 
+def _validate_path_clearance(
+    start: NDArray[np.float64],
+    goal: NDArray[np.float64],
+    radius: float,
+    polygon,
+) -> bool:
+    """Check that an agent of *radius* can traverse from start to goal within the walkable area.
+
+    Erodes the walkable polygon inward by *radius* (Minkowski difference)
+    and checks that start and goal are connected in the eroded polygon.
+    This is geometrically exact: if the eroded polygon connects start and
+    goal, then a disc of *radius* can traverse between them without
+    leaving the original polygon.
+
+    This catches narrow gaps between close obstacles that portal-width
+    checks miss (e.g. diagonal portal edges that overestimate the
+    perpendicular clearance).
+    """
+    from shapely.geometry import MultiPolygon
+
+    eroded = polygon.buffer(-radius)
+    if eroded.is_empty:
+        return False
+
+    start_pt = Point(float(start[0]), float(start[1]))
+    goal_pt = Point(float(goal[0]), float(goal[1]))
+
+    if isinstance(eroded, MultiPolygon):
+        # Multiple disconnected regions -- start and goal must be in the same one
+        for part in eroded.geoms:
+            # Use distance < radius to handle points near the eroded boundary
+            # (the original point is inside the full polygon, but may be
+            # outside the eroded polygon by up to radius)
+            if part.distance(start_pt) < radius and part.distance(goal_pt) < radius:
+                return True
+        return False
+
+    # Single polygon -- both points must be within reach
+    return eroded.distance(start_pt) < radius and eroded.distance(goal_pt) < radius
+
+
 def is_passable(
     navmesh: NavMesh,
     start: NDArray[np.float64],
     goal: NDArray[np.float64],
     agent_radius: float = 0.0,
+    clearance_factor: float = 1.0,
 ) -> bool:
     """Check if an agent of the given radius can traverse from start to goal.
 
-    Combines A* reachability with a portal-width check: every shared edge
-    along the triangle corridor must be at least ``2 * agent_radius`` wide
-    for the agent to physically fit through.
+    Three-stage check:
+
+    1. **A* reachability** -- topological path exists on the triangle graph.
+    2. **Portal-width filter** -- every shared edge along the corridor is at
+       least ``2 * effective_radius`` wide.  This is a fast rejection filter.
+    3. **Geometric clearance** -- the funnel-smoothed path, buffered by
+       *effective_radius*, lies entirely within the walkable polygon.  This
+       catches narrow gaps between close obstacles where the portal edge
+       runs diagonally and overestimates the actual perpendicular clearance.
+
+    ``effective_radius = agent_radius * clearance_factor``.  Use
+    *clearance_factor* > 1 to add a safety margin (e.g. 1.2 = 20%,
+    ensuring the agent at its widest orientation can traverse the path).
 
     Parameters
     ----------
     navmesh : NavMesh
     start, goal : (2,) arrays
     agent_radius : float
-        Half-width of the agent (e.g. max of shoulder_width, chest_depth).
+        Half-width of the agent (e.g. max of shoulder_width, chest_depth)).
         If 0, this is equivalent to :func:`is_reachable`.
+    clearance_factor : float
+        Multiplier applied to *agent_radius* for all clearance checks.
+        Default 1.0 (no extra margin).
     """
     tri_path = find_path(navmesh, start, goal)
     if tri_path is None:
         return False
-    if agent_radius <= 0 or len(tri_path) <= 1:
+
+    effective_radius = agent_radius * clearance_factor
+
+    if effective_radius <= 0 or len(tri_path) <= 1:
         return True
-    return _min_portal_width(navmesh, tri_path) >= 2.0 * agent_radius
+
+    # Stage 2: quick portal-width rejection
+    if _min_portal_width(navmesh, tri_path) < 2.0 * effective_radius:
+        return False
+
+    # Stage 3: geometric clearance via Minkowski erosion
+    if navmesh.polygon is not None:
+        if not _validate_path_clearance(start, goal, effective_radius, navmesh.polygon):
+            return False
+
+    return True

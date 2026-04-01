@@ -33,11 +33,14 @@ def verify_solvability(
     agent_radii: NDArray[np.float64],
     mode: SolvabilityMode = SolvabilityMode.PRUNE,
     max_unsolvable_fraction: float = 0.3,
+    clearance_factor: float = 1.2,
 ) -> NDArray[np.bool_] | None:
     """Verify that agents can reach their goals via the navmesh.
 
-    Each agent's radius is checked against portal widths along the A* path,
-    so agents that are too wide for a bottleneck are correctly marked unsolvable.
+    Each agent's radius is checked against portal widths and geometric
+    clearance along the A* path, so agents that are too wide for a
+    bottleneck or a narrow gap between obstacles are correctly marked
+    unsolvable.
 
     Parameters
     ----------
@@ -50,6 +53,11 @@ def verify_solvability(
     max_unsolvable_fraction : float
         For REGENERATE mode: if more than this fraction is unsolvable,
         signal geometry regeneration.
+    clearance_factor : float
+        Safety margin multiplier for agent radius (default 1.2 = 20%).
+        Accounts for agent rotation (widest orientation) and prevents
+        agents from being routed through gaps they cannot physically
+        traverse.
 
     Returns
     -------
@@ -61,7 +69,13 @@ def verify_solvability(
     n_agents = len(positions)
     solvable = np.array(
         [
-            is_passable(navmesh, positions[i], goal_positions[i], float(agent_radii[i]))
+            is_passable(
+                navmesh,
+                positions[i],
+                goal_positions[i],
+                float(agent_radii[i]),
+                clearance_factor,
+            )
             for i in range(n_agents)
         ],
         dtype=np.bool_,

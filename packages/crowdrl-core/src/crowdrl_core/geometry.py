@@ -236,6 +236,7 @@ def build_navmesh(polygon: Polygon) -> NavMesh:
         centroids=centroids,
         adjacency=adjacency,
         portals=portals,
+        polygon=polygon,
     )
 
 

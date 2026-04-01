@@ -40,6 +40,10 @@ class NavMesh:
     triangles i and j, oriented so that 'left' is to the left of the
     travel direction from i to j. Used by the funnel algorithm."""
 
+    polygon: Polygon = field(default=None)  # type: ignore[assignment]
+    """The walkable polygon used to build this navmesh. Stored for geometric
+    clearance validation in the solvability checker."""
+
 
 @dataclass
 class WorldState:

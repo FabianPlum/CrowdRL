@@ -45,7 +45,13 @@ def make_episode_factory(
         for _attempt in range(env_config.max_regeneration_attempts):
             # Pick tier
             if env_config.geometry_tiers is not None:
-                tier = rng.choice(env_config.geometry_tiers)
+                weights = env_config.tier_weights
+                if weights is not None:
+                    p = np.array(weights, dtype=np.float64)
+                    p = p / p.sum()
+                else:
+                    p = None
+                tier = rng.choice(env_config.geometry_tiers, p=p)
                 geom_config = GeometryConfig(
                     tier=tier,
                     min_side=env_config.geometry.min_side,
@@ -57,6 +63,7 @@ def make_episode_factory(
                     branch_width_range=env_config.geometry.branch_width_range,
                     branch_length_range=env_config.geometry.branch_length_range,
                     max_wall_segments=env_config.geometry.max_wall_segments,
+                    min_passage_width=env_config.geometry.min_passage_width,
                 )
             else:
                 geom_config = env_config.geometry
@@ -96,6 +103,7 @@ def make_episode_factory(
                 agent_radii,
                 env_config.solvability_mode,
                 env_config.max_unsolvable_fraction,
+                env_config.solvability_clearance_factor,
             )
 
             if solvable_mask is None:

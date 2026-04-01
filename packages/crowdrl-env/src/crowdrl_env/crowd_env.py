@@ -45,6 +45,10 @@ class CrowdEnvConfig:
     geometry_tiers: list[GeometryTier] | None = None
     """If set, randomly pick from these tiers each episode (overrides geometry.tier)."""
 
+    tier_weights: list[float] | None = None
+    """Sampling weights for geometry_tiers. Same length as geometry_tiers.
+    None = uniform sampling."""
+
     # Spawning
     spawn: SpawnConfig = field(default_factory=SpawnConfig)
 
@@ -52,6 +56,11 @@ class CrowdEnvConfig:
     solvability_mode: SolvabilityMode = SolvabilityMode.PRUNE
     max_unsolvable_fraction: float = 0.3
     max_regeneration_attempts: int = 10
+    solvability_clearance_factor: float = 1.2
+    """Safety margin multiplier for agent radius in solvability checks.
+    1.2 = 20% margin, ensuring agents at their widest orientation can
+    traverse the proposed path. Applied to both portal-width and
+    geometric clearance checks."""
 
     # Observation
     obs: ObsConfig = field(default_factory=ObsConfig)
@@ -325,7 +334,13 @@ class CrowdEnv(gym.Env):
         for _attempt in range(cfg.max_regeneration_attempts):
             # Pick tier
             if cfg.geometry_tiers is not None:
-                tier = self._rng.choice(cfg.geometry_tiers)
+                weights = cfg.tier_weights
+                if weights is not None:
+                    p = np.array(weights, dtype=np.float64)
+                    p = p / p.sum()
+                else:
+                    p = None
+                tier = self._rng.choice(cfg.geometry_tiers, p=p)
                 geom_config = GeometryConfig(
                     tier=tier,
                     min_side=cfg.geometry.min_side,
@@ -336,6 +351,7 @@ class CrowdEnv(gym.Env):
                     bottleneck_depth_range=cfg.geometry.bottleneck_depth_range,
                     branch_width_range=cfg.geometry.branch_width_range,
                     branch_length_range=cfg.geometry.branch_length_range,
+                    min_passage_width=cfg.geometry.min_passage_width,
                 )
             else:
                 geom_config = cfg.geometry
@@ -358,7 +374,7 @@ class CrowdEnv(gym.Env):
             # (same convention as the observation builder's navmesh signals)
             agent_radii = np.maximum(spawn_result.shoulder_widths, spawn_result.chest_depths)
 
-            # Verify solvability (A* + portal-width check per agent)
+            # Verify solvability (A* + portal-width + geometric clearance)
             solvable_mask = verify_solvability(
                 navmesh,
                 spawn_result.positions,
@@ -366,6 +382,7 @@ class CrowdEnv(gym.Env):
                 agent_radii,
                 cfg.solvability_mode,
                 cfg.max_unsolvable_fraction,
+                cfg.solvability_clearance_factor,
             )
 
             if solvable_mask is None:

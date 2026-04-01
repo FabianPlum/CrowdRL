@@ -52,6 +52,13 @@ class GeometryConfig:
     branch_width_range: tuple[float, float] = (1.5, 4.0)
     branch_length_range: tuple[float, float] = (5.0, 15.0)
 
+    # Minimum passage width (metres) — any opening or corridor connection
+    # must be at least this wide for the geometry to be valid.  Derived from
+    # the anthropometric distribution: 2 * (mean_shoulder + 3*std) * 1.2
+    # safety factor ~= 0.66m.  Ensures even the widest agents (at their
+    # widest orientation + 20% margin) can physically pass through.
+    min_passage_width: float = 0.7
+
     # Tier 3 params (shared by 3a and 3b)
     obstacle_coverage_range: tuple[float, float] = (0.05, 0.20)
     """Fraction of floor area covered by obstacles."""
@@ -222,7 +229,9 @@ def generate_bottleneck(
     aperture = rng.uniform(*config.bottleneck_aperture_range)
     bottleneck_depth = rng.uniform(*config.bottleneck_depth_range)
 
-    # Ensure aperture < corridor width
+    # Ensure aperture is at least min_passage_width (so agents can fit)
+    # and less than corridor width
+    aperture = max(aperture, config.min_passage_width)
     aperture = min(aperture, corridor_width * 0.8)
 
     # Exterior: full rectangle
@@ -438,19 +447,27 @@ def _place_obstacles(
     """Place random obstacles (rectangles + columns) inside a walkable area.
 
     Obstacles are placed via rejection sampling: each candidate must fit
-    entirely inside the walkable polygon (buffered inward by 0.3m to keep
-    clearance from walls) and must not overlap existing obstacles.
+    entirely inside the walkable polygon (buffered inward) and must leave
+    at least ``min_passage_width`` clearance from walls and other obstacles
+    so agents can navigate around them.
 
     Returns a list of obstacle polygons (to become polygon holes).
     """
     target_area = walkable.area * rng.uniform(*config.obstacle_coverage_range)
     placed: list[Polygon] = []
     placed_area = 0.0
-    inner = walkable.buffer(-0.3)
+
+    # Inset from walls: at least min_passage_width so agents can walk
+    # between any obstacle and the wall.
+    wall_margin = max(0.3, config.min_passage_width)
+    inner = walkable.buffer(-wall_margin)
     if inner.is_empty or not isinstance(inner, Polygon):
         return []
 
     minx, miny, maxx, maxy = inner.bounds
+
+    # Minimum gap between obstacles (buffered by this to prevent narrow gaps)
+    obs_gap = config.min_passage_width
 
     for _ in range(max_attempts):
         if placed_area >= target_area:
@@ -477,10 +494,12 @@ def _place_obstacles(
             angle = rng.uniform(0, 360)
             obs = rotate(obs, angle, origin="centroid")
 
-        # Validate: must fit inside walkable, must not overlap existing
+        # Validate: must fit inside walkable (with wall margin)
         if not inner.contains(obs):
             continue
-        if any(obs.intersects(p) for p in placed):
+        # Must maintain min_passage_width gap from existing obstacles
+        obs_buffered = obs.buffer(obs_gap)
+        if any(obs_buffered.intersects(p) for p in placed):
             continue
 
         placed.append(obs)
@@ -555,6 +574,7 @@ def generate_tier3a(
         bottleneck_depth_range=config.bottleneck_depth_range,
         branch_width_range=config.branch_width_range,
         branch_length_range=config.branch_length_range,
+        min_passage_width=config.min_passage_width,
     )
     base = generate_geometry(rng, base_config)
     polygon = base.polygon
@@ -574,7 +594,7 @@ def generate_tier3a(
     door_regions: list[Polygon] = []
 
     for i in range(min(n_doors, len(available_sides))):
-        door_width = rng.uniform(*config.door_width_range)
+        door_width = max(rng.uniform(*config.door_width_range), config.min_passage_width)
         side = available_sides[i]
         try:
             polygon, door_region = _cut_door_in_wall(rng, polygon, side, door_width)
@@ -669,6 +689,7 @@ def _generate_base_room(
         bottleneck_depth_range=config.bottleneck_depth_range,
         branch_width_range=config.branch_width_range,
         branch_length_range=(config.branch_length_range[0], config.branch_length_range[0] * 1.5),
+        min_passage_width=config.min_passage_width,
     )
     return generate_geometry(rng, base_config)
 
@@ -694,7 +715,7 @@ def generate_tier3b(
 
     # Arrange rooms: place them side by side with a gap for connecting corridors
     gap = rng.uniform(1.5, 4.0)  # corridor length between rooms
-    corridor_width = rng.uniform(1.5, 3.0)
+    corridor_width = max(rng.uniform(1.5, 3.0), config.min_passage_width)
     placed_polygons: list[Polygon] = []
     placed_bounds: list[tuple[float, float, float, float]] = []
     connector_polygons: list[Polygon] = []
@@ -710,6 +731,7 @@ def generate_tier3b(
 
         if i > 0:
             # Connect to previous room with a corridor
+            prev_poly = placed_polygons[i - 1]
             prev_bounds = placed_bounds[i - 1]
             # Corridor between right edge of prev and left edge of current
             prev_right = prev_bounds[2]
@@ -719,20 +741,95 @@ def generate_tier3b(
             y_overlap_min = max(prev_bounds[1], bminy) + 0.3
             y_overlap_max = min(prev_bounds[3], bmaxy) - 0.3
 
-            if y_overlap_max - y_overlap_min >= corridor_width:
-                corr_y = rng.uniform(y_overlap_min, y_overlap_max - corridor_width)
-                corridor = box(prev_right - 0.1, corr_y, curr_left + 0.1, corr_y + corridor_width)
-                connector_polygons.append(corridor)
-                # The corridor interior serves as a transition region
-                margin = corridor_width * 0.15
-                conn_region = box(
-                    prev_right + 0.1,
-                    corr_y + margin,
-                    curr_left - 0.1,
-                    corr_y + corridor_width - margin,
+            # Use narrower corridor if y-overlap is tight, but still respect
+            # min_passage_width as the absolute floor.
+            effective_corridor_width = corridor_width
+            if y_overlap_max - y_overlap_min < corridor_width:
+                effective_corridor_width = max(
+                    y_overlap_max - y_overlap_min - 0.1,
+                    config.min_passage_width,
                 )
-                if not conn_region.is_empty:
-                    connector_regions.append(conn_region)
+
+            if y_overlap_max - y_overlap_min >= effective_corridor_width:
+                ecw = effective_corridor_width
+                # Try multiple placements to find one where the effective
+                # opening into both rooms is wide enough.
+                placed_connector = False
+                for _try in range(10):
+                    corr_y = rng.uniform(y_overlap_min, y_overlap_max - ecw)
+                    # Extend corridor overlap into rooms to ensure connection
+                    overlap_depth = 0.3
+                    corridor = box(
+                        prev_right - overlap_depth,
+                        corr_y,
+                        curr_left + overlap_depth,
+                        corr_y + ecw,
+                    )
+
+                    # Validate effective opening: the intersection of the
+                    # corridor with each room must be wide enough.  This
+                    # catches cases where a convex room wall is angled and
+                    # the actual opening is narrower than corridor_width.
+                    prev_opening = corridor.intersection(prev_poly)
+                    curr_opening = corridor.intersection(poly)
+                    if prev_opening.is_empty or curr_opening.is_empty:
+                        continue
+
+                    # Measure opening height at the junction boundary
+                    prev_junction = box(
+                        prev_right - 0.05, corr_y, prev_right + 0.05, corr_y + ecw
+                    )
+                    curr_junction = box(
+                        curr_left - 0.05, corr_y, curr_left + 0.05, corr_y + ecw
+                    )
+                    prev_junct_area = prev_junction.intersection(prev_poly)
+                    curr_junct_area = curr_junction.intersection(poly)
+
+                    # Effective width = height of the intersection at the junction
+                    prev_eff_w = (
+                        (prev_junct_area.bounds[3] - prev_junct_area.bounds[1])
+                        if not prev_junct_area.is_empty
+                        else 0.0
+                    )
+                    curr_eff_w = (
+                        (curr_junct_area.bounds[3] - curr_junct_area.bounds[1])
+                        if not curr_junct_area.is_empty
+                        else 0.0
+                    )
+
+                    if (
+                        prev_eff_w >= config.min_passage_width
+                        and curr_eff_w >= config.min_passage_width
+                    ):
+                        connector_polygons.append(corridor)
+                        margin = ecw * 0.15
+                        conn_region = box(
+                            prev_right + 0.1,
+                            corr_y + margin,
+                            curr_left - 0.1,
+                            corr_y + ecw - margin,
+                        )
+                        if not conn_region.is_empty:
+                            connector_regions.append(conn_region)
+                        placed_connector = True
+                        break
+
+                if not placed_connector:
+                    # Fallback: extend the corridor deeply into both rooms
+                    # to guarantee geometric overlap even for convex shapes.
+                    corr_y = (y_overlap_min + y_overlap_max) / 2 - ecw / 2
+                    deep_overlap = min(
+                        (prev_bounds[2] - prev_bounds[0]) * 0.3,
+                        (bmaxx - bminx) * 0.3,
+                        2.0,
+                    )
+                    corridor = box(
+                        prev_right - deep_overlap,
+                        corr_y,
+                        curr_left + deep_overlap,
+                        corr_y + ecw,
+                    )
+                    connector_polygons.append(corridor)
 
         # Advance offset for next room
         offset_x = bmaxx + gap
@@ -757,7 +854,7 @@ def generate_tier3b(
     evac_regions: list[Polygon] = []
 
     for i in range(min(n_evac_doors, len(available_sides))):
-        door_width = rng.uniform(*config.door_width_range)
+        door_width = max(rng.uniform(*config.door_width_range), config.min_passage_width)
         side = available_sides[i]
         try:
             merged, door_region = _cut_door_in_wall(rng, merged, side, door_width)

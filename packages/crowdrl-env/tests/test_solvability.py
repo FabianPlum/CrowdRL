@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 
 from crowdrl_core.geometry import build_navmesh
 from crowdrl_core.navmesh import is_passable, is_reachable
@@ -15,7 +15,7 @@ from crowdrl_env.solvability import (
 
 @pytest.fixture
 def simple_navmesh():
-    """Navmesh for a 10x5 rectangle — all portals are wide."""
+    """Navmesh for a 10x5 rectangle -- all portals are wide."""
     polygon = box(0, 0, 10, 5)
     return build_navmesh(polygon)
 
@@ -30,12 +30,26 @@ def bottleneck_navmesh():
     return build_navmesh(polygon)
 
 
+@pytest.fixture
+def close_obstacles_navmesh():
+    """Navmesh with two close but non-touching obstacles creating a narrow gap.
+
+    The gap between the two obstacles is 0.4m -- too narrow for most agents
+    but the diagonal portal edge may be longer, fooling a portal-only check.
+    """
+    exterior = box(0, 0, 10, 6)
+    obs_a = box(4, 0.5, 5, 2.8)
+    obs_b = box(4, 3.2, 5, 5.5)
+    polygon = exterior.difference(obs_a).difference(obs_b)
+    return build_navmesh(polygon)
+
+
 # ---- Core is_passable tests ----
 
 
 class TestIsPassable:
     def test_open_rectangle_any_radius(self, simple_navmesh):
-        """Wide open rectangle — even large agents pass."""
+        """Wide open rectangle -- even large agents pass."""
         start = np.array([1.0, 2.5])
         goal = np.array([9.0, 2.5])
         assert is_passable(simple_navmesh, start, goal, agent_radius=0.3)
@@ -66,10 +80,73 @@ class TestIsPassable:
         assert not is_passable(simple_navmesh, start, goal, agent_radius=0.0)
 
     def test_same_triangle_always_passable(self, simple_navmesh):
-        """Start and goal in the same triangle — no portals to check."""
+        """Start and goal in the same triangle -- no portals to check."""
         start = np.array([1.0, 2.5])
         goal = np.array([1.5, 2.5])
         assert is_passable(simple_navmesh, start, goal, agent_radius=1.0)
+
+
+class TestClearanceFactor:
+    """Tests for the clearance_factor parameter."""
+
+    def test_clearance_factor_rejects_borderline_agent(self, bottleneck_navmesh):
+        """Agent that barely fits with factor=1.0 is rejected with factor=1.2."""
+        start = np.array([2.0, 3.0])
+        goal = np.array([18.0, 3.0])
+        # Gap is ~1m, agent radius 0.45 -> diameter 0.9m fits at factor=1.0
+        assert is_passable(bottleneck_navmesh, start, goal, agent_radius=0.45, clearance_factor=1.0)
+        # With 1.2 factor: effective diameter = 0.9 * 1.2 = 1.08m > 1.0m gap
+        assert not is_passable(
+            bottleneck_navmesh, start, goal, agent_radius=0.45, clearance_factor=1.2
+        )
+
+    def test_clearance_factor_1_is_default(self, simple_navmesh):
+        """Factor=1.0 should behave identically to the original check."""
+        start = np.array([1.0, 2.5])
+        goal = np.array([9.0, 2.5])
+        assert is_passable(simple_navmesh, start, goal, agent_radius=0.3, clearance_factor=1.0)
+
+
+class TestGeometricClearance:
+    """Tests for the geometric path clearance validation (Stage 3)."""
+
+    def test_close_obstacles_reject_wide_agent(self, close_obstacles_navmesh):
+        """Agent too wide for 0.4m gap between close obstacles is rejected.
+
+        This specifically tests the geometric clearance check -- the portal
+        width check alone might pass if the portal edge is diagonal.
+        """
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Agent radius 0.25 -> diameter 0.5m > 0.4m gap
+        assert not is_passable(close_obstacles_navmesh, start, goal, agent_radius=0.25)
+
+    def test_close_obstacles_allow_thin_agent(self, close_obstacles_navmesh):
+        """Thin agent fits through the 0.4m gap."""
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Agent radius 0.1 -> diameter 0.2m < 0.4m gap
+        assert is_passable(close_obstacles_navmesh, start, goal, agent_radius=0.1)
+
+    def test_geometric_clearance_with_clearance_factor(self, close_obstacles_navmesh):
+        """Clearance factor makes borderline agent fail geometric check."""
+        start = np.array([2.0, 3.0])
+        goal = np.array([8.0, 3.0])
+        # Agent radius 0.15 -> diameter 0.3m fits in 0.4m gap at factor=1.0
+        assert is_passable(
+            close_obstacles_navmesh, start, goal, agent_radius=0.15, clearance_factor=1.0
+        )
+        # With 1.2 factor: effective diameter = 0.36m, still fits
+        # With 1.5 factor: effective diameter = 0.45m > 0.4m gap
+        assert not is_passable(
+            close_obstacles_navmesh, start, goal, agent_radius=0.15, clearance_factor=1.5
+        )
+
+    def test_wide_open_passes_geometric_check(self, simple_navmesh):
+        """Wide open rectangle passes geometric clearance trivially."""
+        start = np.array([1.0, 2.5])
+        goal = np.array([9.0, 2.5])
+        assert is_passable(simple_navmesh, start, goal, agent_radius=0.3, clearance_factor=1.5)
 
 
 # ---- Solvability verifier tests ----
@@ -127,7 +204,7 @@ class TestVerifySolvability:
         assert mask is None
 
     def test_regenerate_below_threshold(self, simple_navmesh):
-        """One out of 5 unsolvable → below 30% threshold → returns mask."""
+        """One out of 5 unsolvable -- below 30% threshold -- returns mask."""
         positions = np.array([[1, 2.5], [2, 2.5], [3, 2.5], [4, 2.5], [5, 2.5]], dtype=np.float64)
         goals = np.array([[8, 2.5], [8, 2.5], [8, 2.5], [8, 2.5], [50, 50]], dtype=np.float64)
         radii = np.full(5, 0.2, dtype=np.float64)
@@ -139,7 +216,7 @@ class TestVerifySolvability:
         assert np.sum(mask) == 4
 
     def test_regenerate_above_threshold(self, simple_navmesh):
-        """Three out of 5 unsolvable → above 30% threshold → regenerate."""
+        """Three out of 5 unsolvable -- above 30% threshold -- regenerate."""
         positions = np.array([[1, 2.5], [2, 2.5], [3, 2.5], [4, 2.5], [5, 2.5]], dtype=np.float64)
         goals = np.array([[8, 2.5], [8, 2.5], [50, 50], [50, 50], [50, 50]], dtype=np.float64)
         radii = np.full(5, 0.2, dtype=np.float64)
@@ -148,6 +225,25 @@ class TestVerifySolvability:
             simple_navmesh, positions, goals, radii, SolvabilityMode.REGENERATE, 0.3
         )
         assert mask is None
+
+    def test_clearance_factor_passed_through(self, bottleneck_navmesh):
+        """Clearance factor is propagated to is_passable."""
+        positions = np.array([[2.0, 3.0]], dtype=np.float64)
+        goals = np.array([[18.0, 3.0]], dtype=np.float64)
+        # radius 0.45 -> diameter 0.9m fits in 1m gap at factor=1.0
+        radii = np.array([0.45], dtype=np.float64)
+
+        mask_loose = verify_solvability(
+            bottleneck_navmesh, positions, goals, radii, clearance_factor=1.0
+        )
+        assert mask_loose is not None
+        assert mask_loose[0]
+
+        mask_strict = verify_solvability(
+            bottleneck_navmesh, positions, goals, radii, clearance_factor=1.2
+        )
+        assert mask_strict is not None
+        assert not mask_strict[0]
 
 
 class TestFilterBySolvability:
