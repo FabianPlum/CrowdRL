@@ -776,12 +776,8 @@ def generate_tier3b(
                         continue
 
                     # Measure opening height at the junction boundary
-                    prev_junction = box(
-                        prev_right - 0.05, corr_y, prev_right + 0.05, corr_y + ecw
-                    )
-                    curr_junction = box(
-                        curr_left - 0.05, corr_y, curr_left + 0.05, corr_y + ecw
-                    )
+                    prev_junction = box(prev_right - 0.05, corr_y, prev_right + 0.05, corr_y + ecw)
+                    curr_junction = box(curr_left - 0.05, corr_y, curr_left + 0.05, corr_y + ecw)
                     prev_junct_area = prev_junction.intersection(prev_poly)
                     curr_junct_area = curr_junction.intersection(poly)
 
