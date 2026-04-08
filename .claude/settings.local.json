@@ -53,5 +53,8 @@
       "Bash(.venv/Scripts/ruff.exe check:*)",
       "Bash(.venv/Scripts/pytest.exe --tb=short -q)"
     ]
+  },
+  "env":{
+    "CLAUDE_CODE_EFFORT_LEVEL": "max"
   }
 }
