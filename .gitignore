@@ -45,3 +45,6 @@ examples/outputs/
 *.log
 wandb/
 runs/
+
+# Reference papers / large binary resources
+resources/
