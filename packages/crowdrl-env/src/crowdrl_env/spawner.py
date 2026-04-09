@@ -32,6 +32,13 @@ class SpawnConfig:
     """Mean half-chest-depth (metres). Full chest ~0.24m."""
     chest_depth_std: float = 0.015
 
+    # Agent mass distribution
+    mass_mean: float = 80.0
+    """Mean agent mass (kg). Literature: ~80 kg for mixed-gender adults."""
+    mass_std: float = 15.0
+    mass_min: float = 40.0
+    """Minimum agent mass (kg)."""
+
     # Desired speed distribution
     preferred_speed_mean: float = 1.34
     """Mean preferred walking speed (m/s). Literature: ~1.34 m/s."""
@@ -69,6 +76,8 @@ class SpawnResult:
     """(n_agents,)"""
     chest_depths: NDArray[np.float64]
     """(n_agents,)"""
+    masses: NDArray[np.float64]
+    """(n_agents,) — agent mass in kg."""
     goal_positions: NDArray[np.float64]
     """(n_agents, 2)"""
     preferred_speeds: NDArray[np.float64]
@@ -124,6 +133,13 @@ def spawn_agents(
         None,
     )
 
+    # Sample agent masses
+    masses = np.clip(
+        rng.normal(config.mass_mean, config.mass_std, n_agents),
+        config.mass_min,
+        None,
+    )
+
     # Sample preferred speeds
     preferred_speeds = np.clip(
         rng.normal(config.preferred_speed_mean, config.preferred_speed_std, n_agents),
@@ -154,6 +170,7 @@ def spawn_agents(
     if actual_n < n_agents:
         shoulder_widths = shoulder_widths[:actual_n]
         chest_depths = chest_depths[:actual_n]
+        masses = masses[:actual_n]
         preferred_speeds = preferred_speeds[:actual_n]
 
     # Sample goal positions (one per agent, randomly from goal regions)
@@ -183,6 +200,7 @@ def spawn_agents(
         head_orientations=head_orientations,
         shoulder_widths=shoulder_widths,
         chest_depths=chest_depths,
+        masses=masses,
         goal_positions=goal_positions,
         preferred_speeds=preferred_speeds,
     )
