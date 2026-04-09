@@ -116,7 +116,7 @@ class EnvConfig(NamedTuple):
     progress_weight: float = 1.0
     wall_proximity_penalty: float = -0.1
     wall_proximity_threshold: float = 1.5
-    agent_proximity_penalty: float = -0.1
+    agent_proximity_penalty: float = -0.005
     agent_proximity_threshold: float = 2.0
     action_rate_weight: float = 0.0
     existence_penalty: float = -0.01
