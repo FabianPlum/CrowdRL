@@ -53,8 +53,12 @@ class SpawnConfig:
     max_speed: float = 2.0
     """Maximum preferred speed (m/s)."""
 
-    min_spawn_separation: float = 0.5
-    """Minimum distance between spawned agents (metres)."""
+    min_spawn_separation: float = 0.3
+    """Minimum distance between spawned agents (metres).
+
+    Note: effective separation is max(this, 2 * max_body_radius), so this
+    only matters when agents are unusually small.
+    """
 
     max_spawn_attempts: int = 50
     """Maximum rejection-sampling attempts per agent before giving up."""
