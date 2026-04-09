@@ -4,7 +4,7 @@ Learning Crowd Navigation Policies via
 
 Multi-Agent Reinforcement Learning on Synthetic Arenas
 
-Project Plan — Draft for Internal Discussion
+Project Plan v6 — Draft for Internal Discussion
 
 Dr. Fabian Plum
 
@@ -100,6 +100,8 @@ Agent count, body size distribution (drawn from anthropometric data), desired sp
 
 Collision detection uses axis-aligned ellipses (not discs) to capture shoulder width vs. chest depth asymmetry. Contact forces follow a simplified Hertzian model. This is computationally cheap but provides the body-orientation signal that disc models lack.
 
+**Collision model design: physics vs. learned behaviour.** The environment's collision model is deliberately limited to physical constraints -- things that are true about the world regardless of how pedestrians choose to behave. This means: (a) contact forces that prevent two bodies from occupying the same space, (b) mass-based inertia so that forces produce realistic accelerations rather than unit-mass impulses, and (c) accurate overlap detection using proper ellipse-boundary-to-boundary distance rather than a centre-in-ellipse proxy. Crucially, the environment does *not* include proximity repulsion forces between agents (the exponential repulsion used in JuPedSim's Social Force Model and Generalized Centrifugal Force Model). Those forces encode a behavioural assumption -- "humans maintain personal space" -- as a deterministic force law. Adding them as world physics would reduce the learned policy to fitting residual weights on top of a known hand-crafted model, undermining the core premise of learning navigation behaviour from scratch. Instead, proximity avoidance is incentivised through a tunable reward signal (see Section 3.4, Tier 1 proximity penalty), giving the policy gradient information to learn spacing behaviour without prescribing the mechanism. This separation keeps the environment physically honest while preserving the policy's freedom to discover its own collision avoidance strategies.
+
 ## 3.3 Observation and Action Spaces (Module B)
 
 **Observation space (per agent)**
@@ -136,7 +138,7 @@ Shared-parameter PPO with an actor-critic MLP. All agents share one policy netwo
 
 The reward function is the core scientific contribution. It operates in three tiers:
 
-- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (−1 per timestep in contact), timeout penalty (−5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation.
+- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (-1 per timestep in contact), proximity penalty (tunable, distance-based penalty that ramps up as agents approach each other, providing gradient signal to learn spacing behaviour before contact occurs), timeout penalty (-5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation. The proximity penalty is the reward-side counterpart to the physics-side decision not to include proximity repulsion forces (see Section 3.2, Physics): the environment enforces only physical constraints (contact, inertia), while spacing behaviour is learned through this reward term.
 - **Tier 2 — Smoothness priors.** Acceleration penalty (penalise jerk and angular acceleration), preferred-speed deviation penalty. These regularise the motion toward physically plausible trajectories without using any human data.
 - **Tier 3 — Trajectory-matching from real data.** This is where IAS-7’s experimental data becomes an unfair advantage. Using trajectory datasets from PeTrack experiments (bottleneck flow, counterflow, unidirectional flow), compute distributional statistics: velocity autocorrelation functions, neighbour-distance distributions, angular change distributions. Define a style reward that penalises deviations from these distributions at the population level. This is not imitation learning on individual trajectories (which would overfit to specific experiments) but distributional matching—the agent should produce trajectories that are statistically indistinguishable from real pedestrians.
 
