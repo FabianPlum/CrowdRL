@@ -25,7 +25,7 @@ crowdrl-core  ->  crowdrl-env  ->  crowdrl-train  -.onnx->  crowdrl-jupedsim
 
 | Package | Purpose | Key dependencies |
 |---------|---------|-----------------|
-| **crowdrl-core** | Shared geometry, perception, and action library. No RL or JuPedSim dependencies. | NumPy, Shapely, SciPy |
+| **crowdrl-core** | Shared geometry, perception, and action library. No RL or JuPedSim dependencies. | NumPy, Shapely, SciPy, Triangle |
 | **crowdrl-env** | Gymnasium training environment with procedural geometry generation (Tiers 0-3b) and multi-tier reward. | core + Gymnasium, Matplotlib |
 | **crowdrl-train** | MAPPO training loop, curriculum manager, ONNX policy export. | env + PyTorch |
 | **crowdrl-torch** | GPU-vectorised environments: batched PyTorch re-implementation of the env step for >100k steps/sec training. | core + env + PyTorch |

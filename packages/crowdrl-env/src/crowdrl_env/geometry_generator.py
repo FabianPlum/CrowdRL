@@ -24,6 +24,13 @@ from shapely.ops import unary_union
 from shapely.validation import make_valid
 
 
+# Minimum wall clearance for spawn/goal regions.  Agent centres placed at the
+# region boundary must not have their body ellipse overlap a wall.  This equals
+# SpawnConfig.shoulder_width_mean (the half-shoulder-width / worst-case body
+# radius for a front-facing agent).
+_MIN_SPAWN_WALL_MARGIN = 0.22
+
+
 class GeometryTier(Enum):
     TIER_0 = 0
     TIER_1 = 1
@@ -108,6 +115,43 @@ def _ensure_valid_polygon(poly: Polygon) -> Polygon:
     return poly
 
 
+def _clip_regions(
+    regions: list[Polygon],
+    walkable: Polygon,
+    margin: float = _MIN_SPAWN_WALL_MARGIN,
+    min_area: float = 0.1,
+) -> list[Polygon]:
+    """Clip spawn/goal regions to lie safely within the walkable polygon.
+
+    The walkable polygon is eroded inward by *margin* before clipping so
+    that agent centres stay at least *margin* away from walls and obstacle
+    edges.  Regions that become empty or too small after clipping are
+    discarded.
+    """
+    eroded = walkable.buffer(-margin)
+    if eroded.is_empty:
+        return []
+    if isinstance(eroded, MultiPolygon):
+        eroded = max(eroded.geoms, key=lambda g: g.area)
+
+    clipped: list[Polygon] = []
+    for r in regions:
+        if r.is_empty:
+            continue
+        isect = eroded.intersection(r)
+        if isect.is_empty:
+            continue
+        # intersection may return a collection; keep the largest polygon
+        if isinstance(isect, MultiPolygon):
+            isect = max(isect.geoms, key=lambda g: g.area)
+        if not isinstance(isect, Polygon):
+            continue
+        if isect.area < min_area:
+            continue
+        clipped.append(isect)
+    return clipped
+
+
 # ---------------------------------------------------------------------------
 # Tier 0: Open fields
 # ---------------------------------------------------------------------------
@@ -122,7 +166,7 @@ def generate_rectangle(
     h = rng.uniform(config.min_side, config.max_side)
     polygon = box(0, 0, w, h)
 
-    margin = min(w, h) * 0.15
+    margin = max(min(w, h) * 0.15, _MIN_SPAWN_WALL_MARGIN)
     spawn = box(margin, margin, w / 3, h - margin)
     goal = box(2 * w / 3, margin, w - margin, h - margin)
 
@@ -155,22 +199,28 @@ def generate_convex_polygon(
     polygon = Polygon(coords)
     polygon = _ensure_valid_polygon(polygon)
 
-    # Spawn and goal: left and right thirds of bounding box
-    minx, miny, maxx, maxy = polygon.bounds
+    # Erode the polygon inward so spawn/goal regions respect wall clearance.
+    # This also eliminates sharp corner tips where no agent body would fit.
+    eroded = polygon.buffer(-_MIN_SPAWN_WALL_MARGIN)
+    if eroded.is_empty or not isinstance(eroded, Polygon):
+        eroded = polygon  # fallback for very small polygons
+
+    # Spawn and goal: left and right thirds of eroded bounding box
+    minx, miny, maxx, maxy = eroded.bounds
     w = maxx - minx
-    spawn = polygon.intersection(box(minx, miny, minx + w / 3, maxy))
-    goal = polygon.intersection(box(maxx - w / 3, miny, maxx, maxy))
+    spawn = eroded.intersection(box(minx, miny, minx + w / 3, maxy))
+    goal = eroded.intersection(box(maxx - w / 3, miny, maxx, maxy))
 
     # Ensure we have valid polygons
     if spawn.is_empty or not isinstance(spawn, Polygon):
-        spawn = polygon
+        spawn = eroded
     if goal.is_empty or not isinstance(goal, Polygon):
-        goal = polygon
+        goal = eroded
 
     return GeneratedGeometry(
         polygon=polygon,
-        spawn_regions=[spawn if isinstance(spawn, Polygon) else polygon],
-        goal_regions=[goal if isinstance(goal, Polygon) else polygon],
+        spawn_regions=[spawn if isinstance(spawn, Polygon) else eroded],
+        goal_regions=[goal if isinstance(goal, Polygon) else eroded],
         tier=GeometryTier.TIER_0,
         metadata={"shape": "convex", "n_vertices": n_vertices},
     )
@@ -201,8 +251,8 @@ def generate_corridor(
 
     polygon = box(0, 0, length, width)
 
-    margin = width * 0.2
-    spawn_len = min(2.0, length * 0.2)
+    margin = _MIN_SPAWN_WALL_MARGIN
+    spawn_len = length * 0.25
     spawn = box(margin, margin, spawn_len, width - margin)
     goal = box(length - spawn_len, margin, length - margin, width - margin)
 
@@ -258,7 +308,7 @@ def generate_bottleneck(
     polygon = _ensure_valid_polygon(polygon)
 
     # Spawn on left, goal on right
-    margin = min(0.5, corridor_width * 0.1)
+    margin = _MIN_SPAWN_WALL_MARGIN
     spawn = box(margin, margin, bx_start - margin, corridor_width - margin)
     goal = box(bx_end + margin, margin, length - margin, corridor_width - margin)
 
@@ -309,9 +359,9 @@ def generate_l_bend(
     polygon = unary_union([horiz, vert])
     polygon = _ensure_valid_polygon(polygon)
 
-    margin = w * 0.2
-    spawn = box(margin, margin, min(2.0, l1 * 0.2), w - margin)
-    goal = box(l1 - w + margin, l2 - min(2.0, l2 * 0.2), l1 - margin, l2 - margin)
+    margin = _MIN_SPAWN_WALL_MARGIN
+    spawn = box(margin, margin, l1 * 0.25, w - margin)
+    goal = box(l1 - w + margin, l2 - l2 * 0.25, l1 - margin, l2 - margin)
 
     return GeneratedGeometry(
         polygon=polygon,
@@ -341,18 +391,18 @@ def generate_t_junction(
     polygon = unary_union([main, branch])
     polygon = _ensure_valid_polygon(polygon)
 
-    margin = w * 0.2
+    margin = _MIN_SPAWN_WALL_MARGIN
     # Three possible goal/spawn points: left end, right end, branch end
-    spawn_left = box(margin, margin, min(2.0, main_length * 0.15), w - margin)
+    spawn_left = box(margin, margin, main_length * 0.25, w - margin)
     goal_right = box(
-        main_length - min(2.0, main_length * 0.15),
+        main_length - main_length * 0.25,
         margin,
         main_length - margin,
         w - margin,
     )
     goal_branch = box(
         branch_x - w / 2 + margin,
-        branch_length - min(2.0, branch_length * 0.2),
+        branch_length - branch_length * 0.25,
         branch_x + w / 2 - margin,
         branch_length - margin,
     )
@@ -389,18 +439,18 @@ def generate_crossroads(
     polygon = unary_union([horiz, vert])
     polygon = _ensure_valid_polygon(polygon)
 
-    margin = w * 0.2
+    margin = _MIN_SPAWN_WALL_MARGIN
     # Four endpoints as spawn/goal regions
-    spawn_left = box(margin, cy - w / 2 + margin, min(2.0, l_h * 0.15), cy + w / 2 - margin)
+    spawn_left = box(margin, cy - w / 2 + margin, l_h * 0.25, cy + w / 2 - margin)
     goal_right = box(
-        l_h - min(2.0, l_h * 0.15),
+        l_h - l_h * 0.25,
         cy - w / 2 + margin,
         l_h - margin,
         cy + w / 2 - margin,
     )
     goal_top = box(
         cx - w / 2 + margin,
-        l_v - min(2.0, l_v * 0.15),
+        l_v - l_v * 0.25,
         cx + w / 2 - margin,
         l_v - margin,
     )
@@ -408,7 +458,7 @@ def generate_crossroads(
         cx - w / 2 + margin,
         margin,
         cx + w / 2 - margin,
-        min(2.0, l_v * 0.15),
+        l_v * 0.25,
     )
 
     return GeneratedGeometry(
@@ -619,15 +669,16 @@ def generate_tier3a(
         spawn_regions = list(base.spawn_regions)
         goal_regions = list(base.goal_regions) + door_regions
 
-    # Filter to regions that actually overlap the walkable polygon
-    spawn_regions = [r for r in spawn_regions if polygon.intersects(r) and not r.is_empty]
-    goal_regions = [r for r in goal_regions if polygon.intersects(r) and not r.is_empty]
+    # Clip regions to the walkable polygon so they don't extend beyond
+    # the boundary or overlap obstacle holes added after the base room.
+    spawn_regions = _clip_regions(spawn_regions, polygon)
+    goal_regions = _clip_regions(goal_regions, polygon)
 
-    # Fallback: use buffered polygon centroid regions
+    # Fallback: clip base regions too (obstacles may have changed the polygon)
     if not spawn_regions:
-        spawn_regions = base.spawn_regions
+        spawn_regions = _clip_regions(base.spawn_regions, polygon)
     if not goal_regions:
-        goal_regions = base.goal_regions
+        goal_regions = _clip_regions(base.goal_regions, polygon)
 
     n_obstacles = len(list(polygon.interiors)) - len(list(base.polygon.interiors))
     return GeneratedGeometry(
@@ -861,32 +912,31 @@ def generate_tier3b(
 
     merged = _ensure_valid_polygon(merged)
 
-    # Spawn regions: interiors of all rooms (translated)
-    spawn_regions: list[Polygon] = []
+    # Spawn regions: interiors of all rooms (translated), clipped to merged polygon
+    raw_spawn: list[Polygon] = []
     for i, room in enumerate(rooms):
         for sr in room.spawn_regions:
             translated_sr = translate(sr, xoff=placed_bounds[i][0], yoff=placed_bounds[i][1])
-            if merged.intersects(translated_sr) and not translated_sr.is_empty:
-                spawn_regions.append(translated_sr)
+            raw_spawn.append(translated_sr)
 
     # Goal regions: evacuation doors (primary) + connector regions
-    goal_regions = list(evac_regions) + connector_regions
+    raw_goal: list[Polygon] = list(evac_regions) + connector_regions
 
-    # Filter to regions that intersect the walkable area
-    spawn_regions = [r for r in spawn_regions if merged.intersects(r) and not r.is_empty]
-    goal_regions = [r for r in goal_regions if merged.intersects(r) and not r.is_empty]
+    # Clip all regions to the walkable polygon
+    spawn_regions = _clip_regions(raw_spawn, merged)
+    goal_regions = _clip_regions(raw_goal, merged)
 
-    # Fallbacks
+    # Fallbacks (also clipped)
     if not spawn_regions:
-        # Use first room interior
         bnd = placed_bounds[0]
         margin = 0.3
-        spawn_regions = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+        fallback = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+        spawn_regions = _clip_regions(fallback, merged)
     if not goal_regions:
-        # Use last room interior
         bnd = placed_bounds[-1]
         margin = 0.3
-        goal_regions = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+        fallback = [box(bnd[0] + margin, bnd[1] + margin, bnd[2] - margin, bnd[3] - margin)]
+        goal_regions = _clip_regions(fallback, merged)
 
     n_obstacles = len(list(merged.interiors))
     return GeneratedGeometry(
@@ -940,4 +990,13 @@ def generate_geometry(
         GeometryTier.TIER_3B: generate_tier3b,
     }
 
-    return generators[config.tier](rng, config)
+    gen = generators[config.tier]
+    max_attempts = 20
+    for _ in range(max_attempts):
+        geom = gen(rng, config)
+        if geom.spawn_regions and geom.goal_regions:
+            return geom
+    raise RuntimeError(
+        f"Failed to generate a {config.tier.name} geometry with usable "
+        f"spawn and goal regions after {max_attempts} attempts"
+    )

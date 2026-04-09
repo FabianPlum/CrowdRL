@@ -2,14 +2,19 @@
 
 All geometries are Shapely Polygons with holes, matching JuPedSim convention.
 Walkable area = polygon exterior; obstacles = polygon holes.
+
+Triangulation uses Shewchuk's Triangle library (``triangle`` package) for true
+constrained Delaunay triangulation (CDT) that respects all boundary edges.
+This guarantees full coverage of the walkable area -- matching the CGAL CDT
+approach used by JuPedSim's RoutingEngine.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import triangle as tr
 from numpy.typing import NDArray
-from shapely.geometry import MultiPoint, Point, Polygon
-from shapely.ops import triangulate as shapely_triangulate
+from shapely.geometry import Point, Polygon
 
 from crowdrl_core.world_state import NavMesh
 
@@ -103,33 +108,59 @@ def _polygon_vertices(polygon: Polygon) -> NDArray[np.float64]:
 def triangulate_polygon(polygon: Polygon) -> list[NDArray[np.float64]]:
     """Constrained Delaunay triangulation of a polygon with holes.
 
-    Uses Shapely's Delaunay triangulation on polygon vertices, then filters
-    to keep only triangles whose centroid lies inside the walkable area.
+    Uses Shewchuk's Triangle library via the ``triangle`` package to produce
+    a true CDT that respects all boundary edges (exterior + holes).  This
+    guarantees full coverage of the walkable area -- every point inside the
+    polygon lies within exactly one output triangle.
 
     Returns
     -------
     triangles : list of (3, 2) arrays
         Vertex coordinates for each valid triangle.
     """
-    vertices = _polygon_vertices(polygon)
-    if len(vertices) < 3:
+    exterior_coords = np.array(polygon.exterior.coords[:-1], dtype=np.float64)
+    if len(exterior_coords) < 3:
         return []
 
-    # Use Shapely's triangulate which handles the constraint edges better
-    # for polygons with holes than raw scipy Delaunay
-    points = MultiPoint(vertices.tolist())
-    raw_triangles = shapely_triangulate(points)
+    # -- Build PSLG (Planar Straight-Line Graph) for Triangle ---------------
+    vertices_list = [exterior_coords]
+    segments_list: list[NDArray[np.intp]] = []
 
-    valid = []
-    for tri in raw_triangles:
-        if tri.geom_type != "Polygon":
-            continue
-        centroid = tri.centroid
-        if polygon.contains(centroid):
-            coords = np.array(tri.exterior.coords[:3], dtype=np.float64)
-            valid.append(coords)
+    # Exterior ring segments
+    n_ext = len(exterior_coords)
+    ext_segs = np.column_stack([np.arange(n_ext), (np.arange(n_ext) + 1) % n_ext])
+    segments_list.append(ext_segs)
 
-    return valid
+    offset = n_ext
+    hole_points: list[list[float]] = []
+    for hole in polygon.interiors:
+        hole_coords = np.array(hole.coords[:-1], dtype=np.float64)
+        n_h = len(hole_coords)
+        vertices_list.append(hole_coords)
+        hole_segs = np.column_stack(
+            [np.arange(n_h) + offset, ((np.arange(n_h) + 1) % n_h) + offset]
+        )
+        segments_list.append(hole_segs)
+        offset += n_h
+        # A point inside the hole tells Triangle to leave this region empty
+        hole_poly = Polygon(hole)
+        rep = hole_poly.representative_point()
+        hole_points.append([rep.x, rep.y])
+
+    pslg: dict = {
+        "vertices": np.concatenate(vertices_list),
+        "segments": np.concatenate(segments_list),
+    }
+    if hole_points:
+        pslg["holes"] = np.array(hole_points, dtype=np.float64)
+
+    # 'p' = triangulate PSLG, keep interior only
+    result = tr.triangulate(pslg, "p")
+
+    verts = result["vertices"]
+    tris = result["triangles"]
+
+    return [verts[face].astype(np.float64) for face in tris]
 
 
 def _triangles_share_edge(t1: NDArray, t2: NDArray, tol: float = 1e-10) -> bool:
