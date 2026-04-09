@@ -54,6 +54,7 @@ def make_world_state(
     head_orientations: np.ndarray | None = None,
     shoulder_widths: np.ndarray | None = None,
     chest_depths: np.ndarray | None = None,
+    masses: np.ndarray | None = None,
     build_nav: bool = False,
 ) -> WorldState:
     """Helper to build WorldState with sensible defaults."""
@@ -74,6 +75,8 @@ def make_world_state(
         shoulder_widths = np.full(n_agents, 0.23, dtype=np.float64)
     if chest_depths is None:
         chest_depths = np.full(n_agents, 0.15, dtype=np.float64)
+    if masses is None:
+        masses = np.full(n_agents, 80.0, dtype=np.float64)
 
     wall_segments = extract_wall_segments(polygon)
     navmesh = build_navmesh(polygon) if build_nav else None
@@ -85,6 +88,7 @@ def make_world_state(
         head_orientations=head_orientations,
         shoulder_widths=shoulder_widths,
         chest_depths=chest_depths,
+        masses=masses,
         goal_positions=goal_positions,
         walkable_polygon=polygon,
         wall_segments=wall_segments,

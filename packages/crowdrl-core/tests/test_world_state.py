@@ -15,6 +15,7 @@ class TestWorldState:
             head_orientations=np.zeros(5),
             shoulder_widths=np.full(5, 0.23),
             chest_depths=np.full(5, 0.15),
+            masses=np.full(5, 80.0, dtype=np.float64),
             goal_positions=np.zeros((5, 2)),
         )
         assert ws.n_agents == 5
@@ -27,6 +28,7 @@ class TestWorldState:
             head_orientations=np.zeros(3),
             shoulder_widths=np.full(3, 0.23),
             chest_depths=np.full(3, 0.15),
+            masses=np.full(3, 80.0, dtype=np.float64),
             goal_positions=np.zeros((3, 2)),
         )
         ws.validate()  # Should not raise
@@ -39,6 +41,7 @@ class TestWorldState:
             head_orientations=np.zeros(3),
             shoulder_widths=np.full(3, 0.23),
             chest_depths=np.full(3, 0.15),
+            masses=np.full(3, 80.0, dtype=np.float64),
             goal_positions=np.zeros((3, 2)),
         )
         with pytest.raises(ValueError, match="velocities"):
@@ -52,6 +55,7 @@ class TestWorldState:
             head_orientations=np.zeros(3),
             shoulder_widths=np.full(3, 0.23),
             chest_depths=np.full(3, 0.15),
+            masses=np.full(3, 80.0, dtype=np.float64),
             goal_positions=np.zeros((3, 2)),
         )
         with pytest.raises(ValueError, match="torso_orientations"):
@@ -65,6 +69,7 @@ class TestWorldState:
             head_orientations=np.zeros(3),
             shoulder_widths=np.full(3, 0.23),
             chest_depths=np.full(3, 0.15),
+            masses=np.full(3, 80.0, dtype=np.float64),
             goal_positions=np.zeros((3, 2)),
             active_mask=np.array([True, False]),  # Wrong size!
         )
@@ -79,6 +84,7 @@ class TestWorldState:
             head_orientations=np.array([0.1]),
             shoulder_widths=np.array([0.23]),
             chest_depths=np.array([0.15]),
+            masses=np.array([80.0]),
             goal_positions=np.array([[9.0, 2.0]]),
         )
         assert ws.n_agents == 1
@@ -93,6 +99,7 @@ class TestWorldState:
             head_orientations=np.random.randn(n),
             shoulder_widths=np.full(n, 0.23),
             chest_depths=np.full(n, 0.15),
+            masses=np.full(n, 80.0, dtype=np.float64),
             goal_positions=np.random.randn(n, 2),
         )
         assert ws.n_agents == 100

@@ -42,6 +42,7 @@ def _make_test_world(n_agents: int = 10, seed: int = 42):
     head_orientations = torso_orientations + rng.uniform(-0.5, 0.5, n_agents)
     shoulder_widths = rng.uniform(0.2, 0.4, n_agents)
     chest_depths = rng.uniform(0.15, 0.25, n_agents)
+    masses = np.full(n_agents, 80.0, dtype=np.float64)
     goal_positions = rng.uniform(1.0, 9.0, (n_agents, 2))
 
     # Simple rectangle: 0,0 to 10,10
@@ -62,6 +63,7 @@ def _make_test_world(n_agents: int = 10, seed: int = 42):
         head_orientations=head_orientations,
         shoulder_widths=shoulder_widths,
         chest_depths=chest_depths,
+        masses=masses,
         goal_positions=goal_positions,
         wall_segments=wall_segments,
     )
@@ -99,6 +101,7 @@ def _world_to_torch(world: WorldState, config: EnvConfig):
         "head_orientations": pad_1d(world.head_orientations, N),
         "shoulder_widths": pad_1d(world.shoulder_widths, N),
         "chest_depths": pad_1d(world.chest_depths, N),
+        "masses": pad_1d(world.masses, N),
         "goal_positions": pad_2d(world.goal_positions, N),
         "active_mask": torch.tensor(active).unsqueeze(0),  # (1, N)
         "wall_segments": torch.tensor(padded_segs).unsqueeze(0),  # (1, S, 2, 2)
