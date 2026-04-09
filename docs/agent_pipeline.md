@@ -147,17 +147,19 @@ wall is cancelled. See section 5.
 
 ### Physics parameters
 
-All "forces" in this pipeline are accelerations (m/s^2) under an implicit
-unit-mass convention: `v += force * dt` with no mass division. This follows
-the Social Force Model tradition (Helbing & Molnar 1995).
+Forces are computed in Newtons and divided by per-agent mass to produce
+accelerations: `v += (F / mass) * dt`. Agent masses are sampled from
+N(80, 15) kg at spawn (clamped >= 40 kg), so lighter agents are pushed
+harder than heavier ones -- matching real crowd dynamics.
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| `dt` | 0.01 s (10 ms) | `CrowdEnvConfig.dt` |
-| `velocity_damping` | 0.8 | `CrowdEnvConfig.velocity_damping` |
-| `contact_stiffness` | 2000 m/s^2 / overlap | `CrowdEnvConfig.contact_stiffness` |
-| `contact_damping` | 50 1/s | `CrowdEnvConfig.contact_damping` |
-| `max_speed_multiplier` | 2.0 | `CrowdEnvConfig.max_speed_multiplier` |
+| Parameter | Value | Unit | Source |
+|-----------|-------|------|--------|
+| `dt` | 0.01 | s | `CrowdEnvConfig.dt` |
+| `velocity_damping` | 0.8 | -- | `CrowdEnvConfig.velocity_damping` |
+| `contact_stiffness` | 30,000 | N / overlap | `CrowdEnvConfig.contact_stiffness` |
+| `contact_damping` | 500 | N*s/m | `CrowdEnvConfig.contact_damping` |
+| `max_speed_multiplier` | 2.0 | -- | `CrowdEnvConfig.max_speed_multiplier` |
+| `agent mass` | ~80 | kg | `SpawnConfig.mass_mean` |
 
 ---
 
@@ -172,15 +174,16 @@ semi-axis), rotated by `torso_orientation`.
 **Broad phase**: Pairwise squared-distance pre-filter. Only test pairs where
 `dist^2 < (radius_i + radius_j)^2 * 4`.
 
-**Narrow phase** (algebraic distance approach): For each candidate pair (i, j):
+**Narrow phase** (boundary-distance approach): For each candidate pair (i, j):
 
-1. Transform j's centre into i's ellipse frame via 2-D rotation by `-angle_i`.
-2. Compute algebraic distance: `(x/depth_i)^2 + (y/width_i)^2`.
-3. Also compute i in j's frame the same way.
-4. Take the minimum. If `min < 1.0`, overlap = `1 - sqrt(min)`.
+1. Compute the direction vector from i to j.
+2. Find the boundary point of ellipse i that is closest to j along this direction (in i's rotated local frame).
+3. Find the boundary point of ellipse j closest to i the same way.
+4. Sum the "boundary reach" of both ellipses. If the sum exceeds the centre-to-centre distance, the ellipses overlap.
+5. Overlap = penetration_depth / sum_of_reaches (normalised to [0, 1]).
 
-This is approximate (exact ellipse-ellipse intersection is expensive) but gives
-a smooth, differentiable-enough gradient for the spring-damper model.
+This properly detects edge-on collisions that the previous centre-in-ellipse
+proxy missed, and gives a smooth gradient for the spring-damper model.
 
 ### 5.2 Agent-agent contact forces (spring-damper)
 
@@ -190,26 +193,29 @@ For each colliding pair (i, j):
 normal = (pos_j - pos_i) / ||pos_j - pos_i||
 rel_vel_normal = dot(vel_i - vel_j, normal)
 
-force_mag = 2000 * overlap + 50 * max(rel_vel_normal, 0)
-            ^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            spring term      damping (only when approaching)
+force_N = 30000 * overlap + 500 * max(rel_vel_normal, 0)
+          ^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          spring (N)         damping (N, only when approaching)
 
-force_on_i = -force_mag * normal   (pushed away from j)
-force_on_j = +force_mag * normal   (pushed away from i)
+accel_i = -force_N / mass_i * normal   (pushed away from j)
+accel_j = +force_N / mass_j * normal   (pushed away from i)
 ```
 
-Forces are accumulated with `np.add.at` to correctly handle agents in multiple
-simultaneous collisions.
+Forces are in Newtons and divided by per-agent mass to yield accelerations.
+Lighter agents (40 kg) are pushed ~2x harder than heavier ones (80 kg).
+Forces are accumulated with `np.add.at` to correctly handle agents in
+multiple simultaneous collisions.
 
 ### 5.3 Wall repulsion forces (exponential)
 
 Smooth exponential repulsion following JuPedSim's BoundaryRepulsion model:
 
 ```
-f_mag = 5.0 * exp((agent_radius - dist_to_wall) / 0.3)
+f_mag = 400.0 * exp((agent_radius - dist_to_wall) / 0.3)
+accel  = f_mag / mass
 ```
 
-- `wall_strength = 5.0` (amplitude)
+- `wall_strength = 400.0 N` (amplitude)
 - `wall_range = 0.3 m` (length scale)
 
 This provides a continuous gradient that ramps up sharply within ~30 cm of a
@@ -246,9 +252,16 @@ quantities for temporal derivatives (velocities, accelerations, headings).
 |--------|-------|-----------|
 | Goal reached | +10.0 | `||pos - goal|| < 0.5 m` |
 | Collision (agent-agent) | -1.0 per step | While overlapping another agent |
+| Agent proximity | -0.3 per step | `dist_to_nearest_agent < 2.0 * agent_radius` |
 | Wall proximity | -0.3 per step | `dist_to_wall < 1.5 * agent_radius` |
 | Timeout | -5.0 | Episode reaches max_steps |
 | Existence | -0.01 per step | While agent is active (time pressure) |
+
+The **agent proximity penalty** is a reward signal (not a physics force) that
+teaches the policy to maintain personal space. Unlike JuPedSim's Social Force
+Model which prescribes exponential repulsion as a world force, CrowdRL lets
+the policy discover its own avoidance strategy through this tunable reward
+term. See Project Plan v6, Section 3.2.
 
 ### Tier 2: Progress shaping (potential-based)
 
@@ -294,21 +307,21 @@ observations (N, 82)              79D base + 3D navmesh (when enabled)
   Velocity blending: v = 0.8 * v_desired + 0.2 * v_old
        |
        v
-  detect_collisions(): pairwise ellipse overlap test
+  detect_collisions(): pairwise ellipse boundary-distance test
        |
        v
   compute_contact_forces():
-    - Agent-agent: spring-damper (k=2000, c=50)
-    - Walls: exponential repulsion (strength=5.0, range=0.3m)
+    - Agent-agent: spring-damper (k=30kN, c=500N*s/m), F/mass -> accel
+    - Walls: exponential repulsion (400N, range=0.3m), F/mass -> accel
        |
        v
-  v += forces * dt,  clamp ||v|| <= 3.0 m/s
+  v += accel * dt,  clamp ||v|| <= 3.0 m/s
   pos += v * dt
   enforce_wall_boundaries()
        |
        v
   compute_rewards():
-    goal +10 / collision -1 / wall proximity -0.3
+    goal +10 / collision -1 / agent proximity -0.3 / wall proximity -0.3
     existence -0.01 / progress / smoothness / action rate
        |
        v
@@ -349,7 +362,37 @@ Targets the network's output before the nonlinear action interpretation.
 from pi/4 and pi/6 to pi/12 each (~15 deg/step, ~1500 deg/s). Still above
 human capability (~120 deg/s) but prevents physically impossible snap turns.
 
-### 8.3 Remaining potential improvements
+### 8.3 Agent proximity penalty -- IMPLEMENTED
+
+Distance-based penalty when agents are within `threshold * body_radius` of
+each other. This is a reward signal (not a physics force) that teaches the
+policy to maintain personal space. Unlike JuPedSim's deterministic repulsion
+forces, this lets the policy learn its own avoidance strategy.
+
+```python
+agent_proximity = min_agent_distance < (agent_radius * 2.0)
+rewards[agent_proximity & active_mask] += -0.3
+```
+
+Configurable via `RewardConfig.agent_proximity_penalty` (default -0.3) and
+`RewardConfig.agent_proximity_threshold` (default 2.0x agent radius).
+
+### 8.4 Mass-based inertia -- IMPLEMENTED
+
+Contact forces are now computed in Newtons and divided by per-agent mass
+(F=ma) to produce accelerations. Agent masses are sampled from N(80, 15) kg
+at spawn. This means lighter agents are pushed harder and heavier agents
+resist more, matching real crowd dynamics.
+
+### 8.5 Boundary-distance overlap detection -- IMPLEMENTED
+
+The previous centre-in-ellipse algebraic proxy missed edge-on collisions
+where ellipse boundaries overlapped but neither centre was inside the other
+ellipse. The new boundary-distance method computes the closest boundary
+points of each ellipse along the line connecting their centres, detecting
+overlap when the sum of boundary reaches exceeds the centre distance.
+
+### 8.6 Remaining potential improvements
 
 **C. Increase velocity damping** -- Raising `velocity_damping` from 0.8 toward
 0.9 or 0.95 increases inertia. Trades responsiveness for smoother trajectories.

@@ -251,12 +251,18 @@ Broad phase:
   Pairwise squared-distance pre-filter
   Only test pairs where dist^2 < (r_i + r_j)^2 * 4
 
-Narrow phase (per candidate pair):
-  1. Transform j's centre into i's ellipse frame (rotate by -angle_i)
-  2. Compute algebraic distance: (x/depth_i)^2 + (y/width_i)^2
-  3. Repeat with i in j's frame
-  4. Take the minimum; if < 1.0, overlap = 1 - sqrt(min)
+Narrow phase (boundary-distance, per candidate pair):
+  1. Compute direction vector d = pos_j - pos_i
+  2. Find boundary point of ellipse i closest to j along d
+     (rotate d into i's local frame, scale by semi-axes)
+  3. Find boundary point of ellipse j closest to i along -d
+  4. Sum the boundary reaches (reach_i + reach_j)
+  5. If sum > centre_distance: overlap = penetration / sum_reaches
 ```
+
+This replaces the previous centre-in-ellipse algebraic proxy, which missed
+edge-on collisions where ellipse boundaries overlapped but neither centre
+was inside the other ellipse.
 
 **What this constrains:**
 
@@ -271,10 +277,10 @@ Narrow phase (per candidate pair):
   pedestrians do in tight gaps. The policy has an incentive to discover this
   because it reduces collision penalties.
 
-- **Overlap is smooth, not binary.** The algebraic distance proxy yields a
-  continuous overlap magnitude. Deeper penetration means larger forces (A.4),
-  which means the policy experiences a gradient -- slightly brushing another
-  agent is penalised less than a head-on collision.
+- **Overlap is smooth, not binary.** The boundary-distance method yields a
+  continuous overlap magnitude in [0, 1]. Deeper penetration means larger
+  forces (A.4), which means the policy experiences a gradient -- slightly
+  brushing another agent is penalised less than a head-on collision.
 
 ### A.4 Contact forces: spring-damper model
 
@@ -287,35 +293,37 @@ For each colliding pair (i, j):
   normal      = (pos_j - pos_i) / ||pos_j - pos_i||
   rel_vel_n   = dot(vel_i - vel_j, normal)
 
-  accel = 2000 * overlap  +  50 * max(rel_vel_n, 0)
-          ~~~~~~~~~~~~~~~     ~~~~~~~~~~~~~~~~~~~~~~~~
-          spring term          damping (only when approaching)
+  force_N = 30000 * overlap  +  500 * max(rel_vel_n, 0)
+            ~~~~~~~~~~~~~~~~     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            spring (N)           damping (N, only approaching)
 
-  Agent i is pushed away from j (acceleration along -normal)
-  Agent j is pushed away from i (acceleration along +normal)
+  accel_i = -(force_N / mass_i) * normal   (pushed away from j)
+  accel_j = +(force_N / mass_j) * normal   (pushed away from i)
 ```
 
-**A note on units:** agents have no explicit mass. The "forces" returned by
-`compute_contact_forces()` are applied directly as accelerations:
-`v += accel * dt`. This is equivalent to assuming unit mass (1 kg) for all
-agents, which is standard in pedestrian social-force models. The stiffness
-constant of 2000 has units of m/s^2 per unit overlap (not N/m), and the
-damping constant of 50 has units of 1/s (not N*s/m). The practical effect is
-the same -- overlapping agents are pushed apart -- but there is no F=ma step
-in the physics pipeline.
+**Units and mass:** forces are computed in Newtons and divided by per-agent
+mass to produce accelerations: `v += (F / m) * dt`. Agent masses are sampled
+from N(80, 15) kg at spawn (clamped >= 40 kg). This means lighter agents
+are pushed harder and heavier agents resist more -- matching real crowd
+dynamics where body mass affects collision outcomes.
 
 **What this constrains:**
 
-- **Overlapping agents are forcefully separated.** A stiffness of 2000 m/s^2
-  means even small overlaps produce large accelerations. An agent that walks
-  into another agent will be pushed backwards, making it lose progress toward
-  its goal.
+- **Overlapping agents are forcefully separated.** With stiffness=30,000 N
+  and mass=80 kg, a moderate overlap of 0.1 produces ~37 m/s^2 of
+  deceleration -- matching JuPedSim's SFM at equivalent physical penetration. An agent that walks into another agent will be pushed
+  backwards, making it lose progress toward its goal.
+
+- **Mass heterogeneity matters.** A 40 kg agent receives 2x the acceleration
+  of an 80 kg agent from the same collision force. The policy observes
+  body dimensions but not mass directly -- it must learn that smaller agents
+  are more easily displaced.
 
 - **Head-on collisions are worse than glancing contacts.** The damping term
-  (`50 * max(rel_vel_n, 0)`) adds extra acceleration when agents approach each
-  other. Two agents walking toward each other at 1 m/s each get a combined
-  100 m/s^2 of damping acceleration on top of the spring term. This teaches
-  the policy to avoid approaching trajectories.
+  (`500 * max(rel_vel_n, 0)`) adds extra force when agents approach each
+  other. Two 80 kg agents walking toward each other at 1 m/s each get a
+  combined ~12 m/s^2 of damping acceleration on top of the spring term.
+  This teaches the policy to avoid approaching trajectories.
 
 - **One-sided damping prevents bouncing.** The `max(rel_vel_n, 0)` clamp means
   damping only applies when agents are approaching, not when separating. This
@@ -329,16 +337,17 @@ in the physics pipeline.
 
 ### A.5 Wall repulsion: exponential force field
 
-Walls exert a smooth exponential repulsion acceleration
+Walls exert a smooth exponential repulsion force
 ([collision.py:322-352](../packages/crowdrl-core/src/crowdrl_core/collision.py#L322)),
-again with implicit unit mass:
+divided by agent mass:
 
 ```
 For each agent, for each wall segment:
   dist   = distance to nearest point on segment
   radius = max(shoulder_width, chest_depth)
 
-  f_mag  = 5.0 * exp((radius - dist) / 0.3)
+  f_mag  = 400.0 * exp((radius - dist) / 0.3)
+  accel  = f_mag / mass
 ```
 
 The force direction points from the nearest wall point toward the agent.
@@ -491,6 +500,29 @@ if agent is overlapping any other agent AND both are active:
 - **Implicit learning**: combined with the spring-damper force (A.4), the agent
   learns that collisions both hurt (reward) and push it off course (physics).
   The double signal reinforces avoidance.
+
+#### Agent proximity: -0.3 per step
+
+```
+threshold = agent_radius * 2.0    (e.g. 0.22m * 2.0 = 0.44m)
+
+if distance_to_nearest_agent < threshold AND agent is active:
+    reward += -0.3
+```
+
+- **Incentivises**: maintaining personal space before contact occurs.
+- **Reward, not physics**: this is a crucial design decision. JuPedSim's
+  Social Force Model and GCFM use deterministic exponential repulsion forces
+  to keep agents apart. Adding such forces as world physics would encode a
+  behavioural assumption ("humans maintain personal space") as a constraint,
+  reducing the learned policy to fitting residual weights on a known
+  hand-crafted model. Instead, CrowdRL provides this as a reward signal,
+  giving the policy gradient information to learn spacing behaviour without
+  prescribing the mechanism. The policy is free to discover its own avoidance
+  strategies. See Project Plan v6, Section 3.2.
+- **Complements collision penalty**: the -1.0 collision penalty fires only
+  during overlap; this -0.3 proximity penalty fires earlier, creating a
+  smoother gradient that encourages the policy to maintain distance.
 
 #### Timeout: -5.0
 
@@ -727,8 +759,8 @@ body because:
 |-----------|---------|------|------|
 | `dt` | 0.01 | s | Simulation timestep |
 | `velocity_damping` | 0.8 | -- | Blend factor: 0.8 = desired, 0.2 = carry-over |
-| `contact_stiffness` | 2000 | m/s^2 / overlap | Agent-agent spring (implicit unit mass) |
-| `contact_damping` | 50 | 1/s | Agent-agent approach damping (implicit unit mass) |
+| `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
+| `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
 | `max_speed_multiplier` | 2.0 | -- | Speed clamp = 2.0 * 1.5 = 3.0 m/s |
 | `max_steps` | 5000 | steps | Episode timeout (50 seconds) |
 
@@ -746,7 +778,7 @@ body because:
 
 | Parameter | Default | Unit |
 |-----------|---------|------|
-| `wall_strength` | 5.0 | m/s^2 |
+| `wall_strength` | 400.0 | N |
 | `wall_range` | 0.3 | m |
 
 ### Reward weights ([RewardConfig](../packages/crowdrl-env/src/crowdrl_env/reward.py#L21))
@@ -755,6 +787,8 @@ body because:
 |--------|--------|-------------------|
 | `goal_bonus` | +10.0 | Yes |
 | `collision_penalty` | -1.0 | Yes |
+| `agent_proximity_penalty` | -0.3 | Yes |
+| `agent_proximity_threshold` | 2.0x radius | Yes |
 | `timeout_penalty` | -5.0 | Yes |
 | `wall_proximity_penalty` | -0.3 | Yes |
 | `wall_proximity_threshold` | 1.5x radius | Yes |
@@ -772,4 +806,5 @@ body because:
 |-----------|-------------|-------|
 | `shoulder_width` | N(0.22, 0.02) m | Half-width; full shoulder ~0.44m |
 | `chest_depth` | N(0.12, 0.015) m | Half-depth; full chest ~0.24m |
+| `mass` | N(80, 15) kg | Clamped >= 40 kg |
 | `preferred_speed` | N(1.34, 0.26) m/s | Clamped to [0.5, 2.0] m/s |
