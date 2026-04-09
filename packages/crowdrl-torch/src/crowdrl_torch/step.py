@@ -75,12 +75,13 @@ def batched_step(
         state.n_agents,
     )
 
-    # --- 4. Contact forces ---
+    # --- 4. Contact forces (F=ma, divided by per-agent mass) ---
     forces = compute_contact_forces(
         state.positions,
         new_velocities,
         state.shoulder_widths,
         state.chest_depths,
+        state.masses,
         state.active_mask,
         overlap_matrix,
         state.wall_segments,
@@ -88,7 +89,7 @@ def batched_step(
         config,
     )
 
-    # Apply contact accelerations (implicit unit mass) as velocity impulse
+    # Apply accelerations as velocity impulse
     new_velocities = torch.where(
         mask_2d,
         new_velocities + forces * config.dt,
@@ -123,11 +124,22 @@ def batched_step(
     )
 
     # --- 7. Rewards ---
-    # Compute wall distances for proximity penalty
+    # Compute distances for proximity penalties
     wall_distances = compute_min_wall_distances(
         new_positions, state.wall_segments, state.n_segments
     )
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
+
+    # Min agent-agent centre distance (E, N)
+    _diff = new_positions.unsqueeze(2) - new_positions.unsqueeze(1)  # (E, N, N, 2)
+    _adist = (_diff**2).sum(dim=-1).sqrt()  # (E, N, N)
+    _eye = torch.eye(new_positions.shape[1], device=new_positions.device, dtype=torch.bool)
+    _adist = torch.where(
+        _eye.unsqueeze(0) | ~state.active_mask.unsqueeze(1),
+        torch.tensor(float("inf"), device=new_positions.device),
+        _adist,
+    )
+    agent_distances = _adist.min(dim=2).values  # (E, N)
 
     rewards, reached_goal, new_goal_distances = compute_rewards(
         new_positions,
@@ -138,9 +150,16 @@ def batched_step(
         state.prev_goal_distances,
         config,
         wall_distances=wall_distances,
+        agent_distances=agent_distances,
         agent_radii=agent_radii,
         actions=actions,
         prev_actions=state.prev_actions,
+        headings=new_torso_orientations,
+        preferred_speeds=state.preferred_speeds,
+        prev_velocities=state.prev_velocities,
+        prev_accelerations=state.prev_accelerations,
+        prev_headings=state.prev_headings,
+        prev_heading_changes=state.prev_heading_changes,
     )
 
     # --- 8. Update active mask ---
@@ -197,6 +216,15 @@ def batched_step(
         state.prev_accelerations,
     )
 
+    # Heading changes for angular acceleration penalty
+    heading_change = new_torso_orientations - state.prev_headings
+    heading_change = (heading_change + torch.pi) % (2 * torch.pi) - torch.pi
+    new_prev_heading_changes = torch.where(
+        state.prev_headings.abs() > 0,
+        heading_change,
+        state.prev_heading_changes,
+    )
+
     # --- 12. Build new state ---
     new_state = TorchWorldState(
         positions=new_positions,
@@ -205,6 +233,7 @@ def batched_step(
         head_orientations=new_head_orientations,
         shoulder_widths=state.shoulder_widths,
         chest_depths=state.chest_depths,
+        masses=state.masses,
         goal_positions=state.goal_positions,
         preferred_speeds=state.preferred_speeds,
         active_mask=new_active_mask,
@@ -215,7 +244,7 @@ def batched_step(
         prev_goal_distances=new_goal_distances,
         prev_accelerations=new_prev_accelerations,
         prev_headings=new_torso_orientations,
-        prev_heading_changes=state.prev_heading_changes,
+        prev_heading_changes=new_prev_heading_changes,
         prev_actions=actions,
         waypoints=state.waypoints,
         n_waypoints=state.n_waypoints,
