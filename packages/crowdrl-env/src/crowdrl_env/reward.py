@@ -35,11 +35,22 @@ class RewardConfig:
     """Distance threshold (metres) for goal reached."""
 
     # Wall collision penalty
-    wall_proximity_penalty: float = -0.3
+    wall_proximity_penalty: float = -0.1
     """Penalty for agents too close to walls (smooth, distance-based)."""
 
     wall_proximity_threshold: float = 1.5
     """Wall proximity threshold as a multiple of agent radius."""
+
+    # Agent proximity penalty (learned collision avoidance)
+    agent_proximity_penalty: float = -0.1
+    """Penalty applied per step when another agent is within the proximity
+    threshold.  This is a reward signal, NOT a physics force -- it teaches
+    the policy to maintain personal space rather than prescribing a
+    deterministic repulsion law.  See Project Plan v6, Section 3.2."""
+
+    agent_proximity_threshold: float = 2.0
+    """Agent proximity threshold as a multiple of agent radius.  Agents
+    within ``radius * threshold`` of each other receive the penalty."""
 
     # Action rate penalty
     action_rate_weight: float = 0.0
@@ -50,13 +61,15 @@ class RewardConfig:
     use_smoothness: bool = True
     """Whether to apply Tier 2 smoothness penalties."""
 
-    jerk_penalty_weight: float = -0.01
-    """Weight for acceleration change (jerk) penalty."""
+    jerk_penalty_weight: float = -0.000001
+    """Weight for acceleration change (jerk) penalty.  Kept very small
+    because jerk scales as 1/dt^2; with dt=0.01 even a 0.1 m/s
+    velocity glitch produces jerk ~1000 m/s^3."""
 
-    angular_accel_penalty_weight: float = -0.005
+    angular_accel_penalty_weight: float = -0.0001
     """Weight for angular acceleration penalty."""
 
-    speed_deviation_weight: float = -0.03
+    speed_deviation_weight: float = -0.001
     """Weight for deviation from preferred speed. Kept low to avoid
     dominating the reward budget in congested scenarios where agents
     must slow down."""
@@ -67,7 +80,7 @@ class RewardConfig:
     Pressures agents to reach their goal quickly. 0.0 = disabled."""
 
     # Progress reward (shaped)
-    progress_weight: float = 0.1
+    progress_weight: float = 1.0
     """Reward for getting closer to goal (potential-based shaping)."""
 
     # Inverse distance to goal (continuous proximity signal)
@@ -124,6 +137,7 @@ def compute_rewards(
     dt: float,
     *,
     wall_distances: NDArray[np.float64] | None = None,
+    agent_distances: NDArray[np.float64] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
     actions: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
@@ -142,7 +156,8 @@ def compute_rewards(
     config : RewardConfig
     dt : float — timestep duration
     wall_distances : (n_agents,) optional — min distance to nearest wall per agent
-    agent_radii : (n_agents,) optional — agent body radii (for wall proximity threshold)
+    agent_distances : (n_agents,) optional — min distance to nearest other agent
+    agent_radii : (n_agents,) optional — agent body radii (for proximity thresholds)
     actions : (n_agents, action_dim) optional — raw policy output this step
 
     Returns
@@ -175,6 +190,16 @@ def compute_rewards(
         threshold = agent_radii * config.wall_proximity_threshold
         wall_proximity = (wall_distances < threshold) & active_mask
         rewards[wall_proximity] += config.wall_proximity_penalty
+
+    # Agent proximity penalty (learned collision avoidance signal)
+    if (
+        config.agent_proximity_penalty != 0.0
+        and agent_distances is not None
+        and agent_radii is not None
+    ):
+        threshold = agent_radii * config.agent_proximity_threshold
+        too_close = (agent_distances < threshold) & active_mask
+        rewards[too_close] += config.agent_proximity_penalty
 
     # Action rate penalty (change in raw policy output between steps)
     if config.action_rate_weight != 0.0 and actions is not None:
