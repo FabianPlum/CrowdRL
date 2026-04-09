@@ -34,6 +34,7 @@ class TorchWorldState:
     head_orientations: Tensor  # (E, N)
     shoulder_widths: Tensor  # (E, N)
     chest_depths: Tensor  # (E, N)
+    masses: Tensor  # (E, N) — agent mass in kg
     goal_positions: Tensor  # (E, N, 2)
     preferred_speeds: Tensor  # (E, N)
 
@@ -101,9 +102,9 @@ class EnvConfig(NamedTuple):
     # Physics
     dt: float = 0.01
     velocity_damping: float = 0.8
-    contact_stiffness: float = 2000.0
-    contact_damping: float = 50.0
-    wall_strength: float = 5.0
+    contact_stiffness: float = 30000.0
+    contact_damping: float = 500.0
+    wall_strength: float = 400.0
     wall_range: float = 0.3
     max_speed_multiplier: float = 2.0
 
@@ -112,11 +113,17 @@ class EnvConfig(NamedTuple):
     collision_penalty: float = -1.0
     timeout_penalty: float = -5.0
     goal_radius: float = 0.5
-    progress_weight: float = 0.1
-    wall_proximity_penalty: float = -0.3
+    progress_weight: float = 1.0
+    wall_proximity_penalty: float = -0.1
     wall_proximity_threshold: float = 1.5
+    agent_proximity_penalty: float = -0.1
+    agent_proximity_threshold: float = 2.0
     action_rate_weight: float = 0.0
     existence_penalty: float = -0.01
+    use_smoothness: bool = True
+    jerk_penalty_weight: float = -0.000001
+    angular_accel_penalty_weight: float = -0.0001
+    speed_deviation_weight: float = -0.001
 
     # Episode
     max_steps: int = 5000
@@ -149,8 +156,6 @@ class EnvConfig(NamedTuple):
             velocity_damping=cfg.velocity_damping,
             contact_stiffness=cfg.contact_stiffness,
             contact_damping=cfg.contact_damping,
-            # wall_strength and wall_range are not in CrowdEnvConfig;
-            # they use defaults from crowdrl_core.collision (5.0, 0.3)
             max_speed_multiplier=cfg.max_speed_multiplier,
             goal_bonus=cfg.reward.goal_bonus,
             collision_penalty=cfg.reward.collision_penalty,
@@ -159,8 +164,14 @@ class EnvConfig(NamedTuple):
             progress_weight=cfg.reward.progress_weight,
             wall_proximity_penalty=cfg.reward.wall_proximity_penalty,
             wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
+            agent_proximity_penalty=cfg.reward.agent_proximity_penalty,
+            agent_proximity_threshold=cfg.reward.agent_proximity_threshold,
             action_rate_weight=cfg.reward.action_rate_weight,
             existence_penalty=cfg.reward.existence_penalty,
+            use_smoothness=cfg.reward.use_smoothness,
+            jerk_penalty_weight=cfg.reward.jerk_penalty_weight,
+            angular_accel_penalty_weight=cfg.reward.angular_accel_penalty_weight,
+            speed_deviation_weight=cfg.reward.speed_deviation_weight,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
         )
@@ -181,6 +192,7 @@ def make_initial_state(
         head_orientations=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         shoulder_widths=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         chest_depths=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
+        masses=torch.full((n_envs, max_agents), 80.0, dtype=torch.float32, device=device),
         goal_positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
         preferred_speeds=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         active_mask=torch.zeros((n_envs, max_agents), dtype=torch.bool, device=device),
