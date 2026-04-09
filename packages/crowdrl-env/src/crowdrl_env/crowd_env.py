@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 from crowdrl_core.action import ActionConfig, interpret_actions_batch
 from crowdrl_core.collision import (
     compute_contact_forces,
+    compute_min_agent_distances,
     compute_min_wall_distances,
     detect_collisions,
     enforce_wall_boundaries,
@@ -74,8 +75,16 @@ class CrowdEnvConfig:
     # Physics
     dt: float = 0.01
     """Timestep duration (seconds)."""
-    contact_stiffness: float = 2000.0
-    contact_damping: float = 50.0
+    contact_stiffness: float = 30000.0
+    """Agent-agent spring constant (N per unit overlap). Calibrated against
+    JuPedSim's Social Force Model (Helbing et al. 2000): body_force k =
+    120,000 N/m. Since our overlap is normalised [0,1] and typical overlap
+    of 0.1 corresponds to ~0.023m physical penetration, 30,000 N * 0.1 /
+    80 kg ~ 37 m/s^2, matching JuPedSim's ~35 m/s^2 at equivalent overlap."""
+    contact_damping: float = 500.0
+    """Agent-agent velocity-dependent damping (N*s/m). Calibrated so that
+    two agents closing at 2 m/s with moderate overlap experience ~12 m/s^2
+    damping deceleration (comparable to JuPedSim's friction term)."""
     velocity_damping: float = 0.8
     """Velocity damping factor: v_new = damping * v_desired + (1-damping) * v_old."""
 
@@ -268,8 +277,9 @@ class CrowdEnv(gym.Env):
         enforce_wall_boundaries(self._world)
 
         # --- 5. Compute rewards ---
-        # Wall distances for proximity penalty
+        # Distances for proximity penalties
         wall_distances = compute_min_wall_distances(self._world)
+        agent_distances = compute_min_agent_distances(self._world)
         agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
 
         rewards, reached_goal = compute_rewards(
@@ -284,6 +294,7 @@ class CrowdEnv(gym.Env):
             config=cfg.reward,
             dt=cfg.dt,
             wall_distances=wall_distances,
+            agent_distances=agent_distances,
             agent_radii=agent_radii,
             actions=actions,
         )
@@ -398,6 +409,7 @@ class CrowdEnv(gym.Env):
                     head_orientations,
                     shoulder_widths,
                     chest_depths,
+                    masses,
                     goal_positions,
                     preferred_speeds,
                 ) = filter_by_solvability(
@@ -408,6 +420,7 @@ class CrowdEnv(gym.Env):
                     spawn_result.head_orientations,
                     spawn_result.shoulder_widths,
                     spawn_result.chest_depths,
+                    spawn_result.masses,
                     spawn_result.goal_positions,
                     spawn_result.preferred_speeds,
                 )
@@ -418,6 +431,7 @@ class CrowdEnv(gym.Env):
                 head_orientations = spawn_result.head_orientations
                 shoulder_widths = spawn_result.shoulder_widths
                 chest_depths = spawn_result.chest_depths
+                masses = spawn_result.masses
                 goal_positions = spawn_result.goal_positions
                 preferred_speeds = spawn_result.preferred_speeds
 
@@ -431,6 +445,7 @@ class CrowdEnv(gym.Env):
                 head_orientations=head_orientations,
                 shoulder_widths=shoulder_widths,
                 chest_depths=chest_depths,
+                masses=masses,
                 goal_positions=goal_positions,
                 walkable_polygon=geom.polygon,
                 wall_segments=wall_segments,
