@@ -74,6 +74,9 @@ class WorldState:
     chest_depths: NDArray[np.float64]
     """(n_agents,) — half-depth of the collision ellipse along the torso-forward axis (metres)."""
 
+    masses: NDArray[np.float64]
+    """(n_agents,) — agent mass in kg (default ~80 kg). Used for F=ma in contact forces."""
+
     goal_positions: NDArray[np.float64]
     """(n_agents, 2) — [x, y] goal position for each agent."""
 
@@ -107,6 +110,7 @@ class WorldState:
             "head_orientations": (self.head_orientations, (n,)),
             "shoulder_widths": (self.shoulder_widths, (n,)),
             "chest_depths": (self.chest_depths, (n,)),
+            "masses": (self.masses, (n,)),
             "goal_positions": (self.goal_positions, (n, 2)),
         }
         for name, (arr, expected_shape) in checks.items():
