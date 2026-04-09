@@ -25,6 +25,40 @@ def _rotation_matrix(angle: float) -> NDArray[np.float64]:
     return np.array([[c, -s], [s, c]], dtype=np.float64)
 
 
+def _ellipse_boundary_point(
+    direction: NDArray[np.float64],
+    semi_depth: float,
+    semi_width: float,
+    angle: float,
+) -> NDArray[np.float64]:
+    """Return the point on an ellipse boundary closest to *direction*.
+
+    The ellipse is centred at the origin with semi-axes ``semi_depth``
+    (along the local x-axis) and ``semi_width`` (along the local y-axis),
+    rotated by ``angle``.
+
+    *direction* is a 2-D vector in global frame indicating the direction
+    from the ellipse centre toward the query point.
+    """
+    rot = _rotation_matrix(-angle)
+    d_local = rot @ direction
+    d_len = np.sqrt(d_local[0] ** 2 + d_local[1] ** 2)
+    if d_len < 1e-12:
+        # Degenerate: return point along local x-axis
+        rot_back = _rotation_matrix(angle)
+        return rot_back @ np.array([semi_depth, 0.0])
+    # Normalised direction in local frame
+    nx, ny = d_local[0] / d_len, d_local[1] / d_len
+    # Parametric point on ellipse boundary in the given direction:
+    # p = (a*cos(t), b*sin(t)) where tan(t) = (a*ny)/(b*nx)
+    px = semi_depth * nx
+    py = semi_width * ny
+    scale = 1.0 / np.sqrt((px / semi_depth) ** 2 + (py / semi_width) ** 2)
+    local_pt = np.array([px * scale, py * scale])
+    rot_back = _rotation_matrix(angle)
+    return rot_back @ local_pt
+
+
 def ellipse_overlap(
     pos_a: NDArray,
     a_width: float,
@@ -37,33 +71,38 @@ def ellipse_overlap(
 ) -> float:
     """Approximate overlap between two oriented ellipses.
 
-    Uses the algebraic distance approach: transforms the problem so that
-    ellipse A becomes a unit circle, then checks if ellipse B's centre
-    is inside ellipse A (and vice versa), returning a proxy overlap measure.
+    Computes the distance between the closest boundary points of each
+    ellipse along the line connecting their centres.  When the sum of
+    boundary radii exceeds the centre-to-centre distance the ellipses
+    overlap and the returned value is the penetration depth normalised
+    by the sum of boundary radii.
 
     Returns
     -------
     overlap : float
-        > 0 if ellipses overlap (approximate penetration depth), 0.0 otherwise.
+        > 0 if ellipses overlap (penetration depth / sum of radii), 0.0 otherwise.
     """
-    # Vector from A to B
     d = pos_b - pos_a
+    centre_dist = np.sqrt(d[0] ** 2 + d[1] ** 2)
 
-    # Check if B's centre is inside A's ellipse
-    rot_a = _rotation_matrix(-a_angle)
-    d_in_a = rot_a @ d
-    dist_a = (d_in_a[0] / a_depth) ** 2 + (d_in_a[1] / a_width) ** 2
+    if centre_dist < 1e-12:
+        # Coincident centres -- maximum overlap
+        return 1.0
 
-    # Check if A's centre is inside B's ellipse
-    rot_b = _rotation_matrix(-b_angle)
-    d_in_b = rot_b @ (-d)
-    dist_b = (d_in_b[0] / b_depth) ** 2 + (d_in_b[1] / b_width) ** 2
+    # Boundary point of A toward B (global offset from A's centre)
+    bp_a = _ellipse_boundary_point(d, a_depth, a_width, a_angle)
+    # Boundary point of B toward A
+    bp_b = _ellipse_boundary_point(-d, b_depth, b_width, b_angle)
 
-    # Use the minimum algebraic distance as overlap proxy
-    min_dist = min(dist_a, dist_b)
-    if min_dist < 1.0:
-        return 1.0 - np.sqrt(min_dist)
-    return 0.0
+    reach_a = np.sqrt(bp_a[0] ** 2 + bp_a[1] ** 2)
+    reach_b = np.sqrt(bp_b[0] ** 2 + bp_b[1] ** 2)
+    sum_reach = reach_a + reach_b
+
+    if centre_dist >= sum_reach:
+        return 0.0
+
+    penetration = sum_reach - centre_dist
+    return float(penetration / sum_reach)
 
 
 def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
@@ -111,27 +150,45 @@ def detect_collisions(world: WorldState) -> list[tuple[int, int, float]]:
     if len(ii) == 0:
         return []
 
-    # Vectorized ellipse overlap for candidate pairs
+    # Vectorized ellipse boundary-distance overlap for candidate pairs
     d = diff[ii, jj]  # (P, 2)
+    centre_dist = np.sqrt(np.sum(d**2, axis=-1))  # (P,)
 
-    # Direction A: check B's centre in A's ellipse frame
+    # Boundary reach of ellipse A toward B (in A's local frame)
     cos_a = np.cos(-angles[ii])
     sin_a = np.sin(-angles[ii])
     dx_a = cos_a * d[:, 0] - sin_a * d[:, 1]
     dy_a = sin_a * d[:, 0] + cos_a * d[:, 1]
-    dist_a = (dx_a / depths[ii]) ** 2 + (dy_a / widths[ii]) ** 2
+    d_len_a = np.sqrt(dx_a**2 + dy_a**2)
+    safe_len_a = np.where(d_len_a < 1e-12, 1.0, d_len_a)
+    nx_a = dx_a / safe_len_a
+    ny_a = dy_a / safe_len_a
+    px_a = depths[ii] * nx_a
+    py_a = widths[ii] * ny_a
+    scale_a = 1.0 / np.sqrt((px_a / depths[ii]) ** 2 + (py_a / widths[ii]) ** 2)
+    reach_a = np.sqrt((px_a * scale_a) ** 2 + (py_a * scale_a) ** 2)
 
-    # Direction B: check A's centre in B's ellipse frame
+    # Boundary reach of ellipse B toward A (in B's local frame)
     neg_d = -d
     cos_b = np.cos(-angles[jj])
     sin_b = np.sin(-angles[jj])
     dx_b = cos_b * neg_d[:, 0] - sin_b * neg_d[:, 1]
     dy_b = sin_b * neg_d[:, 0] + cos_b * neg_d[:, 1]
-    dist_b = (dx_b / depths[jj]) ** 2 + (dy_b / widths[jj]) ** 2
+    d_len_b = np.sqrt(dx_b**2 + dy_b**2)
+    safe_len_b = np.where(d_len_b < 1e-12, 1.0, d_len_b)
+    nx_b = dx_b / safe_len_b
+    ny_b = dy_b / safe_len_b
+    px_b = depths[jj] * nx_b
+    py_b = widths[jj] * ny_b
+    scale_b = 1.0 / np.sqrt((px_b / depths[jj]) ** 2 + (py_b / widths[jj]) ** 2)
+    reach_b = np.sqrt((px_b * scale_b) ** 2 + (py_b * scale_b) ** 2)
 
-    min_dist = np.minimum(dist_a, dist_b)
-    overlap_mask = min_dist < 1.0
-    overlaps = np.where(overlap_mask, 1.0 - np.sqrt(min_dist), 0.0)
+    sum_reach = reach_a + reach_b
+    penetration = sum_reach - centre_dist
+    # Handle coincident centres
+    coincident = centre_dist < 1e-12
+    overlaps = np.where(coincident, 1.0, np.where(penetration > 0, penetration / sum_reach, 0.0))
+    overlap_mask = overlaps > 0
 
     # Collect results
     col_ii = ii[overlap_mask]
@@ -247,6 +304,39 @@ def compute_min_wall_distances(world: WorldState) -> NDArray[np.float64]:
     return distances.min(axis=1)  # (N,)
 
 
+def compute_min_agent_distances(world: WorldState) -> NDArray[np.float64]:
+    """Return the minimum centre-to-centre distance to the nearest other agent.
+
+    Parameters
+    ----------
+    world : WorldState
+
+    Returns
+    -------
+    min_distances : (n_agents,) -- distance to nearest active neighbour.
+        Returns ``inf`` for agents with no active neighbours.
+    """
+    n = world.n_agents
+    if n < 2:
+        return np.full(n, np.inf, dtype=np.float64)
+
+    if world.active_mask is not None:
+        active = world.active_mask
+    else:
+        active = np.ones(n, dtype=np.bool_)
+
+    # Pairwise distances
+    diff = world.positions[np.newaxis, :, :] - world.positions[:, np.newaxis, :]  # (N, N, 2)
+    dists = np.sqrt(np.sum(diff**2, axis=-1))  # (N, N)
+
+    # Mask self and inactive agents
+    np.fill_diagonal(dists, np.inf)
+    inactive_mask = ~active
+    dists[:, inactive_mask] = np.inf
+
+    return dists.min(axis=1)  # (N,)
+
+
 # ---------------------------------------------------------------------------
 # Agent-agent + wall forces
 # ---------------------------------------------------------------------------
@@ -254,39 +344,39 @@ def compute_min_wall_distances(world: WorldState) -> NDArray[np.float64]:
 
 def compute_contact_forces(
     world: WorldState,
-    stiffness: float = 2000.0,
-    damping: float = 50.0,
-    wall_strength: float = 5.0,
+    stiffness: float = 30000.0,
+    damping: float = 500.0,
+    wall_strength: float = 400.0,
     wall_range: float = 0.3,
     collisions: list[tuple[int, int, float]] | None = None,
 ) -> NDArray[np.float64]:
-    """Compute repulsive forces for all agents (agent-agent + wall repulsion).
+    """Compute repulsive accelerations for all agents (agent-agent + wall).
 
-    Agent-agent: spring-damper on overlap.
-    Wall: smooth exponential repulsion (following JuPedSim's BoundaryRepulsion).
-    The exponential acts continuously, providing a smooth gradient for RL.
+    Agent-agent: spring-damper on overlap, divided by agent mass (F=ma).
+    Wall: smooth exponential repulsion (following JuPedSim's BoundaryRepulsion),
+    divided by agent mass.
 
-    All outputs have units of acceleration (m/s^2) under an implicit unit-mass
-    convention, i.e. they are applied as ``v += force * dt`` with no mass
-    division.  This follows the Social Force Model tradition (Helbing 1995).
+    All outputs are accelerations (m/s^2), applied as ``v += accel * dt``.
+    Stiffness and wall_strength have units of N (force), and the per-agent
+    mass converts them to accelerations.
 
     Parameters
     ----------
     stiffness : float
-        Agent-agent spring constant (m/s^2 per unit overlap; implicit unit mass).
+        Agent-agent spring force (N per unit overlap).
     damping : float
-        Agent-agent velocity-dependent damping (1/s; implicit unit mass).
+        Agent-agent velocity-dependent damping (N*s/m).
     wall_strength : float
-        Wall repulsion amplitude (m/s^2).
+        Wall repulsion force amplitude (N).
     wall_range : float
-        Wall repulsion length scale (m). Magnitude = strength * exp((radius - dist) / range).
+        Wall repulsion length scale (m). Force = strength * exp((radius - dist) / range).
     collisions : list of (i, j, overlap), optional
         Pre-computed collision list. If None, detect_collisions() is called.
 
     Returns
     -------
-    forces : (n_agents, 2) array
-        Net acceleration on each agent (m/s^2, implicit unit mass).
+    accelerations : (n_agents, 2) array
+        Net acceleration on each agent (m/s^2).
     """
     n = world.n_agents
     forces = np.zeros((n, 2), dtype=np.float64)
@@ -354,6 +444,10 @@ def compute_contact_forces(
             wall_forces = np.sum(f_mag[:, :, np.newaxis] * normals, axis=1)
 
             forces[active_idx] += wall_forces
+
+    # Convert forces (N) to accelerations (m/s^2) via F = m*a
+    masses = world.masses
+    forces /= masses[:, np.newaxis]
 
     return forces
 
