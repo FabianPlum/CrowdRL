@@ -42,7 +42,7 @@ class RewardConfig:
     """Wall proximity threshold as a multiple of agent radius."""
 
     # Agent proximity penalty (learned collision avoidance)
-    agent_proximity_penalty: float = -0.1
+    agent_proximity_penalty: float = -0.005
     """Penalty applied per step when another agent is within the proximity
     threshold.  This is a reward signal, NOT a physics force -- it teaches
     the policy to maintain personal space rather than prescribing a
