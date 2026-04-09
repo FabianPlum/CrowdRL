@@ -223,6 +223,7 @@ class BatchedTorchEnv:
             head_orientations=raw["head_orientations"],
             shoulder_widths=raw["shoulder_widths"],
             chest_depths=raw["chest_depths"],
+            masses=raw.get("masses"),
             goal_positions=raw["goal_positions"],
             preferred_speeds=raw["preferred_speeds"],
             wall_segments=raw["wall_segments"],
@@ -250,6 +251,7 @@ class BatchedTorchEnv:
                 data["shoulder_widths"], dtype=torch.float32, device=dev
             ),
             "chest_depths": torch.tensor(data["chest_depths"], dtype=torch.float32, device=dev),
+            "masses": torch.tensor(data["masses"], dtype=torch.float32, device=dev),
             "goal_positions": torch.tensor(
                 data["goal_positions"], dtype=torch.float32, device=dev
             ),
@@ -286,6 +288,7 @@ class BatchedTorchEnv:
             head_orientations=stack_field("head_orientations"),
             shoulder_widths=stack_field("shoulder_widths"),
             chest_depths=stack_field("chest_depths"),
+            masses=stack_field("masses"),
             goal_positions=stack_field("goal_positions"),
             preferred_speeds=stack_field("preferred_speeds"),
             active_mask=stack_field("active_mask"),
@@ -331,6 +334,7 @@ class BatchedTorchEnv:
                 self.states.head_orientations[env_idx] = tensors["head_orientations"]
                 self.states.shoulder_widths[env_idx] = tensors["shoulder_widths"]
                 self.states.chest_depths[env_idx] = tensors["chest_depths"]
+                self.states.masses[env_idx] = tensors["masses"]
                 self.states.goal_positions[env_idx] = tensors["goal_positions"]
                 self.states.preferred_speeds[env_idx] = tensors["preferred_speeds"]
                 self.states.active_mask[env_idx] = tensors["active_mask"]
