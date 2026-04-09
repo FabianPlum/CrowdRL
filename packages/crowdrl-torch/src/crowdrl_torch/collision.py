@@ -42,31 +42,50 @@ def detect_collisions_pairwise(
 
     # Pairwise displacements: diff[...,i,j] = pos[j] - pos[i], shape (E, N, N, 2)
     diff = positions.unsqueeze(1) - positions.unsqueeze(2)
+    centre_dist = (diff**2).sum(dim=-1).sqrt()  # (E, N, N)
 
-    # --- Check B centre in A's ellipse frame ---
+    # --- Boundary reach of ellipse A toward B (in A's local frame) ---
     cos_a = torch.cos(-torso_orientations)  # (E, N)
     sin_a = torch.sin(-torso_orientations)
 
-    # Rotate diff into A's frame: (E, N, N)
     dx_a = cos_a.unsqueeze(2) * diff[..., 0] - sin_a.unsqueeze(2) * diff[..., 1]
     dy_a = sin_a.unsqueeze(2) * diff[..., 0] + cos_a.unsqueeze(2) * diff[..., 1]
+    d_len_a = (dx_a**2 + dy_a**2).sqrt()
+    safe_len_a = torch.where(d_len_a < 1e-12, torch.ones_like(d_len_a), d_len_a)
+    nx_a = dx_a / safe_len_a
+    ny_a = dy_a / safe_len_a
+    depths_a = chest_depths.unsqueeze(2)  # (E, N, 1)
+    widths_a = shoulder_widths.unsqueeze(2)
+    px_a = depths_a * nx_a
+    py_a = widths_a * ny_a
+    scale_a = 1.0 / ((px_a / depths_a) ** 2 + (py_a / widths_a) ** 2).sqrt()
+    reach_a = ((px_a * scale_a) ** 2 + (py_a * scale_a) ** 2).sqrt()
 
-    # Algebraic distance in A's ellipse: (E, N, N)
-    dist_a = (dx_a / chest_depths.unsqueeze(2)) ** 2 + (dy_a / shoulder_widths.unsqueeze(2)) ** 2
-
-    # --- Check A centre in B's ellipse frame ---
+    # --- Boundary reach of ellipse B toward A (in B's local frame) ---
     neg_diff = -diff
-    cos_b = cos_a  # same agents, same orientations
+    cos_b = cos_a
     sin_b = sin_a
 
     dx_b = cos_b.unsqueeze(1) * neg_diff[..., 0] - sin_b.unsqueeze(1) * neg_diff[..., 1]
     dy_b = sin_b.unsqueeze(1) * neg_diff[..., 0] + cos_b.unsqueeze(1) * neg_diff[..., 1]
+    d_len_b = (dx_b**2 + dy_b**2).sqrt()
+    safe_len_b = torch.where(d_len_b < 1e-12, torch.ones_like(d_len_b), d_len_b)
+    nx_b = dx_b / safe_len_b
+    ny_b = dy_b / safe_len_b
+    depths_b = chest_depths.unsqueeze(1)  # (E, 1, N)
+    widths_b = shoulder_widths.unsqueeze(1)
+    px_b = depths_b * nx_b
+    py_b = widths_b * ny_b
+    scale_b = 1.0 / ((px_b / depths_b) ** 2 + (py_b / widths_b) ** 2).sqrt()
+    reach_b = ((px_b * scale_b) ** 2 + (py_b * scale_b) ** 2).sqrt()
 
-    dist_b = (dx_b / chest_depths.unsqueeze(1)) ** 2 + (dy_b / shoulder_widths.unsqueeze(1)) ** 2
-
-    min_dist = torch.minimum(dist_a, dist_b)
+    sum_reach = reach_a + reach_b
+    penetration = sum_reach - centre_dist
+    coincident = centre_dist < 1e-12
     overlap_matrix = torch.where(
-        min_dist < 1.0, 1.0 - torch.sqrt(min_dist), torch.zeros_like(min_dist)
+        coincident,
+        torch.ones_like(penetration),
+        torch.where(penetration > 0, penetration / sum_reach, torch.zeros_like(penetration)),
     )
 
     # Mask: no self-collision, only active agents
@@ -95,6 +114,7 @@ def compute_contact_forces(
     velocities: Tensor,
     shoulder_widths: Tensor,
     chest_depths: Tensor,
+    masses: Tensor,
     active_mask: Tensor,
     overlap_matrix: Tensor,
     wall_segments: Tensor,
@@ -104,11 +124,11 @@ def compute_contact_forces(
     """Compute agent-agent contact forces + wall repulsion.
 
     Uses dense (E, N, N, 2) pairwise force tensor -- no scatter needed.
-    All outputs are accelerations (m/s^2) under implicit unit-mass convention.
+    Forces are divided by per-agent mass (F=ma) to produce accelerations.
 
     Returns
     -------
-    forces : (E, N, 2) -- net acceleration per agent (m/s^2, implicit unit mass)
+    accelerations : (E, N, 2) -- net acceleration per agent (m/s^2)
     """
     # --- Agent-agent spring-damper forces ---
     # Pairwise displacement: (E, N, N, 2)
@@ -155,6 +175,9 @@ def compute_contact_forces(
     )
 
     forces = agent_forces + wall_forces
+
+    # Convert forces (N) to accelerations (m/s^2) via F = m*a
+    forces = forces / masses.unsqueeze(-1)
 
     # Zero forces for inactive agents
     forces = torch.where(active_mask.unsqueeze(-1), forces, torch.zeros_like(forces))
