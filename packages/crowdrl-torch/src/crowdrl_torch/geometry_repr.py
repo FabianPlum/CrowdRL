@@ -54,6 +54,7 @@ def prepare_reset_data(
     wall_segments: NDArray,
     max_agents: int,
     max_segments: int,
+    masses: NDArray | None = None,
     waypoints: NDArray | None = None,
     n_waypoints: NDArray | None = None,
     waypoint_path_lengths: NDArray | None = None,
@@ -112,6 +113,9 @@ def prepare_reset_data(
         "head_orientations": pad_1d(head_orientations, max_agents),
         "shoulder_widths": pad_1d(shoulder_widths, max_agents),
         "chest_depths": pad_1d(chest_depths, max_agents),
+        "masses": pad_1d(
+            masses if masses is not None else np.full(n_agents, 80.0, dtype=np.float64), max_agents
+        ),
         "goal_positions": pad_2d(goal_positions, max_agents),
         "preferred_speeds": pad_1d(preferred_speeds, max_agents),
         "active_mask": active,
