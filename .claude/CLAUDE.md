@@ -4,6 +4,16 @@
 
 MARL-learned pedestrian navigation policies trained in procedural 2D environments, validated against IAS-7 (Forschungszentrum Jülich) controlled experiment data. Replaces/augments hand-crafted locomotion models in JuPedSim.
 
+## Workflow rules
+
+- When fixing bugs or optimizing, make ONE change at a time and verify it works before proceeding. Never push intermediate/broken state to the repo. If a fix surfaces new issues, stop and confirm direction with me before continuing.
+- When I describe a change using domain terms (reward vs physics force, penalty type names, research doc vs implementation plan), ask for clarification if ambiguous rather than assuming. Rewards/losses affect the learning signal; physics forces change the simulation directly.
+- This project uses Python 3.12, PyTorch (NOT JAX), and targets CUDA GPU training. When debugging CUDA/torch issues, try the simplest fix first and avoid chaining speculative approaches (e.g., LD_LIBRARY_PATH, conftest hacks). If a first attempt fails, pause and explain options before trying the next.
+
+## Pre-commit / pre-push checklist
+
+Always run the full test suite (`uv run pytest`) AND check linting (`uv run ruff check .`) before committing or pushing. Do not push without confirming all tests pass and lint is clean.
+
 ## Package architecture
 
 ```
@@ -123,6 +133,10 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) -- ruff lint + pytest on Python 3.12/3.13.
 
 ## Known issues
+
+### Notebook editing
+
+The NotebookEdit tool is unreliable for cell positioning. Prefer editing notebook JSON directly via Read/Edit/Bash when precise cell placement matters.
 
 ### Mojibake in notebooks / markdown
 
