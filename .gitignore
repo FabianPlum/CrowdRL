@@ -51,3 +51,6 @@ resources/
 
 # Training experiment output directories (checkpoints, videos, plots, logs)
 results_*/
+
+# Diagnostic output directories (per-checkpoint analysis dumps)
+diagnostic_*/
