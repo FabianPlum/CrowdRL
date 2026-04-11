@@ -1,0 +1,181 @@
+# =============================================================================
+# CrowdRL MAPPO Training Configuration
+# =============================================================================
+#
+# Usage:
+#   uv run python train_mappo.py --config configs/full_training.yaml
+#
+# Multi-GPU is automatic: when >1 CUDA GPU is detected the script re-launches
+# itself via torchrun. Each GPU runs N_ENVS environments independently; gradients
+# are averaged across GPUs (DD-PPO pattern).
+#
+# All output (checkpoints, plots, ONNX policy, training history) is written to
+#   results_<config-name>/      (e.g. results_full_training/)
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Training schedule
+# ---------------------------------------------------------------------------
+seed: 42
+n_envs: 64                  # GPU-batched environments per rank (no subprocess IPC)
+max_agents: 100              # padded agent dimension (>= largest curriculum phase)
+steps_per_collect: 1280000   # agent-steps per PPO update  (n_envs * 20000)
+n_rollouts: 500              # number of collect-update cycles
+log_interval: 5              # print progress every N rollouts
+compile_step: true           # torch.compile for CUDA graph fusion (~30-60s warmup)
+
+
+# ---------------------------------------------------------------------------
+# Curriculum -- progressive difficulty phases
+# ---------------------------------------------------------------------------
+# Each phase defines which geometry tiers to sample, the agent count range,
+# and the rolling goal-rate threshold that triggers advancement to the next
+# phase. The final phase has threshold 0 (terminal -- never advances).
+#
+# Available tiers: TIER_0 (open fields), TIER_1 (corridors/bottlenecks),
+#   TIER_2 (branching corridors), TIER_3A (rooms + obstacles),
+#   TIER_3B (composed multi-room layouts)
+# ---------------------------------------------------------------------------
+curriculum:
+  metric_window: 100         # rolling episode window for advancement check
+  min_episodes_per_phase: 500
+
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [20, 100]
+      threshold: 0.0            # terminal phase
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+
+# ---------------------------------------------------------------------------
+# Environment geometry
+# ---------------------------------------------------------------------------
+geometry:
+  min_side: 8.0              # field polygon min side length (m)
+  max_side: 15.0             # field polygon max side length (m)
+  corridor_width: [2.0, 4.0]       # (min, max) corridor width (m)
+  corridor_length: [8.0, 18.0]     # (min, max) corridor length (m)
+
+
+# ---------------------------------------------------------------------------
+# Observation
+# ---------------------------------------------------------------------------
+observation:
+  use_navmesh: true          # adds funnel-algorithm waypoints (79D -> 82D)
+
+
+# ---------------------------------------------------------------------------
+# Action limits
+# ---------------------------------------------------------------------------
+action:
+  max_heading_change_deg: 15.0    # degrees per step
+  max_torso_change_deg: 15.0      # degrees per step
+
+
+# ---------------------------------------------------------------------------
+# Reward
+# ---------------------------------------------------------------------------
+# Tier 1 -- sparse task rewards
+reward:
+  goal_bonus: 20.0               # reaching the goal
+  collision_penalty: -1.0        # per-step overlap with another agent
+  timeout_penalty: -10.0         # episode timeout
+
+  # Existence penalty: small cost per alive step, pressures goal-seeking
+  existence_penalty: -0.01
+
+  # Tier 2 -- progress shaping (potential-based)
+  progress_weight: 1.0           # delta(goal_distance) per step
+  inverse_distance_weight: 0.0   # 1/(dist+1), disabled -- not potential-based
+
+  # Smoothness
+  speed_deviation_weight: 0.0
+  use_smoothness: true
+
+  # Wall proximity (smooth penalty within threshold * body_radius of walls)
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5  # multiple of agent body radius
+
+  # Agent proximity (graded linear ramp, personal space maintenance)
+  # Penalty interpolates between `near` (at contact distance r_i + r_j)
+  # and `far` (at personal_space_radius). Each agent pays the penalty of
+  # its most-penalised neighbour inside the zone. The binary
+  # collision_penalty above still fires on top once agents overlap.
+  #
+  # Empirically tuned: a first attempt at softening to -0.005/0.7m to
+  # reduce TIER_0 penalty bleed caused -0.12 to -0.14 goal-rate regression
+  # across all navigation-heavy tiers (TIER_1/2/3A/3B). The signal is
+  # necessary for the policy to learn personal-space maintenance in
+  # constrained geometry; TIER_0 is the only tier that doesn't need it.
+  # Keeping the stronger values.
+  agent_proximity_penalty_near: -0.01    # at contact (sum of body radii)
+  agent_proximity_penalty_far: -0.0001   # at personal_space_radius boundary
+  personal_space_radius: 1.0             # metres, center-to-center
+
+  # Action rate (penalises ||a_t - a_{t-1}|| to reduce chattering)
+  action_rate_weight: -0.01
+
+
+# ---------------------------------------------------------------------------
+# Episode
+# ---------------------------------------------------------------------------
+max_steps: 2500              # simulation steps per episode (dt=0.01 -> 25s)
+
+
+# ---------------------------------------------------------------------------
+# Network architecture
+# ---------------------------------------------------------------------------
+network:
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256]
+
+
+# ---------------------------------------------------------------------------
+# PPO hyperparameters
+# ---------------------------------------------------------------------------
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine        # cosine | linear | constant
+
+
+# ---------------------------------------------------------------------------
+# Evaluation (run after training on rank 0)
+# ---------------------------------------------------------------------------
+eval:
+  n_episodes: 10             # episodes per tier
+  agent_range: [8, 25]       # agent count for eval episodes
+  render_video: true         # render one trajectory as .mp4
+  video_scenario: 7          # index into trajectory eval list (0-7)
