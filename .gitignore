@@ -48,3 +48,6 @@ runs/
 
 # Reference papers / large binary resources
 resources/
+
+# Training experiment output directories (checkpoints, videos, plots, logs)
+results_*/
