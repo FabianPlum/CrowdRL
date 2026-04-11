@@ -25,7 +25,6 @@ def compute_rewards(
     config: EnvConfig,
     *,
     wall_distances: Tensor | None = None,
-    agent_distances: Tensor | None = None,
     agent_radii: Tensor | None = None,
     actions: Tensor | None = None,
     prev_actions: Tensor | None = None,
@@ -48,7 +47,8 @@ def compute_rewards(
     prev_goal_distances : (E, N)
     config : EnvConfig
     wall_distances : (E, N) optional -- min distance to nearest wall per agent
-    agent_radii : (E, N) optional -- agent body radii
+    agent_radii : (E, N) optional -- agent body radii (used for the graded
+        agent-proximity penalty: per-pair contact distance = r_i + r_j)
     actions : (E, N, 4) optional -- raw policy output this step
     prev_actions : (E, N, 4) optional -- raw policy output previous step
     headings : (E, N) optional -- current torso orientations (for angular accel)
@@ -95,17 +95,41 @@ def compute_rewards(
             rewards,
         )
 
-    # Agent proximity penalty (learned collision avoidance signal)
+    # Agent proximity penalty (graded linear ramp, min over neighbours).
+    # Penalty interpolates between ``near`` (at contact, r_i + r_j) and
+    # ``far`` (at personal_space_radius). Each agent pays the penalty of its
+    # most-penalised neighbour inside the zone.
     if (
-        config.agent_proximity_penalty != 0.0
-        and agent_distances is not None
-        and agent_radii is not None
-    ):
-        threshold = agent_radii * config.agent_proximity_threshold
-        too_close = (agent_distances < threshold) & active_mask
+        config.agent_proximity_penalty_near != 0.0 or config.agent_proximity_penalty_far != 0.0
+    ) and agent_radii is not None:
+        # Pairwise center-to-center distances (E, N, N)
+        diff_p = positions.unsqueeze(2) - positions.unsqueeze(1)
+        pair_dist = (diff_p**2).sum(dim=-1).sqrt()
+
+        # Per-pair contact distance r_i + r_j (E, N, N)
+        pair_contact = agent_radii.unsqueeze(2) + agent_radii.unsqueeze(1)
+
+        # Linear interpolation factor t in [0, 1]: 0 at contact, 1 at boundary.
+        denom = torch.clamp(config.personal_space_radius - pair_contact, min=1e-6)
+        t = torch.clamp((pair_dist - pair_contact) / denom, 0.0, 1.0)
+        pair_penalty = (1.0 - t) * config.agent_proximity_penalty_near + (
+            t * config.agent_proximity_penalty_far
+        )
+
+        # Mask: no self-pairs, only active-active pairs, only pairs inside zone.
+        N_ = positions.shape[1]
+        eye = torch.eye(N_, device=positions.device, dtype=torch.bool)
+        valid_pair = (~eye.unsqueeze(0)) & active_mask.unsqueeze(1) & active_mask.unsqueeze(2)
+        in_zone = pair_dist < config.personal_space_radius
+        pair_penalty = torch.where(
+            valid_pair & in_zone, pair_penalty, torch.zeros_like(pair_penalty)
+        )
+
+        # Per-agent: most-negative penalty from any neighbour.
+        proximity = pair_penalty.min(dim=2).values  # (E, N)
         rewards = torch.where(
-            too_close,
-            rewards + config.agent_proximity_penalty,
+            active_mask,
+            rewards + proximity,
             rewards,
         )
 
