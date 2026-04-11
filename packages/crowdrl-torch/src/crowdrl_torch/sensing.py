@@ -388,40 +388,57 @@ def match_persistent_neighbors(
     prev_safe = prev_slots.clamp(min=0).long()  # (E, N, K)
     prev_dist_sq = torch.gather(dist_sq, dim=2, index=prev_safe)
     prev_eligible = (prev_slots >= 0) & torch.isfinite(prev_dist_sq)
-    new_slots = torch.where(
+    retained = torch.where(
         prev_eligible,
         prev_slots,
         torch.full_like(prev_slots, -1),
+    )  # (E, N, K) -- each row has the retained prev_ids or -1
+
+    # --- Step 2: fill empty slots in one vectorized pass -------------------
+    # Key optimisation over the obvious per-slot loop: we build the
+    # "retained neighbors" exclusion mask exactly ONCE, then call topk(K)
+    # once to get the K smallest available distances per ego. Finally we
+    # use a cumulative-count trick to map the j-th empty slot to the j-th
+    # topk candidate, fully vectorised (no K-iteration loop).
+    retained_safe = retained.clamp(min=0).long()  # (E, N, K)
+    retained_mask = retained >= 0  # (E, N, K) bool
+    retained_one_hot = torch.nn.functional.one_hot(
+        retained_safe, num_classes=N
+    )  # (E, N, K, N) int64
+    retained_one_hot = retained_one_hot * retained_mask.unsqueeze(-1).to(retained_one_hot.dtype)
+    exclude_static = retained_one_hot.any(dim=2)  # (E, N, N) bool
+
+    dist_avail = torch.where(exclude_static, inf_t, dist_sq)
+
+    # K smallest available distances per ego -- topk on the negated distance
+    # gives us the smallest values.
+    neg_topk_vals, candidate_idx = torch.topk(-dist_avail, K, dim=2)
+    candidate_dist_sq = -neg_topk_vals  # (E, N, K)
+    candidate_valid = torch.isfinite(candidate_dist_sq)  # (E, N, K)
+
+    # For each slot k, determine its "rank among empty slots" so we can
+    # pick the right topk candidate. Example: retained_mask = [T, F, T, F, F]
+    # -> empty_mask = [F, T, F, T, T] -> empty_rank (cumsum-1) = [-1, 0, 0, 1, 2].
+    # Empty slots read ranks 0, 1, 2 in order, which gives them the first,
+    # second, and third candidate from topk.
+    empty_mask = ~retained_mask
+    empty_rank = empty_mask.to(torch.int64).cumsum(dim=2) - 1  # (E, N, K)
+    empty_rank_safe = empty_rank.clamp(min=0)  # clamp for retained slots
+    fill_values = torch.gather(candidate_idx, dim=2, index=empty_rank_safe)
+    rank_valid = torch.gather(candidate_valid, dim=2, index=empty_rank_safe)
+    fill_mask = empty_mask & rank_valid
+
+    # Final assignment: retained slots keep prev_ids, filled slots get
+    # topk candidates, otherwise -1.
+    new_slots = torch.where(
+        retained_mask,
+        retained,
+        torch.where(
+            fill_mask,
+            fill_values.to(dtype_int),
+            torch.full_like(retained, -1),
+        ),
     )
-
-    # --- Step 2: greedy fill empty slots, one slot at a time ---------------
-    # For each slot k_fill in 0..K-1, compute a current exclusion mask from
-    # ``new_slots`` (agents already assigned somewhere in the same row),
-    # then choose the nearest unassigned active in-range neighbor.
-    for k_fill in range(K):
-        # Exclusion one-hot: (E, N, K, N) -> (E, N, N) bool
-        slot_long = new_slots.long()
-        slot_pos = slot_long.clamp(min=0)
-        one_hot = torch.nn.functional.one_hot(slot_pos, num_classes=N)  # (E, N, K, N)
-        slot_valid_mask = (slot_long >= 0).unsqueeze(-1).to(one_hot.dtype)
-        exclude = (one_hot * slot_valid_mask).any(dim=2)  # (E, N, N)
-
-        dist_masked = torch.where(exclude, inf_t, dist_sq)
-
-        # Nearest unassigned candidate per ego (E, N)
-        min_vals, min_idx = dist_masked.min(dim=2)
-        available = torch.isfinite(min_vals)
-
-        # Fill the k_fill slot where it was empty AND a candidate exists.
-        current = new_slots[..., k_fill]
-        empty = current < 0
-        fill_mask = empty & available
-        filled = torch.where(fill_mask, min_idx.to(dtype_int), current)
-
-        # Functional update of new_slots so torch.compile sees a clean graph.
-        slot_list = [new_slots[..., s] for s in range(K)]
-        slot_list[k_fill] = filled
-        new_slots = torch.stack(slot_list, dim=-1)
 
     # Rows whose ego agent is inactive/padding should be all -1 regardless
     # of what the gather/fill returned.
