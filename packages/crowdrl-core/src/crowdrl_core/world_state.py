@@ -157,6 +157,19 @@ class WorldState:
     for the greedy matching algorithm and the rationale.
     """
 
+    neighbor_vel_history: NDArray[np.float64] | None = None
+    """(n_agents, W_n+1, K, 2) -- ring buffer of the **global-frame**
+    velocities of the agents currently assigned to each persistent neighbor
+    slot, where W_n = ``ObsConfig.neighbor_vel_history_window``. Writes
+    happen at index ``step_count % (W_n+1)`` each step; slot k's history
+    is zeroed out whenever ``neighbor_ids[i, k]`` is reassigned so that
+    features never mix the old assignee's history with the new one.
+
+    Global-frame storage keeps the write logic independent of ego
+    rotation; the observation builder rotates into the current ego frame
+    at read time using the same convention as ``knn_social``.
+    """
+
     @property
     def n_agents(self) -> int:
         return self.positions.shape[0]

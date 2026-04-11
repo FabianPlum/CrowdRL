@@ -424,6 +424,17 @@ class BatchedTorchEnv:
                 dtype=torch.int32,
                 device=dev,
             ),
+            neighbor_vel_history=torch.zeros(
+                (
+                    self.n_envs,
+                    max_agents,
+                    self.config.neighbor_vel_history_window + 1,
+                    self.config.k_neighbours,
+                    2,
+                ),
+                dtype=torch.float32,
+                device=dev,
+            ),
         )
 
     def _apply_completed_resets(self) -> list[int]:
@@ -472,6 +483,7 @@ class BatchedTorchEnv:
                 self.states.pos_history[env_idx] = tensors["pos_history"]
                 self.states.gdist_history[env_idx] = tensors["gdist_history"]
                 self.states.neighbor_ids[env_idx] = -1
+                self.states.neighbor_vel_history[env_idx] = 0.0
 
                 completed.append(env_idx)
 

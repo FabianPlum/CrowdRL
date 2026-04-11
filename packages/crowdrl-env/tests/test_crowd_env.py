@@ -419,3 +419,52 @@ class TestNeighborMemoryWiring:
             nids = env._world.neighbor_ids
             for i in range(env.n_agents):
                 assert i not in nids[i], f"agent {i} appears in its own neighbor slots: {nids[i]}"
+
+    def test_vel_history_buffer_allocated_and_shaped(self):
+        """Ring buffer for neighbor velocities is allocated at reset."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        vh = env._world.neighbor_vel_history
+        assert vh is not None
+        W_n = env.config.obs.neighbor_vel_history_window
+        K = env.config.obs.k_neighbours
+        assert vh.shape == (env.n_agents, W_n + 1, K, 2)
+        # Fresh reset -> all zeros
+        assert np.all(vh == 0.0)
+
+    def test_vel_history_buffer_populated_after_step(self):
+        """After one step, at least one slot in the ring buffer holds a
+        non-zero velocity (because neighbors were assigned and moving)."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # all agents push forward
+        env.step(actions)
+        vh = env._world.neighbor_vel_history
+        # Find the slot that was written (step_count - 1 % (W_n+1))
+        W_n = env.config.obs.neighbor_vel_history_window
+        write_idx = (1 - 1) % (W_n + 1)
+        written = vh[:, write_idx, :, :]
+        # At least one (agent, slot) pair should have a non-zero velocity
+        assert np.any(np.abs(written) > 1e-6), (
+            f"expected non-zero velocities at write slot {write_idx}"
+        )
+
+    def test_vel_history_zero_for_empty_slot(self):
+        """Slots with neighbor_ids == -1 must hold zero velocities even
+        after several steps."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(5):
+            env.step(actions)
+        vh = env._world.neighbor_vel_history  # (n, W_n+1, K, 2)
+        nids = env._world.neighbor_ids  # (n, K)
+        # For every (i, k) where nids[i, k] == -1, vh[i, :, k, :] must be zero.
+        for i in range(env.n_agents):
+            for k in range(env.config.obs.k_neighbours):
+                if nids[i, k] == -1:
+                    assert np.all(vh[i, :, k, :] == 0.0), (
+                        f"empty slot ({i}, {k}) has non-zero history"
+                    )

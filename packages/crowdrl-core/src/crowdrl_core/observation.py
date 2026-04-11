@@ -105,6 +105,14 @@ class ObsConfig:
     wasteful. Only used when ``use_neighbor_memory`` is True.
     """
 
+    neighbor_vel_history_window: int = 5
+    """Length of the neighbor-velocity ring buffer (in simulation steps).
+    W_n=5 at dt=0.01 = 50ms, roughly one reaction timescale -- long
+    enough to smooth out single-step noise, short enough to react to
+    genuine acceleration changes. Buffer has W_n+1 slots. Only used
+    when ``use_neighbor_memory`` is True.
+    """
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""

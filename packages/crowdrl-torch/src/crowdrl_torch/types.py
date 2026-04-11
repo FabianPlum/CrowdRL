@@ -91,6 +91,14 @@ class TorchWorldState:
     # neighbor-memory plan). All -1 when neighbor memory is disabled.
     neighbor_ids: Tensor  # (E, N, K) int32 -- global agent index or -1
 
+    # Ring buffer of global-frame neighbor velocities, one entry per step
+    # for each of the K persistent slots. Zero-reset on slot reassignment
+    # so that observation features never mix the old assignee's history
+    # with the new one. Buffer size W_n+1 where W_n =
+    # EnvConfig.neighbor_vel_history_window. Only written when
+    # ``config.use_neighbor_memory`` is True.
+    neighbor_vel_history: Tensor  # (E, N, W_n+1, K, 2) float32
+
     def clone(self) -> "TorchWorldState":
         """Return a copy with all tensors cloned (breaks CUDA graph aliasing)."""
         return TorchWorldState(
@@ -176,6 +184,7 @@ class EnvConfig(NamedTuple):
     # stays all -1 -- used to run a clean A-vs-A+ ablation on the same build.
     use_neighbor_memory: bool = False
     neighbor_sensing_radius: float = 5.0
+    neighbor_vel_history_window: int = 5
 
     @staticmethod
     def from_crowd_env_config(
@@ -231,6 +240,7 @@ class EnvConfig(NamedTuple):
             temporal_memory_window=cfg.obs.temporal_memory_window,
             use_neighbor_memory=cfg.obs.use_neighbor_memory,
             neighbor_sensing_radius=cfg.obs.neighbor_sensing_radius,
+            neighbor_vel_history_window=cfg.obs.neighbor_vel_history_window,
         )
 
 
@@ -241,6 +251,7 @@ def make_initial_state(
     max_waypoints: int = 16,
     memory_window: int = 50,
     k_neighbours: int = 8,
+    neighbor_vel_history_window: int = 5,
     device: torch.device | str = "cpu",
 ) -> TorchWorldState:
     """Create a zeroed-out TorchWorldState with the given sizes.
@@ -253,8 +264,14 @@ def make_initial_state(
     ``k_neighbours`` sizes the persistent neighbor-ID table. Prefer to pass
     the same value used by the observation builder so the table and the
     social obs channel stay aligned.
+
+    ``neighbor_vel_history_window`` sizes the ring buffer that stores the
+    recent velocities of each persistent neighbor slot. Buffer has
+    ``neighbor_vel_history_window + 1`` slots. Must match the EnvConfig
+    field of the same name.
     """
     buf_size = memory_window + 1
+    nb_buf_size = neighbor_vel_history_window + 1
     return TorchWorldState(
         positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
         velocities=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
@@ -308,5 +325,10 @@ def make_initial_state(
         ),
         neighbor_ids=torch.full(
             (n_envs, max_agents, k_neighbours), -1, dtype=torch.int32, device=device
+        ),
+        neighbor_vel_history=torch.zeros(
+            (n_envs, max_agents, nb_buf_size, k_neighbours, 2),
+            dtype=torch.float32,
+            device=device,
         ),
     )

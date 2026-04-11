@@ -236,6 +236,10 @@ class CrowdEnv(gym.Env):
                 sensing_radius=self.config.obs.neighbor_sensing_radius,
                 k=k,
             )
+            nb_buf = self.config.obs.neighbor_vel_history_window + 1
+            self._world.neighbor_vel_history = np.zeros(
+                (self._n_agents, nb_buf, k, 2), dtype=np.float64
+            )
 
         # Build initial observations
         obs = self._build_all_observations()
@@ -437,17 +441,37 @@ class CrowdEnv(gym.Env):
 
             self._world.step_count = self._step_count
 
-        # --- 7c. Update persistent neighbor slots ---
+        # --- 7c. Update persistent neighbor slots + velocity history ---
         if self.config.obs.use_neighbor_memory and self._world.neighbor_ids is not None:
             from crowdrl_core.sensing import match_persistent_neighbors
 
-            self._world.neighbor_ids = match_persistent_neighbors(
+            prev_nids = self._world.neighbor_ids
+            new_nids = match_persistent_neighbors(
                 self._world.positions,
-                self._world.neighbor_ids,
+                prev_nids,
                 self._active_mask,
                 sensing_radius=self.config.obs.neighbor_sensing_radius,
                 k=self.config.obs.k_neighbours,
             )
+
+            # Zero-reset slot history on reassignment, then scatter-write
+            # current velocities into the ring buffer.
+            nb_buf = self.config.obs.neighbor_vel_history_window + 1
+            hist = self._world.neighbor_vel_history
+            slot_changed = new_nids != prev_nids  # (n_agents, K)
+            if slot_changed.any():
+                hist[slot_changed] = 0.0
+
+            # Gather velocities for the assigned neighbors; zero for -1.
+            ids_safe = np.clip(new_nids, 0, self._n_agents - 1)
+            nb_vels = self._world.velocities[ids_safe]  # (n_agents, K, 2)
+            nb_vels = np.where((new_nids >= 0)[:, :, np.newaxis], nb_vels, 0.0)
+
+            write_idx = (self._step_count - 1) % nb_buf
+            hist[:, write_idx, :, :] = nb_vels
+
+            self._world.neighbor_ids = new_nids
+            self._world.neighbor_vel_history = hist
 
         # --- 8. Build observations ---
         obs = self._build_all_observations()

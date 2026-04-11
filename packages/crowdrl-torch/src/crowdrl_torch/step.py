@@ -287,7 +287,7 @@ def batched_step(
         dim=2, index=write_idx_gd, src=new_goal_distances.unsqueeze(2)
     )
 
-    # --- 11c. Update persistent neighbor slots ---
+    # --- 11c. Update persistent neighbor slots + velocity history ---
     # Recompute neighbor slot assignments from the new positions. Uses the
     # post-update active mask so newly-deactivated agents (goal-reach or
     # stuck-termination) are immediately evicted from other agents' slots.
@@ -302,8 +302,49 @@ def batched_step(
             sensing_radius=config.neighbor_sensing_radius,
             config=config,
         )
+
+        # --- Zero-reset slot history on reassignment ---
+        # When slot k at ego i gets a new neighbor ID, we wipe the full
+        # history for that slot so the diff/mean features don't mix the
+        # prior assignee's velocities with the new one. For slots that
+        # kept their previous assignment, the history passes through
+        # unchanged (the scatter below will overwrite only the write slot).
+        K_local = config.k_neighbours
+        slot_changed = new_neighbor_ids != state.neighbor_ids  # (E, N, K)
+        # Broadcast to (E, N, W_n+1, K, 2) for torch.where
+        preserve_mask = ~slot_changed.view(E, N, 1, K_local, 1)
+        history_after_reset = torch.where(
+            preserve_mask,
+            state.neighbor_vel_history,
+            torch.zeros_like(state.neighbor_vel_history),
+        )
+
+        # --- Gather new velocities for each slot's assigned neighbor ---
+        # new_neighbor_ids[e, i, k] holds the global agent index of the k-th
+        # neighbor of ego i; -1 means empty. Use advanced indexing to pull
+        # new_velocities[e, nb_id] for each slot. Clamp -1 to 0 first so
+        # the gather doesn't index out of bounds, then mask empty slots.
+        nb_ids_safe = new_neighbor_ids.clamp(min=0).long()  # (E, N, K)
+        env_idx = torch.arange(E, device=new_positions.device).view(E, 1, 1).expand(E, N, K_local)
+        nb_vels = new_velocities[env_idx, nb_ids_safe]  # (E, N, K, 2)
+        nb_valid = (new_neighbor_ids >= 0).unsqueeze(-1)  # (E, N, K, 1)
+        nb_vels = torch.where(nb_valid, nb_vels, torch.zeros_like(nb_vels))
+
+        # --- Scatter-write into the ring buffer at step_count % (W_n+1) ---
+        W_n = config.neighbor_vel_history_window
+        nb_buf = W_n + 1
+        nb_write_idx = (state.step_count % nb_buf).long()  # (E,)
+        # history_after_reset has shape (E, N, W_n+1, K, 2); we scatter on
+        # dim=2 with index of shape (E, N, 1, K, 2) and src of the same shape.
+        nb_write_idx_exp = nb_write_idx.view(E, 1, 1, 1, 1).expand(E, N, 1, K_local, 2)
+        new_neighbor_vel_history = history_after_reset.scatter(
+            dim=2,
+            index=nb_write_idx_exp,
+            src=nb_vels.unsqueeze(2),
+        )
     else:
         new_neighbor_ids = state.neighbor_ids
+        new_neighbor_vel_history = state.neighbor_vel_history
 
     # --- 12. Build new state ---
     new_state = TorchWorldState(
@@ -340,6 +381,7 @@ def batched_step(
         pos_history=new_pos_history,
         gdist_history=new_gdist_history,
         neighbor_ids=new_neighbor_ids,
+        neighbor_vel_history=new_neighbor_vel_history,
     )
 
     # --- 13. Build observations ---
