@@ -350,6 +350,10 @@ class BatchedTorchEnv:
             waypoint_path_lengths=stack_field("waypoint_path_lengths"),
             n_agents=stack_field("n_agents"),
             step_count=torch.zeros(self.n_envs, dtype=torch.int32, device=dev),
+            stuck_window_step=torch.zeros(
+                (self.n_envs, max_agents), dtype=torch.int32, device=dev
+            ),
+            stuck_window_start_dist=stack_field("goal_distances"),
         )
 
     def _apply_completed_resets(self) -> list[int]:
@@ -390,6 +394,8 @@ class BatchedTorchEnv:
                 self.states.waypoint_path_lengths[env_idx] = tensors["waypoint_path_lengths"]
                 self.states.n_agents[env_idx] = tensors["n_agents"]
                 self.states.step_count[env_idx] = 0
+                self.states.stuck_window_step[env_idx] = 0
+                self.states.stuck_window_start_dist[env_idx] = tensors["goal_distances"]
 
                 completed.append(env_idx)
 
