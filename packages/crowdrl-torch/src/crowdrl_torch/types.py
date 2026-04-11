@@ -116,8 +116,9 @@ class EnvConfig(NamedTuple):
     progress_weight: float = 1.0
     wall_proximity_penalty: float = -0.1
     wall_proximity_threshold: float = 1.5
-    agent_proximity_penalty: float = -0.005
-    agent_proximity_threshold: float = 2.0
+    agent_proximity_penalty_near: float = -0.005
+    agent_proximity_penalty_far: float = -0.0001
+    personal_space_radius: float = 1.0
     action_rate_weight: float = 0.0
     existence_penalty: float = -0.01
     use_smoothness: bool = True
@@ -164,8 +165,9 @@ class EnvConfig(NamedTuple):
             progress_weight=cfg.reward.progress_weight,
             wall_proximity_penalty=cfg.reward.wall_proximity_penalty,
             wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
-            agent_proximity_penalty=cfg.reward.agent_proximity_penalty,
-            agent_proximity_threshold=cfg.reward.agent_proximity_threshold,
+            agent_proximity_penalty_near=cfg.reward.agent_proximity_penalty_near,
+            agent_proximity_penalty_far=cfg.reward.agent_proximity_penalty_far,
+            personal_space_radius=cfg.reward.personal_space_radius,
             action_rate_weight=cfg.reward.action_rate_weight,
             existence_penalty=cfg.reward.existence_penalty,
             use_smoothness=cfg.reward.use_smoothness,
