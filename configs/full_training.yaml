@@ -90,6 +90,14 @@ geometry:
 observation:
   use_navmesh: true          # adds funnel-algorithm waypoints (79D -> 82D)
 
+  # Option A agent-memory experiment: 6 temporal scalar features derived from
+  # the agent's own trajectory (displacement from spawn, cumulative path,
+  # path efficiency, elapsed fraction, window displacement, window goal
+  # progress). See plan/agent_memory_research.md for design rationale and
+  # alternatives considered. When enabled, obs_dim becomes 82 + 6 = 88.
+  use_temporal_memory: true
+  temporal_memory_window: 50   # rolling window in simulation steps (~0.5s at dt=0.01)
+
 
 # ---------------------------------------------------------------------------
 # Action limits

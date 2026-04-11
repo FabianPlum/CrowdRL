@@ -114,6 +114,13 @@ class BatchedTorchEnv:
             n_waypoints=self.states.n_waypoints,
             waypoint_cursor=self.states.waypoint_cursor,
             waypoint_path_lengths=self.states.waypoint_path_lengths,
+            spawn_positions=self.states.spawn_positions,
+            initial_goal_distances=self.states.initial_goal_distances,
+            cumulative_path_length=self.states.cumulative_path_length,
+            pos_history=self.states.pos_history,
+            gdist_history=self.states.gdist_history,
+            preferred_speeds=self.states.preferred_speeds,
+            step_count=self.states.step_count,
         )
 
         return self.states, obs
@@ -184,6 +191,13 @@ class BatchedTorchEnv:
                 n_waypoints=self.states.n_waypoints[r],
                 waypoint_cursor=self.states.waypoint_cursor[r],
                 waypoint_path_lengths=self.states.waypoint_path_lengths[r],
+                spawn_positions=self.states.spawn_positions[r],
+                initial_goal_distances=self.states.initial_goal_distances[r],
+                cumulative_path_length=self.states.cumulative_path_length[r],
+                pos_history=self.states.pos_history[r],
+                gdist_history=self.states.gdist_history[r],
+                preferred_speeds=self.states.preferred_speeds[r],
+                step_count=self.states.step_count[r],
             )
             obs[r] = fresh_obs
 
@@ -265,6 +279,7 @@ class BatchedTorchEnv:
             n_waypoints=raw.get("n_waypoints"),
             waypoint_path_lengths=raw.get("waypoint_path_lengths"),
             max_waypoints=self.config.max_waypoints,
+            memory_window=self.config.temporal_memory_window,
         )
         return data, tier_name
 
@@ -303,6 +318,14 @@ class BatchedTorchEnv:
             "waypoint_path_lengths": torch.tensor(
                 data["waypoint_path_lengths"], dtype=torch.float32, device=dev
             ),
+            "spawn_positions": torch.tensor(
+                data["spawn_positions"], dtype=torch.float32, device=dev
+            ),
+            "initial_goal_distances": torch.tensor(
+                data["initial_goal_distances"], dtype=torch.float32, device=dev
+            ),
+            "pos_history": torch.tensor(data["pos_history"], dtype=torch.float32, device=dev),
+            "gdist_history": torch.tensor(data["gdist_history"], dtype=torch.float32, device=dev),
         }
 
     def _stack_reset_data(self, all_data: list[dict]) -> TorchWorldState:
@@ -354,6 +377,13 @@ class BatchedTorchEnv:
                 (self.n_envs, max_agents), dtype=torch.int32, device=dev
             ),
             stuck_window_start_dist=stack_field("goal_distances"),
+            spawn_positions=stack_field("spawn_positions"),
+            initial_goal_distances=stack_field("initial_goal_distances"),
+            cumulative_path_length=torch.zeros(
+                (self.n_envs, max_agents), dtype=torch.float32, device=dev
+            ),
+            pos_history=stack_field("pos_history"),
+            gdist_history=stack_field("gdist_history"),
         )
 
     def _apply_completed_resets(self) -> list[int]:
@@ -396,6 +426,11 @@ class BatchedTorchEnv:
                 self.states.step_count[env_idx] = 0
                 self.states.stuck_window_step[env_idx] = 0
                 self.states.stuck_window_start_dist[env_idx] = tensors["goal_distances"]
+                self.states.spawn_positions[env_idx] = tensors["spawn_positions"]
+                self.states.initial_goal_distances[env_idx] = tensors["initial_goal_distances"]
+                self.states.cumulative_path_length[env_idx] = 0.0
+                self.states.pos_history[env_idx] = tensors["pos_history"]
+                self.states.gdist_history[env_idx] = tensors["gdist_history"]
 
                 completed.append(env_idx)
 

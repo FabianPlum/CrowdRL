@@ -259,6 +259,33 @@ def batched_step(
         state.prev_heading_changes,
     )
 
+    # --- 11b. Update temporal memory state ---
+    # Cumulative path length accumulates only while the agent is active going
+    # into this step (excluding stuck/timeout termination which zeros the
+    # active mask above). We use the pre-step position so the per-step
+    # delta reflects this step's actual motion.
+    step_delta = ((new_positions - state.positions) ** 2).sum(dim=-1).sqrt()  # (E, N)
+    # Use state.active_mask (pre-update) so the final motion step of an agent
+    # that just reached the goal or was just deactivated still counts.
+    path_inc = torch.where(state.active_mask, step_delta, torch.zeros_like(step_delta))
+    new_cumulative_path_length = state.cumulative_path_length + path_inc
+
+    # Scatter-write the new position and goal distance into the ring buffer.
+    # Writer index = pre-step step_count mod (W+1). After the first W steps
+    # the oldest slot gets overwritten, and the read at (step_count+1) mod
+    # (W+1) returns the entry from W steps back.
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    write_idx = (state.step_count % buf_size).long()  # (E,)
+    write_idx_pos = write_idx.view(E, 1, 1, 1).expand(E, N, 1, 2)  # (E, N, 1, 2)
+    new_pos_history = state.pos_history.scatter(
+        dim=2, index=write_idx_pos, src=new_positions.unsqueeze(2)
+    )
+    write_idx_gd = write_idx.view(E, 1, 1).expand(E, N, 1)  # (E, N, 1)
+    new_gdist_history = state.gdist_history.scatter(
+        dim=2, index=write_idx_gd, src=new_goal_distances.unsqueeze(2)
+    )
+
     # --- 12. Build new state ---
     new_state = TorchWorldState(
         positions=new_positions,
@@ -288,6 +315,11 @@ def batched_step(
         step_count=step_count,
         stuck_window_step=new_stuck_window_step,
         stuck_window_start_dist=new_stuck_window_start_dist,
+        spawn_positions=state.spawn_positions,
+        initial_goal_distances=state.initial_goal_distances,
+        cumulative_path_length=new_cumulative_path_length,
+        pos_history=new_pos_history,
+        gdist_history=new_gdist_history,
     )
 
     # --- 13. Build observations ---
@@ -308,6 +340,13 @@ def batched_step(
         n_waypoints=state.n_waypoints,
         waypoint_cursor=new_wp_cursor,
         waypoint_path_lengths=state.waypoint_path_lengths,
+        spawn_positions=new_state.spawn_positions,
+        initial_goal_distances=new_state.initial_goal_distances,
+        cumulative_path_length=new_state.cumulative_path_length,
+        pos_history=new_state.pos_history,
+        gdist_history=new_state.gdist_history,
+        preferred_speeds=new_state.preferred_speeds,
+        step_count=step_count,
     )
 
     return new_state, observations, rewards, terminated, truncated

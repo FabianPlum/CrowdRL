@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 
+from crowdrl_core.observation import ObsConfig
+
 from crowdrl_env.crowd_env import CrowdEnv, CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, GeometryTier
 from crowdrl_env.reward import RewardConfig
@@ -235,3 +237,117 @@ class TestPhysics:
         # No NaN or inf in positions
         assert np.all(np.isfinite(env._world.positions))
         assert np.all(np.isfinite(env._world.velocities))
+
+
+class TestTemporalMemory:
+    """End-to-end tests for the Option A temporal-memory observation features."""
+
+    @staticmethod
+    def _build_env(W=4, max_steps=50, dt=0.01):
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(3, 5), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_temporal_memory=True,
+                temporal_memory_window=W,
+                temporal_memory_max_steps=max_steps,
+                temporal_memory_dt=dt,
+            ),
+            max_steps=max_steps,
+            dt=dt,
+        )
+        return CrowdEnv(config=cfg, seed=7)
+
+    def test_obs_dim_includes_memory(self):
+        env = self._build_env()
+        obs, _ = env.reset()
+        # 7 ego + 8*7 social + 16 rays + 6 memory = 85
+        assert env.config.obs.obs_dim == 85
+        assert obs.shape[1] == 85
+
+    def test_reset_initialises_memory_state(self):
+        env = self._build_env()
+        env.reset()
+        world = env._world
+        assert world.spawn_positions is not None
+        assert world.initial_goal_distances is not None
+        assert world.cumulative_path_length is not None
+        assert world.pos_history is not None
+        assert world.gdist_history is not None
+        # Spawn matches current positions at t=0
+        np.testing.assert_array_equal(world.spawn_positions, world.positions)
+        # Cumulative path length starts at zero
+        assert np.all(world.cumulative_path_length == 0.0)
+        # Ring buffer pre-filled with spawn positions
+        n = world.n_agents
+        buf_size = env.config.obs.temporal_memory_window + 1
+        for t in range(buf_size):
+            np.testing.assert_array_equal(world.pos_history[:, t, :], world.positions[:n])
+
+    def test_features_at_reset_all_zero(self):
+        env = self._build_env()
+        obs, _ = env.reset()
+        # Last 6 dims are the memory block
+        memory = obs[:, -6:]
+        # Active agents should have zero memory features at t=0 since nothing
+        # has moved yet. Inactive rows are zero everywhere regardless.
+        for i in range(env.n_agents):
+            if env._active_mask[i]:
+                np.testing.assert_allclose(memory[i], 0.0, atol=1e-9)
+
+    def test_step_advances_cumulative_path(self):
+        env = self._build_env()
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # Forward
+        for _ in range(10):
+            env.step(actions)
+        # At least one agent moved a non-trivial distance
+        assert np.any(env._world.cumulative_path_length > 0.01)
+        # step_count tracks the episode step
+        assert env._world.step_count == 10
+
+    def test_elapsed_fraction_in_obs(self):
+        max_steps = 40
+        env = self._build_env(max_steps=max_steps)
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        for _ in range(10):
+            obs, *_ = env.step(actions)
+        # elapsed_fraction is memory feature index 3 = obs[:, -3]
+        for i in range(n):
+            if env._active_mask[i]:
+                assert abs(obs[i, -3] - 10 / max_steps) < 1e-6
+
+    def test_window_features_eventually_nonzero(self):
+        W = 4
+        env = self._build_env(W=W, dt=0.1, max_steps=50)
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # push forward
+        # Step for W+2 simulation steps so the ring buffer has fully filled
+        for _ in range(W + 2):
+            obs, *_ = env.step(actions)
+
+        # At least one active agent should show non-zero displacement window
+        any_disp = False
+        for i in range(n):
+            if env._active_mask[i]:
+                if abs(obs[i, -2]) > 1e-6 or abs(obs[i, -1]) > 1e-6:
+                    any_disp = True
+                    break
+        assert any_disp, "Expected non-zero window features after W+2 forward steps"
+
+    def test_memory_features_finite_during_rollout(self):
+        env = self._build_env()
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(30):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs)), "observations must stay finite"

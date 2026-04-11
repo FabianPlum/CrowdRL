@@ -73,6 +73,15 @@ matplotlib.use("Agg")
 # skipped, which has negligible impact on throughput.
 logging.getLogger("torch._inductor.cudagraph_utils").setLevel(logging.ERROR)
 
+# Shorten inductor kernel names so triton cache filenames don't exceed the 255-byte
+# filesystem limit. The default ``descriptive_names='original_aten'`` concatenates
+# every fused aten op name into the kernel filename; once we fuse the temporal-memory
+# ring-buffer ops (scatter + ~20 elementwise ops) alongside the existing step kernel
+# the filename grew past 255 bytes and inductor fell back to eager with an ENAMETOOLONG
+# OSError. Setting to ``False`` uses short numeric indices instead and adds no
+# debugging penalty for our workflow.
+torch._inductor.config.triton.descriptive_names = False
+
 
 # ============================================================================
 # YAML config -> dataclass configs
@@ -121,7 +130,13 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             corridor_width_range=tuple(geo.get("corridor_width", (2.0, 4.0))),
             corridor_length_range=tuple(geo.get("corridor_length", (8.0, 18.0))),
         ),
-        obs=ObsConfig(use_navmesh=obs.get("use_navmesh", True)),
+        obs=ObsConfig(
+            use_navmesh=obs.get("use_navmesh", True),
+            use_temporal_memory=obs.get("use_temporal_memory", False),
+            temporal_memory_window=obs.get("temporal_memory_window", 50),
+            temporal_memory_max_steps=cfg.get("max_steps", 2000),
+            temporal_memory_dt=cfg.get("dt", 0.01),
+        ),
         action=ActionConfig(
             max_heading_change=np.radians(act.get("max_heading_change_deg", 15.0)),
             max_torso_change=np.radians(act.get("max_torso_change_deg", 15.0)),

@@ -16,6 +16,102 @@ from torch import Tensor
 from crowdrl_torch.sensing import cast_rays, knn_social
 from crowdrl_torch.types import EnvConfig
 
+_TEMPORAL_EPS = 1e-6
+
+
+def compute_temporal_features(
+    positions: Tensor,
+    spawn_positions: Tensor,
+    initial_goal_distances: Tensor,
+    cumulative_path_length: Tensor,
+    pos_history: Tensor,
+    gdist_history: Tensor,
+    goal_positions: Tensor,
+    preferred_speeds: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the 6D temporal-memory feature block.
+
+    All operations are pure tensor ops — torch.compile friendly, no host sync.
+
+    Parameters
+    ----------
+    positions : (E, N, 2) — current positions
+    spawn_positions : (E, N, 2) — positions at episode start
+    initial_goal_distances : (E, N) — ||goal - spawn|| at episode start
+    cumulative_path_length : (E, N) — running path length
+    pos_history : (E, N, W+1, 2) — ring buffer of positions
+    gdist_history : (E, N, W+1) — ring buffer of goal distances
+    goal_positions : (E, N, 2) — current goal
+    preferred_speeds : (E, N) — per-agent preferred speed
+    step_count : (E,) int — current episode step per env
+    config : EnvConfig
+
+    Returns
+    -------
+    features : (E, N, 6) float — the 6 temporal features per agent
+    """
+    E, N = positions.shape[:2]
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    eps = _TEMPORAL_EPS
+
+    # Current goal distance
+    gdist_now = ((goal_positions - positions) ** 2).sum(dim=-1).sqrt()  # (E, N)
+
+    # Read "W steps ago" slot from the ring buffer.
+    # Writer stores pos_{t+1} at index (t % buf_size) where t is the pre-step
+    # step_count. After the step, step_count becomes t+1. The oldest valid
+    # entry in a buf_size=W+1 ring is at index (t+1) % buf_size = new_step_count
+    # % buf_size, which contains pos_{t+1-W} (or spawn_pos if t<W, since
+    # all slots are initialised to spawn_pos on reset).
+    read_idx = (step_count % buf_size).long()  # (E,)
+
+    # Gather: pos_history[e, n, read_idx[e], :] -> (E, N, 2)
+    read_idx_pos = read_idx.view(E, 1, 1, 1).expand(E, N, 1, 2)  # (E, N, 1, 2)
+    pos_window = pos_history.gather(dim=2, index=read_idx_pos).squeeze(2)  # (E, N, 2)
+
+    read_idx_gd = read_idx.view(E, 1, 1).expand(E, N, 1)  # (E, N, 1)
+    gdist_window = gdist_history.gather(dim=2, index=read_idx_gd).squeeze(2)  # (E, N)
+
+    # 1. Displacement from spawn / initial goal distance
+    disp_spawn = ((positions - spawn_positions) ** 2).sum(dim=-1).sqrt()
+    safe_init = initial_goal_distances.clamp(min=eps)
+    disp_spawn_norm = disp_spawn / safe_init
+
+    # 2. Cumulative path length / initial goal distance
+    cum_path_norm = cumulative_path_length / safe_init
+
+    # 3. Path efficiency: displacement / cumulative path
+    safe_cum = cumulative_path_length.clamp(min=eps)
+    path_eff = (disp_spawn / safe_cum).clamp(min=0.0, max=1.0)
+
+    # 4. Elapsed fraction (broadcast step_count per env)
+    max_steps = float(max(config.max_steps, 1))
+    elapsed = (step_count.to(positions.dtype).view(E, 1) / max_steps).expand(E, N)
+
+    # 5. Displacement over window, normalised by (v_pref * W * dt)
+    disp_window = ((positions - pos_window) ** 2).sum(dim=-1).sqrt()
+    expected_window = (preferred_speeds * (W * config.dt)).clamp(min=eps)
+    disp_window_norm = disp_window / expected_window
+
+    # 6. Goal progress over window (positive = approaching goal)
+    goal_progress_window = gdist_window - gdist_now
+    goal_progress_window_norm = goal_progress_window / expected_window
+
+    return torch.stack(
+        [
+            disp_spawn_norm,
+            cum_path_norm,
+            path_eff,
+            elapsed,
+            disp_window_norm,
+            goal_progress_window_norm,
+        ],
+        dim=-1,
+    )  # (E, N, 6)
+
 
 def compute_navmesh_signals(
     positions: Tensor,
@@ -126,6 +222,13 @@ def build_observations(
     n_waypoints: Tensor | None = None,
     waypoint_cursor: Tensor | None = None,
     waypoint_path_lengths: Tensor | None = None,
+    spawn_positions: Tensor | None = None,
+    initial_goal_distances: Tensor | None = None,
+    cumulative_path_length: Tensor | None = None,
+    pos_history: Tensor | None = None,
+    gdist_history: Tensor | None = None,
+    preferred_speeds: Tensor | None = None,
+    step_count: Tensor | None = None,
 ) -> Tensor:
     """Build observations for all agents.
 
@@ -136,6 +239,9 @@ def build_observations(
     n_waypoints : (E, N) int32 — waypoint count per agent (optional)
     waypoint_cursor : (E, N) int32 — current progress index (optional)
     waypoint_path_lengths : (E, N, MAX_WP) — cumulative remaining distance (optional)
+    spawn_positions, initial_goal_distances, cumulative_path_length, pos_history,
+    gdist_history, preferred_speeds, step_count : temporal-memory state; required
+        when ``config.use_temporal_memory`` is True, otherwise ignored.
 
     Returns
     -------
@@ -205,6 +311,7 @@ def build_observations(
     )  # (E, N, R)
 
     # --- Navmesh signals (E, N, 3) ---
+    parts = [ego_state, social_flat, rays]
     if config.use_navmesh:
         nav = compute_navmesh_signals(
             positions,
@@ -217,9 +324,25 @@ def build_observations(
             goal_positions,
             config,
         )
-        obs = torch.cat([ego_state, social_flat, rays, nav], dim=-1)
-    else:
-        obs = torch.cat([ego_state, social_flat, rays], dim=-1)  # (E, N, obs_dim)
+        parts.append(nav)
+
+    # --- Temporal memory (E, N, 6) ---
+    if config.use_temporal_memory:
+        memory = compute_temporal_features(
+            positions,
+            spawn_positions,
+            initial_goal_distances,
+            cumulative_path_length,
+            pos_history,
+            gdist_history,
+            goal_positions,
+            preferred_speeds,
+            step_count,
+            config,
+        )
+        parts.append(memory)
+
+    obs = torch.cat(parts, dim=-1)  # (E, N, obs_dim)
 
     # Zero out inactive agents
     obs = torch.where(active_mask.unsqueeze(-1), obs, torch.zeros_like(obs))

@@ -74,6 +74,16 @@ class TorchWorldState:
     stuck_window_step: Tensor  # (E, N) int32
     stuck_window_start_dist: Tensor  # (E, N) float32
 
+    # Temporal memory state (per-agent trajectory history).
+    # Populated at reset and updated every step. The obs builder reads these
+    # when ``config.use_temporal_memory`` is True to emit the 6 temporal
+    # features. See crowdrl_core.observation for the exact semantics.
+    spawn_positions: Tensor  # (E, N, 2) float32 — position at episode start
+    initial_goal_distances: Tensor  # (E, N) float32 — ||goal - spawn|| at start
+    cumulative_path_length: Tensor  # (E, N) float32 — running path length
+    pos_history: Tensor  # (E, N, W+1, 2) float32 — ring buffer of positions
+    gdist_history: Tensor  # (E, N, W+1) float32 — ring buffer of goal distances
+
     def clone(self) -> "TorchWorldState":
         """Return a copy with all tensors cloned (breaks CUDA graph aliasing)."""
         return TorchWorldState(
@@ -147,6 +157,12 @@ class EnvConfig(NamedTuple):
     stuck_window_steps: int = 300
     stuck_progress_threshold: float = 0.2
 
+    # Temporal memory observation features. When enabled, 6 scalar features
+    # derived from the agent's own trajectory history are appended to the
+    # observation vector. See crowdrl_core.observation for details.
+    use_temporal_memory: bool = False
+    temporal_memory_window: int = 50
+
     @staticmethod
     def from_crowd_env_config(
         cfg: CrowdEnvConfig,
@@ -197,6 +213,8 @@ class EnvConfig(NamedTuple):
             stuck_termination_enabled=cfg.stuck_termination_enabled,
             stuck_window_steps=cfg.stuck_window_steps,
             stuck_progress_threshold=cfg.stuck_progress_threshold,
+            use_temporal_memory=cfg.obs.use_temporal_memory,
+            temporal_memory_window=cfg.obs.temporal_memory_window,
         )
 
 
@@ -205,9 +223,17 @@ def make_initial_state(
     max_agents: int = 64,
     max_segments: int = 128,
     max_waypoints: int = 16,
+    memory_window: int = 50,
     device: torch.device | str = "cpu",
 ) -> TorchWorldState:
-    """Create a zeroed-out TorchWorldState with the given sizes."""
+    """Create a zeroed-out TorchWorldState with the given sizes.
+
+    ``memory_window`` determines the ring-buffer size for the temporal-memory
+    history (buffer has ``memory_window + 1`` slots). Passing a value that
+    differs from the config at runtime will silently miscompute the memory
+    features, so prefer to derive it from the same EnvConfig field.
+    """
+    buf_size = memory_window + 1
     return TorchWorldState(
         positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
         velocities=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
@@ -245,5 +271,18 @@ def make_initial_state(
         stuck_window_step=torch.zeros((n_envs, max_agents), dtype=torch.int32, device=device),
         stuck_window_start_dist=torch.zeros(
             (n_envs, max_agents), dtype=torch.float32, device=device
+        ),
+        spawn_positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
+        initial_goal_distances=torch.zeros(
+            (n_envs, max_agents), dtype=torch.float32, device=device
+        ),
+        cumulative_path_length=torch.zeros(
+            (n_envs, max_agents), dtype=torch.float32, device=device
+        ),
+        pos_history=torch.zeros(
+            (n_envs, max_agents, buf_size, 2), dtype=torch.float32, device=device
+        ),
+        gdist_history=torch.zeros(
+            (n_envs, max_agents, buf_size), dtype=torch.float32, device=device
         ),
     )

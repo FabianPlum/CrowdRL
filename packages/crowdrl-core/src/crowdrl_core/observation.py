@@ -13,6 +13,9 @@ Observation layout (all in egocentric frame):
     two-channel: N * (distance, hit_type)
   Navmesh (optional, 3D):
     next_waypoint_dir (2), path_deviation (1)
+  Temporal memory (optional, 6D):
+    displacement_from_spawn_norm (1), cum_path_norm (1), path_efficiency (1),
+    elapsed_fraction (1), disp_window_norm (1), goal_progress_window_norm (1)
 
 Provides both per-agent ``build_observation()`` (deployment) and vectorized
 ``build_observations_batch()`` (training) that produce numerically identical results.
@@ -35,6 +38,13 @@ from crowdrl_core.sensing import (
 )
 from crowdrl_core.world_state import WorldState
 
+_TEMPORAL_EPS = 1e-6
+"""Small epsilon used to guard divisions when computing normalised temporal
+features. Chosen small enough that it doesn't affect realistic scenarios
+(initial goal distance is always > 0.5m for solvable episodes) but large
+enough to avoid division-by-zero artefacts.
+"""
+
 
 @dataclass(frozen=True)
 class ObsConfig:
@@ -52,6 +62,32 @@ class ObsConfig:
     navmesh_max_waypoints: int = 16
     """Maximum number of pre-computed waypoints per agent for GPU waypoint lookup."""
 
+    use_temporal_memory: bool = False
+    """Whether to include 6 scalar temporal-memory features derived from the
+    agent's own trajectory history. See ``crowdrl_core.observation`` docstring
+    for the exact features. Adds 6D to the observation vector.
+    """
+
+    temporal_memory_window: int = 50
+    """Length of the displacement/progress window (in simulation steps) used
+    by the windowed temporal features. The ring buffer backing this feature
+    has size ``temporal_memory_window + 1`` slots.
+    """
+
+    temporal_memory_max_steps: int = 2000
+    """Max episode length used to normalise ``elapsed_fraction``. Must match
+    the environment's ``max_steps`` — passing a mismatched value will give the
+    policy a miscalibrated time-pressure signal. Only used when
+    ``use_temporal_memory`` is True.
+    """
+
+    temporal_memory_dt: float = 0.01
+    """Simulation timestep used to normalise window-based displacement and
+    goal-progress features (``v_pref * W * dt`` is the expected distance moved
+    in W steps at preferred speed). Must match the environment's ``dt``.
+    Only used when ``use_temporal_memory`` is True.
+    """
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""
@@ -59,7 +95,104 @@ class ObsConfig:
         social = self.k_neighbours * 7
         rays = self.raycast.n_rays * (2 if self.raycast.two_channel else 1)
         nav = 3 if self.use_navmesh else 0
-        return ego + social + rays + nav
+        memory = 6 if self.use_temporal_memory else 0
+        return ego + social + rays + nav + memory
+
+
+def _temporal_features(
+    pos_now: NDArray[np.float64],
+    gdist_now: NDArray[np.float64],
+    spawn_pos: NDArray[np.float64],
+    initial_gdist: NDArray[np.float64],
+    cum_path: NDArray[np.float64],
+    pos_window: NDArray[np.float64],
+    gdist_window: NDArray[np.float64],
+    step_count: int,
+    max_steps: int,
+    preferred_speeds: NDArray[np.float64],
+    dt: float,
+    window: int,
+) -> NDArray[np.float64]:
+    """Compute the 6 temporal-memory scalar features for one or many agents.
+
+    Vectorised — accepts either (2,) / scalar inputs for one agent or
+    (M, 2) / (M,) inputs for a batch of M agents. Returns array with
+    shape (6,) or (M, 6) respectively.
+
+    Parameters
+    ----------
+    pos_now : (M, 2) or (2,) — current position
+    gdist_now : (M,) or scalar — current ||goal - pos||
+    spawn_pos : (M, 2) or (2,) — position at episode start
+    initial_gdist : (M,) or scalar — ||goal - spawn|| at episode start
+    cum_path : (M,) or scalar — running cumulative path length
+    pos_window : (M, 2) or (2,) — position W steps ago (or spawn if t<W)
+    gdist_window : (M,) or scalar — goal distance W steps ago
+    step_count : int — current episode step (same for all agents in one env)
+    max_steps : int — episode length budget
+    preferred_speeds : (M,) or scalar — per-agent preferred speed
+    dt : float — simulation timestep
+    window : int — W (steps)
+
+    Returns
+    -------
+    features : (M, 6) or (6,) float64 — the six normalised features
+    """
+    # Shapes that work for both per-agent (2,) and batched (M, 2)
+    is_batched = pos_now.ndim == 2
+
+    # 1. Displacement from spawn, normalised by initial goal distance
+    disp_spawn = np.linalg.norm(pos_now - spawn_pos, axis=-1)
+    disp_spawn_norm = disp_spawn / np.maximum(initial_gdist, _TEMPORAL_EPS)
+
+    # 2. Cumulative path length, normalised by initial goal distance
+    cum_path_norm = cum_path / np.maximum(initial_gdist, _TEMPORAL_EPS)
+
+    # 3. Path efficiency: displacement / cum_path. 1.0 = straight line, ~0 = looping
+    path_eff = disp_spawn / np.maximum(cum_path, _TEMPORAL_EPS)
+    path_eff = np.clip(path_eff, 0.0, 1.0)
+
+    # 4. Elapsed fraction of max episode steps
+    elapsed = float(step_count) / max(max_steps, 1)
+    if is_batched:
+        elapsed_arr = np.full(pos_now.shape[0], elapsed, dtype=np.float64)
+    else:
+        elapsed_arr = np.float64(elapsed)
+
+    # 5. Displacement over the last W steps, normalised by the distance an
+    #    agent moving at preferred speed would cover in W steps
+    disp_window = np.linalg.norm(pos_now - pos_window, axis=-1)
+    expected_window = np.maximum(preferred_speeds * window * dt, _TEMPORAL_EPS)
+    disp_window_norm = disp_window / expected_window
+
+    # 6. Goal progress over the last W steps (positive = approaching goal),
+    #    normalised the same way as displacement_window
+    goal_progress_window = gdist_window - gdist_now
+    goal_progress_window_norm = goal_progress_window / expected_window
+
+    if is_batched:
+        return np.stack(
+            [
+                disp_spawn_norm,
+                cum_path_norm,
+                path_eff,
+                elapsed_arr,
+                disp_window_norm,
+                goal_progress_window_norm,
+            ],
+            axis=-1,
+        )
+    return np.array(
+        [
+            disp_spawn_norm,
+            cum_path_norm,
+            path_eff,
+            elapsed_arr,
+            disp_window_norm,
+            goal_progress_window_norm,
+        ],
+        dtype=np.float64,
+    )
 
 
 def build_observation(
@@ -160,7 +293,66 @@ def build_observation(
 
         parts.append(nav_signal)
 
+    # --- Temporal memory (optional, 6D) ---
+    if config.use_temporal_memory:
+        parts.append(_per_agent_temporal_features(world, agent_idx, config, ego_pos, goal_dist))
+
     return np.concatenate(parts)
+
+
+def _per_agent_temporal_features(
+    world: WorldState,
+    agent_idx: int,
+    config: ObsConfig,
+    ego_pos: NDArray[np.float64],
+    ego_goal_dist: float,
+) -> NDArray[np.float64]:
+    """Compute the 6D temporal-memory feature block for a single agent.
+
+    Reads the per-agent trajectory state from ``world`` (spawn position,
+    cumulative path length, ring-buffer history, etc.). Returns a zero
+    vector if the state arrays aren't populated yet — this keeps the
+    obs builder robust when called on a freshly-built WorldState from
+    a hand-written test or an adapter that hasn't wired up memory yet.
+    """
+    if (
+        world.spawn_positions is None
+        or world.initial_goal_distances is None
+        or world.cumulative_path_length is None
+        or world.pos_history is None
+        or world.gdist_history is None
+    ):
+        return np.zeros(6, dtype=np.float64)
+
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    # Read oldest entry in the ring buffer. The writer stores pos_{t+1} at
+    # index (t % buf_size) where t is the pre-step step_count, and after the
+    # step ``world.step_count`` equals (t+1). The oldest valid entry is at
+    # index ``world.step_count % buf_size`` (all slots initialised to
+    # spawn_pos at reset, so early reads return the spawn position).
+    read_idx = world.step_count % buf_size
+    pos_window = world.pos_history[agent_idx, read_idx]
+    gdist_window = world.gdist_history[agent_idx, read_idx]
+
+    preferred_speed = (
+        world.preferred_speeds[agent_idx] if world.preferred_speeds is not None else 1.3
+    )
+
+    return _temporal_features(
+        pos_now=ego_pos,
+        gdist_now=ego_goal_dist,
+        spawn_pos=world.spawn_positions[agent_idx],
+        initial_gdist=world.initial_goal_distances[agent_idx],
+        cum_path=world.cumulative_path_length[agent_idx],
+        pos_window=pos_window,
+        gdist_window=gdist_window,
+        step_count=world.step_count,
+        max_steps=config.temporal_memory_max_steps or 1,
+        preferred_speeds=preferred_speed,
+        dt=config.temporal_memory_dt,
+        window=W,
+    )
 
 
 def build_observations_batch(
@@ -277,4 +469,52 @@ def build_observations_batch(
                 wp_ego_y = sin_h[idx_pos] * wp_dir[0] + cos_h[idx_pos] * wp_dir[1]
                 obs[i, offset : offset + 3] = [wp_ego_x, wp_ego_y, p_dev]
 
+        offset += 3
+
+    # --- Temporal memory (batched, 6D) ---
+    if config.use_temporal_memory and _memory_state_populated(world):
+        W = config.temporal_memory_window
+        buf_size = W + 1
+        read_idx = world.step_count % buf_size
+
+        pos_now_a = world.positions[active_idx]  # (M, 2)
+        spawn_a = world.spawn_positions[active_idx]  # (M, 2)
+        init_g_a = world.initial_goal_distances[active_idx]  # (M,)
+        cum_a = world.cumulative_path_length[active_idx]  # (M,)
+        pos_window_a = world.pos_history[active_idx, read_idx]  # (M, 2)
+        gdist_window_a = world.gdist_history[active_idx, read_idx]  # (M,)
+        gdist_now_a = np.linalg.norm(world.goal_positions[active_idx] - pos_now_a, axis=-1)  # (M,)
+
+        if world.preferred_speeds is not None:
+            pref_a = world.preferred_speeds[active_idx]
+        else:
+            pref_a = np.full(M, 1.3, dtype=np.float64)
+
+        temporal = _temporal_features(
+            pos_now=pos_now_a,
+            gdist_now=gdist_now_a,
+            spawn_pos=spawn_a,
+            initial_gdist=init_g_a,
+            cum_path=cum_a,
+            pos_window=pos_window_a,
+            gdist_window=gdist_window_a,
+            step_count=world.step_count,
+            max_steps=config.temporal_memory_max_steps or 1,
+            preferred_speeds=pref_a,
+            dt=config.temporal_memory_dt,
+            window=W,
+        )  # (M, 6)
+        obs[active_idx, offset : offset + 6] = temporal
+
     return obs
+
+
+def _memory_state_populated(world: WorldState) -> bool:
+    """Return True only if all temporal-memory state arrays are present."""
+    return (
+        world.spawn_positions is not None
+        and world.initial_goal_distances is not None
+        and world.cumulative_path_length is not None
+        and world.pos_history is not None
+        and world.gdist_history is not None
+    )

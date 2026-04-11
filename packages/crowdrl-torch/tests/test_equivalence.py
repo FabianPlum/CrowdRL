@@ -382,3 +382,89 @@ class TestRewardEquivalence:
         # Reached goal agents should have positive reward
         if reached.any():
             assert rewards[reached].max() >= config.goal_bonus - 1.0
+
+
+class TestTemporalMemoryEquivalence:
+    """Numpy and torch temporal-memory features should match numerically."""
+
+    def test_temporal_features_numpy_vs_torch(self):
+        from crowdrl_core.observation import (
+            ObsConfig as CoreObsConfig,
+            _temporal_features as np_temporal_features,
+        )
+        from crowdrl_torch.observation import compute_temporal_features as torch_temporal
+
+        W = 5
+        n = 4
+        rng = np.random.default_rng(123)
+
+        pos_now = rng.uniform(0, 10, (n, 2))
+        spawn = rng.uniform(0, 10, (n, 2))
+        goal = rng.uniform(0, 10, (n, 2))
+        init_g = np.linalg.norm(goal - spawn, axis=1)
+        cum_path = rng.uniform(0, 20, n)
+        pos_window = rng.uniform(0, 10, (n, 2))
+        gdist_window = rng.uniform(0, 10, n)
+        gdist_now = np.linalg.norm(goal - pos_now, axis=1)
+        preferred = np.full(n, 1.3)
+        step_count = 20
+        max_steps = 100
+        dt = 0.01
+
+        np_out = np_temporal_features(
+            pos_now=pos_now,
+            gdist_now=gdist_now,
+            spawn_pos=spawn,
+            initial_gdist=init_g,
+            cum_path=cum_path,
+            pos_window=pos_window,
+            gdist_window=gdist_window,
+            step_count=step_count,
+            max_steps=max_steps,
+            preferred_speeds=preferred,
+            dt=dt,
+            window=W,
+        )
+
+        # Build a (1, n, ...) torch state with step_count broadcast to (1,) and
+        # the ring-buffer slot at `step_count % buf_size` pre-filled with
+        # pos_window / gdist_window, so the gather picks them up correctly.
+        buf_size = W + 1
+        pos_history = np.broadcast_to(spawn[:, np.newaxis, :], (n, buf_size, 2)).copy()
+        gdist_history = np.broadcast_to(init_g[:, np.newaxis], (n, buf_size)).copy()
+        read_idx = step_count % buf_size
+        pos_history[:, read_idx, :] = pos_window
+        gdist_history[:, read_idx] = gdist_window
+
+        core_cfg = CoreObsConfig(
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            temporal_memory_max_steps=max_steps,
+            temporal_memory_dt=dt,
+        )
+        # Build a minimal EnvConfig mirroring the above for torch
+        torch_cfg = EnvConfig(
+            max_agents=n,
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            max_steps=max_steps,
+            dt=dt,
+        )
+
+        torch_out = torch_temporal(
+            positions=torch.tensor(pos_now, dtype=torch.float32).unsqueeze(0),
+            spawn_positions=torch.tensor(spawn, dtype=torch.float32).unsqueeze(0),
+            initial_goal_distances=torch.tensor(init_g, dtype=torch.float32).unsqueeze(0),
+            cumulative_path_length=torch.tensor(cum_path, dtype=torch.float32).unsqueeze(0),
+            pos_history=torch.tensor(pos_history, dtype=torch.float32).unsqueeze(0),
+            gdist_history=torch.tensor(gdist_history, dtype=torch.float32).unsqueeze(0),
+            goal_positions=torch.tensor(goal, dtype=torch.float32).unsqueeze(0),
+            preferred_speeds=torch.tensor(preferred, dtype=torch.float32).unsqueeze(0),
+            step_count=torch.tensor([step_count], dtype=torch.int32),
+            config=torch_cfg,
+        )
+
+        torch_out_np = torch_out[0].numpy()
+        npt.assert_allclose(torch_out_np, np_out, atol=ATOL, rtol=RTOL)
+        # Also verify the obs_dim reports +6 when flag is set
+        assert core_cfg.obs_dim == CoreObsConfig().obs_dim + 6

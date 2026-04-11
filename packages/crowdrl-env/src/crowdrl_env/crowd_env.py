@@ -203,6 +203,24 @@ class CrowdEnv(gym.Env):
         self._stuck_window_step = np.zeros(self._n_agents, dtype=np.int32)
         self._stuck_window_start_dist = goal_distances.copy()
 
+        # Initialise temporal-memory state on the WorldState so the obs builder
+        # can read it. Ring buffers are pre-filled with the spawn position /
+        # initial goal distance so early reads return the spawn value.
+        if self.config.obs.use_temporal_memory:
+            W = self.config.obs.temporal_memory_window
+            buf_size = W + 1
+            self._world.spawn_positions = self._world.positions.copy()
+            self._world.initial_goal_distances = goal_distances.copy()
+            self._world.cumulative_path_length = np.zeros(self._n_agents, dtype=np.float64)
+            self._world.pos_history = np.broadcast_to(
+                self._world.positions[:, np.newaxis, :], (self._n_agents, buf_size, 2)
+            ).copy()
+            self._world.gdist_history = np.broadcast_to(
+                goal_distances[:, np.newaxis], (self._n_agents, buf_size)
+            ).copy()
+            self._world.preferred_speeds = self._preferred_speeds.copy()
+            self._world.step_count = 0
+
         # Build initial observations
         obs = self._build_all_observations()
 
@@ -243,6 +261,13 @@ class CrowdEnv(gym.Env):
 
         self._step_count += 1
         cfg = self.config
+
+        # Snapshot pre-step position + active mask for temporal-memory path
+        # length accumulation. We use the pre-step active mask so that an
+        # agent's final motion step (the one in which it reaches the goal)
+        # still contributes to its cumulative path length.
+        prev_positions_for_memory = self._world.positions.copy()
+        prev_active_for_memory = self._active_mask.copy()
 
         # --- 1. Interpret actions → desired velocities and orientations ---
         batch_result = interpret_actions_batch(
@@ -374,6 +399,27 @@ class CrowdEnv(gym.Env):
 
         if not np.any(self._active_mask):
             episode_over = True
+
+        # --- 7b. Update temporal-memory state ---
+        if self.config.obs.use_temporal_memory and self._world.pos_history is not None:
+            W = self.config.obs.temporal_memory_window
+            buf_size = W + 1
+
+            # Cumulative path length: add per-step delta for agents that
+            # were active coming into this step.
+            deltas = np.linalg.norm(self._world.positions - prev_positions_for_memory, axis=1)
+            deltas = np.where(prev_active_for_memory, deltas, 0.0)
+            self._world.cumulative_path_length = self._world.cumulative_path_length + deltas
+
+            # Scatter-write into the ring buffer at index (pre-step step_count % buf_size).
+            write_idx = (self._step_count - 1) % buf_size
+            self._world.pos_history[:, write_idx, :] = self._world.positions
+            new_goal_dists = np.linalg.norm(
+                self._world.goal_positions - self._world.positions, axis=1
+            )
+            self._world.gdist_history[:, write_idx] = new_goal_dists
+
+            self._world.step_count = self._step_count
 
         # --- 8. Build observations ---
         obs = self._build_all_observations()
