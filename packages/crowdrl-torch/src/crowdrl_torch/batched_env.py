@@ -73,6 +73,10 @@ class BatchedTorchEnv:
         self.states: TorchWorldState | None = None
         self.episode_over: torch.Tensor | None = None
 
+        # Per-env geometry tier name (e.g. "TIER_3B"), updated on every reset.
+        # Exposed to collectors for per-tier episode statistics.
+        self.env_tiers: list[str] = ["unknown"] * n_envs
+
     def reset_all(self) -> tuple[TorchWorldState, torch.Tensor]:
         """Reset all environments synchronously. Call once at training start.
 
@@ -82,9 +86,10 @@ class BatchedTorchEnv:
         observations : (E, N, obs_dim)
         """
         all_data = []
-        for _ in range(self.n_envs):
-            data = self._generate_reset_data(self._next_seed())
+        for env_idx in range(self.n_envs):
+            data, tier_name = self._generate_reset_data(self._next_seed())
             all_data.append(data)
+            self.env_tiers[env_idx] = tier_name
 
         self.states = self._stack_reset_data(all_data)
 
@@ -157,8 +162,30 @@ class BatchedTorchEnv:
                     self._generate_reset_data, seed
                 )
 
-        # Apply completed resets
-        self._apply_completed_resets()
+        # Apply completed resets and rebuild observations for reset envs
+        # so callers see the new episode's initial obs instead of stale zeros.
+        reset_envs = self._apply_completed_resets()
+        if reset_envs:
+            r = torch.tensor(reset_envs, device=self.device)
+            fresh_obs = build_observations(
+                self.states.positions[r],
+                self.states.velocities[r],
+                self.states.torso_orientations[r],
+                self.states.head_orientations[r],
+                self.states.shoulder_widths[r],
+                self.states.chest_depths[r],
+                self.states.goal_positions[r],
+                self.states.active_mask[r],
+                self.states.n_agents[r],
+                self.states.wall_segments[r],
+                self.states.n_segments[r],
+                self.config,
+                waypoints=self.states.waypoints[r],
+                n_waypoints=self.states.n_waypoints[r],
+                waypoint_cursor=self.states.waypoint_cursor[r],
+                waypoint_path_lengths=self.states.waypoint_path_lengths[r],
+            )
+            obs[r] = fresh_obs
 
         return self.states, obs, rewards, terminated, truncated
 
@@ -213,10 +240,15 @@ class BatchedTorchEnv:
         self._seed_counter += 1
         return self._seed_counter
 
-    def _generate_reset_data(self, seed: int) -> dict[str, NDArray[np.float32]]:
-        """Generate episode on CPU (runs in thread pool)."""
+    def _generate_reset_data(self, seed: int) -> tuple[dict[str, NDArray[np.float32]], str]:
+        """Generate episode on CPU (runs in thread pool).
+
+        Returns ``(prepared_data, tier_name)`` so per-env tier tracking can
+        survive the trip through the thread pool.
+        """
         raw = self.make_episode_fn(seed)
-        return prepare_reset_data(
+        tier_name = str(raw.get("tier", "unknown"))
+        data = prepare_reset_data(
             positions=raw["positions"],
             velocities=raw["velocities"],
             torso_orientations=raw["torso_orientations"],
@@ -234,6 +266,7 @@ class BatchedTorchEnv:
             waypoint_path_lengths=raw.get("waypoint_path_lengths"),
             max_waypoints=self.config.max_waypoints,
         )
+        return data, tier_name
 
     def _data_to_tensors(self, data: dict[str, NDArray]) -> dict[str, torch.Tensor]:
         """Convert padded numpy arrays to tensors on device."""
@@ -319,12 +352,16 @@ class BatchedTorchEnv:
             step_count=torch.zeros(self.n_envs, dtype=torch.int32, device=dev),
         )
 
-    def _apply_completed_resets(self) -> None:
-        """Apply any completed async resets to the batched state."""
+    def _apply_completed_resets(self) -> list[int]:
+        """Apply any completed async resets to the batched state.
+
+        Returns list of env indices that were reset.
+        """
         completed = []
         for env_idx, future in self._pending_resets.items():
             if future.done():
-                data = future.result()
+                data, tier_name = future.result()
+                self.env_tiers[env_idx] = tier_name
                 tensors = self._data_to_tensors(data)
 
                 # Direct slice assignment — simpler than JAX's tree.map
@@ -358,3 +395,5 @@ class BatchedTorchEnv:
 
         for idx in completed:
             del self._pending_resets[idx]
+
+        return completed
