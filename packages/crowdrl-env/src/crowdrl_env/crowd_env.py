@@ -22,7 +22,6 @@ from numpy.typing import NDArray
 from crowdrl_core.action import ActionConfig, interpret_actions_batch
 from crowdrl_core.collision import (
     compute_contact_forces,
-    compute_min_agent_distances,
     compute_min_wall_distances,
     detect_collisions,
     enforce_wall_boundaries,
@@ -277,9 +276,10 @@ class CrowdEnv(gym.Env):
         enforce_wall_boundaries(self._world)
 
         # --- 5. Compute rewards ---
-        # Distances for proximity penalties
+        # Distances for proximity penalties (agent-agent pair distances are
+        # computed inside compute_rewards so the graded ramp can use per-pair
+        # contact distances).
         wall_distances = compute_min_wall_distances(self._world)
-        agent_distances = compute_min_agent_distances(self._world)
         agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
 
         rewards, reached_goal = compute_rewards(
@@ -294,7 +294,6 @@ class CrowdEnv(gym.Env):
             config=cfg.reward,
             dt=cfg.dt,
             wall_distances=wall_distances,
-            agent_distances=agent_distances,
             agent_radii=agent_radii,
             actions=actions,
         )
