@@ -7,6 +7,7 @@ pedestrian navigation policies in procedurally generated environments.
 from crowdrl_train.config import (
     CurriculumConfig,
     CurriculumPhase,
+    DDPConfig,
     LogConfig,
     NetworkConfig,
     PPOConfig,
@@ -27,6 +28,7 @@ __all__ = [
     "CurriculumConfig",
     "CurriculumManager",
     "CurriculumPhase",
+    "DDPConfig",
     "EpisodeStats",
     "LogConfig",
     "NetworkConfig",
