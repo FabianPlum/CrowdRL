@@ -123,6 +123,25 @@ kernel fusion and CUDA graph capture, which requires [Triton](https://github.com
   ```
 - **macOS**: Triton is not supported. Use CPU training or a Linux remote.
 
+### Single-node multi-GPU (DD-PPO) training
+
+`crowdrl-torch` ships a DD-PPO-style single-node multi-GPU path
+(`crowdrl_torch.distributed`): each rank runs its own `BatchedTorchEnv` and
+`TorchRolloutCollector`, gradients are averaged via a flat `all_reduce`
+after every `backward()`, and the obs / reward normalizers merge across
+ranks via parallel Welford. `MAPPOUpdater` auto-detects the distributed
+context and uses a globally-reduced KL for early stopping so all ranks
+agree on the stop decision (preventing NCCL collective mismatches).
+
+Launch with `torchrun`:
+
+```bash
+torchrun --standalone --nproc_per_node=N train_mappo.py
+```
+
+Design rationale and synchronisation details are in
+[`plan/ddp_single_node.md`](plan/ddp_single_node.md).
+
 ### Running tests
 
 Tests live alongside each package in `packages/*/tests/`.
@@ -162,6 +181,7 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `05_mappo_training.ipynb` | MAPPO training loop with curriculum progression |
 | `06_full_training.ipynb` | Full GPU-vectorised training with `crowdrl-torch`, async resets, ONNX export |
 | `07_complex_geometry.ipynb` | Tier 3a/3b procedural geometry: rooms with obstacles, multi-room layouts, navmesh pathfinding |
+| `08_lane_formation_test.ipynb` | Bidirectional-corridor lane-formation benchmark with order-parameter metric |
 
 ```bash
 uv run jupyter lab
@@ -169,7 +189,7 @@ uv run jupyter lab
 
 ## Current status
 
-**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v5.md) for details):
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v6.md) for details):
 
 | Milestone | Status |
 |-----------|--------|
