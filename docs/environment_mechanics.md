@@ -155,6 +155,10 @@ raw actions (N, 4)             values in [-1, 1]
        |
        v
   6. compute_rewards()             sparse + shaped + smoothness signals
+     - wall distances precomputed outside (compute_min_wall_distances)
+     - agent-agent pair distances computed *inside* compute_rewards
+       so the graded agent-proximity ramp can use per-pair contact
+       distances r_i + r_j (not a global scalar threshold)
        |
        v
   7. Deactivate goal-reached agents, check timeout
@@ -501,16 +505,35 @@ if agent is overlapping any other agent AND both are active:
   learns that collisions both hurt (reward) and push it off course (physics).
   The double signal reinforces avoidance.
 
-#### Agent proximity: -0.3 per step
+#### Agent proximity: graded linear ramp (per-step, worst neighbour)
+
+Instead of a binary "inside threshold / outside threshold" flag, the
+proximity penalty is a linear ramp on the center-to-center distance to the
+**worst-offending** neighbour -- the most negative per-pair penalty an agent
+receives from any active neighbour inside its personal-space zone:
 
 ```
-threshold = agent_radius * 2.0    (e.g. 0.22m * 2.0 = 0.44m)
+for each ordered pair (i, j) with i != j, both active:
+    d_ij      = ||pos_i - pos_j||                 (centre-to-centre)
+    contact   = r_i + r_j                         (sum of body radii)
+    if d_ij >= personal_space_radius:             (default 1.0 m, absolute)
+        pair_penalty = 0
+    else:
+        t = clip((d_ij - contact) / (personal_space_radius - contact), 0, 1)
+        pair_penalty = (1 - t) * near + t * far   (near = -0.005, far = -0.0001)
 
-if distance_to_nearest_agent < threshold AND agent is active:
-    reward += -0.3
+reward_i += min over j of pair_penalty_ij
 ```
 
-- **Incentivises**: maintaining personal space before contact occurs.
+At contact distance the agent pays the full `near` penalty (-0.005). At the
+`personal_space_radius` boundary the penalty has decayed to `far` (-0.0001).
+Beyond the boundary, nothing fires. `personal_space_radius` is an **absolute
+metre distance**, decoupled from body dimensions so the approach zone has
+meaningful depth regardless of agent size.
+
+- **Incentivises**: maintaining personal space before contact occurs,
+  and providing a smooth distance-weighted gradient instead of a step
+  function.
 - **Reward, not physics**: this is a crucial design decision. JuPedSim's
   Social Force Model and GCFM use deterministic exponential repulsion forces
   to keep agents apart. Adding such forces as world physics would encode a
@@ -520,9 +543,19 @@ if distance_to_nearest_agent < threshold AND agent is active:
   giving the policy gradient information to learn spacing behaviour without
   prescribing the mechanism. The policy is free to discover its own avoidance
   strategies. See Project Plan v6, Section 3.2.
+- **Why a ramp and not a threshold?** The previous threshold-based form
+  ("flat -0.3 if within 2x radius") has zero gradient outside the zone and
+  a discontinuity at the boundary. The ramp gives the policy a continuous
+  incentive to widen the gap even when it is already outside the critical
+  region, and removes the "suddenly-safe" cliff.
+- **Why the minimum over neighbours?** Inside a crowd, the nearest neighbour
+  is the most informative spacing signal; summing penalties across all
+  visible neighbours would over-penalise density per se rather than
+  per-neighbour encroachment.
 - **Complements collision penalty**: the -1.0 collision penalty fires only
-  during overlap; this -0.3 proximity penalty fires earlier, creating a
-  smoother gradient that encourages the policy to maintain distance.
+  during overlap; the graded proximity ramp fires earlier and with smaller
+  magnitude, creating a smoother gradient that encourages the policy to
+  maintain distance before the hard collision signal kicks in.
 
 #### Timeout: -5.0
 
@@ -538,13 +571,13 @@ if episode reaches 5000 steps (50 seconds at dt=0.01):
   is weaker than the goal bonus (+10.0), so the agent is better off reaching
   the goal even with a few collisions along the way.
 
-#### Wall proximity: -0.3 per step
+#### Wall proximity: -0.1 per step
 
 ```
 threshold = agent_radius * 1.5    (e.g. 0.22m * 1.5 = 0.33m)
 
 if distance_to_nearest_wall < threshold AND agent is active:
-    reward += -0.3
+    reward += -0.1
 ```
 
 - **Incentivises**: keeping distance from walls, walking in open space.
@@ -552,24 +585,24 @@ if distance_to_nearest_wall < threshold AND agent is active:
   away physically, while this penalty teaches the agent to *avoid approaching*
   walls in the first place. The physics acts reactively; the reward acts
   proactively.
-- **Lower than collision penalty**: -0.3 vs -1.0 reflects that wall-hugging is
+- **Lower than collision penalty**: -0.1 vs -1.0 reflects that wall-hugging is
   less dangerous than agent-agent interpenetration. An agent in a narrow
   corridor cannot avoid triggering this penalty, so making it too large would
   create unlearnable situations.
 
 ### B.2 Shaped progress reward
 
-#### Progress: +0.1 * distance_closed
+#### Progress: +1.0 * distance_closed
 
 ```
 progress = previous_goal_distance - current_goal_distance
-reward += 0.1 * progress
+reward += 1.0 * progress
 ```
 
 - **Incentivises**: moving toward the goal, not just reaching it.
 - **Potential-based**: the reward depends on the *change* in distance, not the
-  absolute distance. Moving 1m closer yields +0.1 regardless of how far away
-  the goal is. Moving 1m farther yields -0.1.
+  absolute distance. Moving 1m closer yields +1.0 regardless of how far away
+  the goal is. Moving 1m farther yields -1.0.
 - **Implicit learning**: this is the primary signal that teaches the agent
   *direction*. Without it, the +10.0 goal bonus is too sparse -- the agent
   would need to stumble upon the goal by random exploration before learning
@@ -602,12 +635,12 @@ These penalties discourage physically unrealistic or visually jarring movement.
 They are gated behind `use_smoothness = True` and require two steps of history
 (the first step after reset has no previous data).
 
-#### Jerk penalty: -0.01 * ||jerk||
+#### Jerk penalty: -1e-6 * ||jerk||
 
 ```
 acceleration_t      = (velocity_t - velocity_{t-1}) / dt
 jerk_t              = (acceleration_t - acceleration_{t-1}) / dt
-reward             += -0.01 * ||jerk_t||
+reward             += -0.000001 * ||jerk_t||
 ```
 
 - **Incentivises**: smooth acceleration profiles (gradual speed changes).
@@ -616,17 +649,21 @@ reward             += -0.01 * ||jerk_t||
   means the agent is changing its acceleration, which in pedestrian dynamics
   corresponds to jerky, unnatural gait. The penalty teaches the policy to
   "ease into" velocity changes rather than snapping to them.
+- **Why such a tiny weight?** Jerk scales as `1/dt^2`; with `dt=0.01` even a
+  0.1 m/s velocity glitch produces jerk of order 1000 m/s^3. A weight of
+  `-1e-6` keeps the per-step magnitude comparable to the other smoothness
+  signals rather than letting a single discontinuity dominate the reward.
 - **Note**: requires **two** previous steps of history (velocity for
   acceleration, acceleration for jerk), so this penalty only activates from
   step 3 onward.
 
-#### Angular acceleration: -0.005 * |angular_accel|
+#### Angular acceleration: -1e-4 * |angular_accel|
 
 ```
 heading_change_t    = heading_t - heading_{t-1}          (normalised to [-pi, pi])
 angular_vel_t       = heading_change_t / dt
 angular_accel_t     = |angular_vel_t - angular_vel_{t-1}|
-reward             += -0.005 * angular_accel_t
+reward             += -0.0001 * angular_accel_t
 ```
 
 - **Incentivises**: smooth turns (constant angular velocity rather than
@@ -638,12 +675,12 @@ reward             += -0.005 * angular_accel_t
   overcorrects toward the goal. The angular acceleration penalty acts as a
   stabiliser, teaching the policy to commit to a heading and maintain it.
 
-#### Speed deviation: -0.03 * |speed - preferred_speed|
+#### Speed deviation: -0.001 * |speed - preferred_speed|
 
 ```
 speed        = ||velocity||
 preferred    = per-agent preferred speed (sampled at spawn, ~1.34 m/s)
-reward      += -0.03 * |speed - preferred|
+reward      += -0.001 * |speed - preferred|
 ```
 
 - **Incentivises**: walking at the agent's preferred speed (not too fast, not
@@ -657,6 +694,12 @@ reward      += -0.03 * |speed - preferred|
   ([Weidmann 1993](https://doi.org/10.3929/ethz-a-000687810)). The penalty
   teaches the policy to avoid both dawdling (low speed, also penalised by
   existence penalty) and rushing (high speed, which increases collision risk).
+- **Deliberately small weight.** A larger speed-deviation weight would
+  dominate the reward budget in congested scenarios where agents *must*
+  slow down to avoid collisions, creating a direct conflict between
+  "maintain preferred speed" and "don't collide". The current weight
+  (-0.001) keeps the preference gentle enough that the collision and
+  proximity signals win when they need to.
 
 ### B.5 Optional signals (disabled by default)
 
@@ -692,18 +735,24 @@ starts 10m from its goal:
 | Signal | Per-step | Typical episode total | Notes |
 |--------|----------|----------------------|-------|
 | Goal bonus | one-time +10.0 | +10.0 | If reached |
-| Progress | ~+0.02/step | +2.0 | 10m at ~0.1 weight |
+| Progress | ~+0.02/step | +10.0 | 10m closed at weight 1.0 |
 | Existence | -0.01/step | -5.0 | 500 steps |
-| Speed deviation | ~-0.009/step | -4.5 | |speed - 1.34| ~0.3 avg, weight -0.03 |
 | Collision | -1.0/step | -10.0 | If stuck for 10 steps |
-| Wall proximity | -0.3/step | -3.0 | ~10 steps near walls |
-| Jerk | ~-0.001/step | -0.5 | Varies widely |
-| Angular accel | ~-0.0005/step | -0.25 | Varies widely |
+| Wall proximity | -0.1/step | -1.0 | ~10 steps near walls |
+| Agent proximity (ramp) | ~-0.001 to -0.005/step | -0.5 to -2.5 | Worst-neighbour ramp, varies with density |
+| Speed deviation | ~-0.0003/step | -0.15 | |speed - 1.34| ~0.3 avg, weight -0.001 |
+| Angular accel | ~-1e-5/step | -0.005 | Varies widely |
+| Jerk | ~-1e-6/step | -0.0005 | Varies widely |
 
-The existence penalty and speed deviation are comparable in magnitude as
-continuous signals, with neither dominating the reward budget. The
-collision penalty dominates during contact events. The progress reward and
-goal bonus together provide the navigational objective.
+The **progress reward and goal bonus** dominate the positive side of the
+budget and together define the navigational objective. On the negative side
+the **collision penalty** is by far the largest per-step signal and dominates
+during contact events, backed by the **existence penalty** that provides
+steady time pressure. The **graded proximity ramp** is small by design: its
+role is to steer spacing before contact, not to dwarf the progress signal in
+crowded phases. The smoothness priors (speed deviation, angular acceleration,
+jerk) are deliberately kept tiny so they regularise without overriding the
+task objective.
 
 ### B.7 Emergent behaviours from reward-physics interaction
 
@@ -712,8 +761,11 @@ The combination of physical constraints (Section A) and reward signals
 
 **Anticipatory yielding.** The agent learns to adjust its heading *before*
 a collision occurs, because:
-- The progress penalty for a small detour (-0.1/m) is far less than the
-  collision penalty (-1.0/step for multiple steps)
+- The progress cost of a small detour (-1.0/m for the "lost" approach) is
+  far less than the collision penalty (-1.0/step for multiple steps)
+- The graded agent-proximity ramp provides a continuous gradient from
+  1 m out to contact, so approaching closer is progressively costly
+  instead of being free until a hard threshold
 - The wall repulsion force provides a gradient signal before contact
 - Social observations show approaching agents' velocities, allowing prediction
 
@@ -727,8 +779,8 @@ form lanes because:
 torso when passing through narrow gaps because:
 - The elliptical body model (A.3) means a rotated torso is narrower
 - Collisions carry a -1.0/step penalty
-- The torso rotation action is cheap (no direct penalty, only indirect
-  angular acceleration cost of -0.005)
+- The torso rotation action is cheap (no direct penalty, only the very
+  small indirect angular acceleration cost of -1e-4 * |omega_dot|)
 
 **Speed modulation near obstacles.** Agents slow down in congested areas
 because:
@@ -787,18 +839,26 @@ body because:
 |--------|--------|-------------------|
 | `goal_bonus` | +10.0 | Yes |
 | `collision_penalty` | -1.0 | Yes |
-| `agent_proximity_penalty` | -0.3 | Yes |
-| `agent_proximity_threshold` | 2.0x radius | Yes |
+| `agent_proximity_penalty_near` | -0.005 | Yes (at contact, `r_i + r_j`) |
+| `agent_proximity_penalty_far` | -0.0001 | Yes (at `personal_space_radius`) |
+| `personal_space_radius` | 1.0 m | Yes (absolute, not body-relative) |
 | `timeout_penalty` | -5.0 | Yes |
-| `wall_proximity_penalty` | -0.3 | Yes |
+| `wall_proximity_penalty` | -0.1 | Yes |
 | `wall_proximity_threshold` | 1.5x radius | Yes |
 | `existence_penalty` | -0.01 | Yes |
-| `progress_weight` | +0.1 | Yes |
-| `jerk_penalty_weight` | -0.01 | Yes (Tier 2) |
-| `angular_accel_penalty_weight` | -0.005 | Yes (Tier 2) |
-| `speed_deviation_weight` | -0.03 | Yes (Tier 2) |
+| `progress_weight` | +1.0 | Yes |
+| `jerk_penalty_weight` | -1e-6 | Yes (Tier 2) |
+| `angular_accel_penalty_weight` | -1e-4 | Yes (Tier 2) |
+| `speed_deviation_weight` | -1e-3 | Yes (Tier 2) |
 | `action_rate_weight` | 0.0 | No |
 | `inverse_distance_weight` | 0.0 | No |
+
+The agent proximity penalty replaced a binary "inside 2x radius -> flat -0.3"
+term with a graded linear ramp from `near` (at contact distance `r_i + r_j`)
+to `far` (at the absolute `personal_space_radius`). Each agent receives the
+*minimum* (most negative) per-pair penalty from any active neighbour inside
+its personal-space zone, so the signal tracks the worst encroachment rather
+than summing over density. See Section B.1 for the motivation.
 
 ### Agent body dimensions ([SpawnConfig](../packages/crowdrl-env/src/crowdrl_env/spawner.py#L20))
 
