@@ -12,6 +12,7 @@ The exported model:
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +33,11 @@ class PolicyForExport(nn.Module):
 
     def __init__(self, actor: Actor, normalizer: RunningNormalizer | None = None):
         super().__init__()
-        self.actor_feature_net = actor.feature_net
-        self.actor_mean = actor.action_mean
+        # Deep-copy so subsequent .cpu()/.to() calls on this wrapper do not
+        # mutate the original actor's parameters (which would silently move
+        # a GPU-resident training model to CPU mid-pipeline).
+        self.actor_feature_net = copy.deepcopy(actor.feature_net)
+        self.actor_mean = copy.deepcopy(actor.action_mean)
 
         # Bake normalization statistics as buffers (not parameters)
         if normalizer is not None:
