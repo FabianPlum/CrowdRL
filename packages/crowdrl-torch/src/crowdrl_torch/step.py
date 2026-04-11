@@ -162,9 +162,53 @@ def batched_step(
         new_active_mask.unsqueeze(-1), new_velocities, torch.zeros_like(new_velocities)
     )
 
-    # --- 9. Termination / truncation ---
-    terminated = reached_goal
+    # --- 9. Stuck-agent termination (rolling progress window) ---
+    # After the active-mask update above, an agent that just reached its
+    # goal is inactive and excluded from the stuck check. Window counters
+    # accumulate only on active agents; inactive agents keep their state
+    # frozen (will be reset by the reset path on next episode).
     truncated = torch.zeros(E, N, dtype=torch.bool, device=state.positions.device)
+    stuck_mask = torch.zeros_like(new_active_mask)
+    new_stuck_window_step = state.stuck_window_step
+    new_stuck_window_start_dist = state.stuck_window_start_dist
+    if config.stuck_termination_enabled:
+        # Increment the window step for agents that were active coming into
+        # this step AND are still active after the goal-reach update.
+        inc_mask = new_active_mask
+        new_stuck_window_step = torch.where(
+            inc_mask,
+            state.stuck_window_step + 1,
+            state.stuck_window_step,
+        )
+        # At end of window: compute progress = start_dist - current_dist.
+        # If progress < threshold, agent is stuck. Otherwise reset window.
+        window_full = new_stuck_window_step >= config.stuck_window_steps
+        progress = state.stuck_window_start_dist - new_goal_distances
+        stuck_mask = window_full & inc_mask & (progress < config.stuck_progress_threshold)
+        # For non-stuck window-full agents, restart the window: zero the
+        # counter and capture the current distance as the new start.
+        reset_mask = window_full & inc_mask & ~stuck_mask
+        new_stuck_window_step = torch.where(
+            window_full & inc_mask,
+            torch.zeros_like(new_stuck_window_step),
+            new_stuck_window_step,
+        )
+        new_stuck_window_start_dist = torch.where(
+            reset_mask,
+            new_goal_distances,
+            state.stuck_window_start_dist,
+        )
+
+        # Apply timeout penalty to stuck agents and mark them truncated.
+        rewards = torch.where(stuck_mask, rewards + config.timeout_penalty, rewards)
+        truncated = torch.where(stuck_mask, torch.ones_like(truncated), truncated)
+        new_active_mask = new_active_mask & ~stuck_mask
+        new_velocities = torch.where(
+            new_active_mask.unsqueeze(-1), new_velocities, torch.zeros_like(new_velocities)
+        )
+
+    # --- 10. Termination / truncation (episode timeout) ---
+    terminated = reached_goal
 
     # Check for timeout: (E,) -> broadcast to (E, N)
     is_timeout = (step_count >= config.max_steps).unsqueeze(1)  # (E, 1)
@@ -242,6 +286,8 @@ def batched_step(
         waypoint_path_lengths=state.waypoint_path_lengths,
         n_agents=state.n_agents,
         step_count=step_count,
+        stuck_window_step=new_stuck_window_step,
+        stuck_window_start_dist=new_stuck_window_start_dist,
     )
 
     # --- 13. Build observations ---
