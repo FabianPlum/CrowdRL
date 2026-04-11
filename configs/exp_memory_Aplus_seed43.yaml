@@ -1,0 +1,136 @@
+# =============================================================================
+# Experiment: A+ (Option A ego memory + persistent neighbor IDs + neighbor
+# velocity history) with seed 43 for fair comparison against both
+# results_exp_memory_optA_seed43 (A, 88D) and
+# results_exp_stuck_term_AND_pw15_seed43 (pre-memory baseline, 82D).
+# =============================================================================
+# obs_dim: 7 + 56 + 16 + 3 + 6 + 16 = 104
+# Expected wall time: ~2h 10m on 2x RTX 4090 DDP.
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Training schedule -- matches exp_memory_optA_seed43 exactly except obs
+# ---------------------------------------------------------------------------
+seed: 43
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 500
+log_interval: 5
+compile_step: true
+
+
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 500
+
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [20, 100]
+      threshold: 0.0
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+
+geometry:
+  min_side: 8.0
+  max_side: 15.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 18.0]
+
+
+# ---------------------------------------------------------------------------
+# Observation -- A+ (persistent IDs + vel history)
+# ---------------------------------------------------------------------------
+observation:
+  use_navmesh: true
+
+  # Option A ego memory (unchanged from exp_memory_optA_seed43)
+  use_temporal_memory: true
+  temporal_memory_window: 50
+
+  # A+ additions
+  use_neighbor_memory: true
+  neighbor_sensing_radius: 5.0
+  neighbor_vel_history_window: 5
+  use_neighbor_vel_history: true
+  use_neighbor_trajectory_features: false   # gated off -- A++ flips this
+
+
+action:
+  max_heading_change_deg: 15.0
+  max_torso_change_deg: 15.0
+
+
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -1.0
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 1.5
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: true
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5
+  agent_proximity_penalty_near: -0.01
+  agent_proximity_penalty_far: -0.0001
+  personal_space_radius: 1.0
+  action_rate_weight: -0.01
+
+
+max_steps: 2000
+
+episode:
+  stuck_termination_enabled: true
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+
+
+network:
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256]
+
+
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+
+
+eval:
+  n_episodes: 10
+  agent_range: [8, 25]
+  render_video: true
+  video_scenario: 7

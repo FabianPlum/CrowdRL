@@ -1,0 +1,136 @@
+# =============================================================================
+# Smoke test for A+ (ego memory + persistent neighbor IDs + neighbor vel history)
+# =============================================================================
+# Goal: exercise the full pipeline end-to-end with use_neighbor_memory +
+# use_neighbor_vel_history to confirm the 104D obs + new TorchWorldState
+# fields don't break training, eval, checkpointing, or ONNX export.
+# Expected wall time: ~3-5 min on 1x 4090.
+#
+# Usage:
+#   uv run python train_mappo.py --config configs/smoke_memory_Aplus.yaml --gpus 1
+#
+# Outputs: results_smoke_memory_Aplus/
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Training schedule (small)
+# ---------------------------------------------------------------------------
+seed: 42
+n_envs: 16
+max_agents: 30
+steps_per_collect: 80000      # one full episode per env, ~128 completed episodes
+n_rollouts: 8
+log_interval: 1
+compile_step: true            # test compile path with the new fused kernels
+
+
+# ---------------------------------------------------------------------------
+# Curriculum -- one-phase smoke
+# ---------------------------------------------------------------------------
+curriculum:
+  metric_window: 20
+  min_episodes_per_phase: 10000   # effectively never advance during smoke
+
+  phases:
+    - name: smoke
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.0
+
+
+# ---------------------------------------------------------------------------
+# Environment geometry
+# ---------------------------------------------------------------------------
+geometry:
+  min_side: 8.0
+  max_side: 12.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 14.0]
+
+
+# ---------------------------------------------------------------------------
+# Observation -- A+ configuration
+# ---------------------------------------------------------------------------
+observation:
+  use_navmesh: true
+  use_temporal_memory: true
+  temporal_memory_window: 50
+
+  # A+ additions: persistent neighbor IDs + neighbor velocity history.
+  # obs_dim: 7 + 56 + 16 + 3 + 6 + 16 = 104
+  use_neighbor_memory: true
+  neighbor_sensing_radius: 5.0
+  neighbor_vel_history_window: 5
+  use_neighbor_vel_history: true
+
+
+# ---------------------------------------------------------------------------
+# Action limits
+# ---------------------------------------------------------------------------
+action:
+  max_heading_change_deg: 15.0
+  max_torso_change_deg: 15.0
+
+
+# ---------------------------------------------------------------------------
+# Reward (matches exp_memory_optA_seed43 for fair comparison)
+# ---------------------------------------------------------------------------
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -1.0
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 1.5
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: true
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5
+  agent_proximity_penalty_near: -0.01
+  agent_proximity_penalty_far: -0.0001
+  personal_space_radius: 1.0
+  action_rate_weight: -0.01
+
+
+# ---------------------------------------------------------------------------
+# Episode
+# ---------------------------------------------------------------------------
+max_steps: 500
+
+episode:
+  stuck_termination_enabled: true
+  stuck_window_steps: 150
+  stuck_progress_threshold: 0.2
+
+
+# ---------------------------------------------------------------------------
+# Network architecture
+# ---------------------------------------------------------------------------
+network:
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256]
+
+
+# ---------------------------------------------------------------------------
+# PPO hyperparameters
+# ---------------------------------------------------------------------------
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 4
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: constant
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+eval:
+  n_episodes: 2
+  agent_range: [8, 15]
+  render_video: false
+  video_scenario: 0

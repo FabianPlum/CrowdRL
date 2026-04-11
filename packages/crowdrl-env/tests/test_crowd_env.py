@@ -534,6 +534,44 @@ class TestNeighborMemoryWiring:
             obs, *_ = env.step(actions)
             assert np.all(np.isfinite(obs))
 
+    def test_vel_history_survives_forced_slot_reassignment(self):
+        """Regression test for a numpy broadcasting bug where boolean
+        indexing with a (n, K) mask into a (n, W_n+1, K, 2) history
+        array crashed with IndexError. Ensure the code path taken when
+        slot_changed.any() is True actually executes without error.
+
+        We build a high-density env and run enough steps for at least
+        one slot reassignment to happen.
+        """
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=8.0, max_side=10.0),
+            spawn=SpawnConfig(n_agents_range=(12, 18), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                neighbor_sensing_radius=3.0,  # tight radius -> easy to fall out of range
+                neighbor_vel_history_window=3,
+            ),
+            max_steps=50,
+            dt=0.1,  # big timestep so agents move a lot per step
+        )
+        env = CrowdEnv(config=cfg, seed=2026)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        # Alternate strong forward / strong turn to force reshuffling.
+        saw_reassignment = False
+        for step in range(30):
+            actions[:, 0] = 1.5
+            actions[:, 1] = 0.5 if step % 2 == 0 else -0.5
+            prev_nids = env._world.neighbor_ids.copy()
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+            if not np.array_equal(prev_nids, env._world.neighbor_ids):
+                saw_reassignment = True
+        assert saw_reassignment, (
+            "test setup failed to force slot reassignment; raise action magnitude"
+        )
+
     def test_vel_history_zero_for_empty_slot(self):
         """Slots with neighbor_ids == -1 must hold zero velocities even
         after several steps."""

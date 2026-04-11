@@ -460,7 +460,12 @@ class CrowdEnv(gym.Env):
             hist = self._world.neighbor_vel_history
             slot_changed = new_nids != prev_nids  # (n_agents, K)
             if slot_changed.any():
-                hist[slot_changed] = 0.0
+                # Broadcast (n_agents, K) mask to the full (n_agents, buf, K, 2)
+                # shape of hist. Boolean indexing won't work directly because
+                # numpy tries to match the mask axes against the leading dims
+                # of hist (which include the buf axis before K).
+                preserve = ~slot_changed[:, np.newaxis, :, np.newaxis]
+                hist = np.where(preserve, hist, 0.0)
 
             # Gather velocities for the assigned neighbors; zero for -1.
             ids_safe = np.clip(new_nids, 0, self._n_agents - 1)
