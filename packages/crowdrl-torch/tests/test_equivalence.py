@@ -423,6 +423,134 @@ class TestSensingEquivalence:
         # Sanity: empty-slot entries (agent 0, slot 2) must be zero
         assert np.allclose(np_feats[0, 4:6], 0.0), "empty slot must yield zero diff"
 
+    def test_neighbor_trajectory_features(self):
+        """compute_neighbor_trajectory_features in torch must match the
+        numpy reference _per_agent_neighbor_trajectory_features.
+
+        Constructs a scene with populated Option A buffers and a mix of
+        valid / empty neighbor slots, then compares per-agent blocks
+        element-wise.
+        """
+        from crowdrl_core.observation import _per_agent_neighbor_trajectory_features
+        from crowdrl_core.sensing import RaycastConfig
+        from crowdrl_core.world_state import WorldState
+        from crowdrl_torch.observation import compute_neighbor_trajectory_features
+
+        rng = np.random.default_rng(13)
+        N = 5
+        K = 3
+        W = 4
+        buf = W + 1
+        dt = 0.01
+
+        positions = rng.uniform(1.0, 9.0, (N, 2))
+        velocities = rng.uniform(-1.0, 1.0, (N, 2))
+        torso = rng.uniform(-np.pi, np.pi, N)
+        heads = torso.copy()
+        shoulder = np.full(N, 0.25)
+        chest = np.full(N, 0.18)
+        masses = np.full(N, 80.0)
+        goals = rng.uniform(1.0, 9.0, (N, 2))
+        preferred = np.full(N, 1.3)
+
+        # Option A buffers
+        spawn = positions - rng.uniform(-2.0, 2.0, (N, 2))
+        init_g = np.linalg.norm(goals - spawn, axis=-1) + 1.0
+        cum_path = rng.uniform(0.5, 5.0, N)
+        pos_hist = rng.uniform(0.0, 10.0, (N, buf, 2))
+        gdist_hist = rng.uniform(0.5, 10.0, (N, buf))
+
+        wall_segments = np.array(
+            [
+                [[0, 0], [10, 0]],
+                [[10, 0], [10, 10]],
+                [[10, 10], [0, 10]],
+                [[0, 10], [0, 0]],
+            ],
+            dtype=np.float64,
+        )
+
+        # Neighbor-ID table: agent 0 has slot 2 empty, others fully populated.
+        neighbor_ids = np.array(
+            [
+                [1, 2, -1],
+                [0, 2, 3],
+                [0, 1, 4],
+                [0, 1, 2],
+                [0, 2, 3],
+            ],
+            dtype=np.int32,
+        )
+
+        world = WorldState(
+            positions=positions,
+            velocities=velocities,
+            torso_orientations=torso,
+            head_orientations=heads,
+            shoulder_widths=shoulder,
+            chest_depths=chest,
+            masses=masses,
+            goal_positions=goals,
+            walkable_polygon=None,
+            wall_segments=wall_segments,
+            navmesh=None,
+            spawn_positions=spawn,
+            initial_goal_distances=init_g,
+            cumulative_path_length=cum_path,
+            pos_history=pos_hist,
+            gdist_history=gdist_hist,
+            preferred_speeds=preferred,
+            neighbor_ids=neighbor_ids,
+            step_count=3,  # anywhere in the buffer range
+        )
+
+        config_core = ObsConfig(
+            k_neighbours=K,
+            raycast=RaycastConfig(n_rays=16),
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            temporal_memory_dt=dt,
+            use_neighbor_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+
+        # NumPy reference
+        np_feats = np.zeros((N, K * 3), dtype=np.float64)
+        for i in range(N):
+            np_feats[i] = _per_agent_neighbor_trajectory_features(world, i, config_core)
+
+        # PyTorch
+        env_cfg = EnvConfig(
+            max_agents=N,
+            k_neighbours=K,
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            use_neighbor_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+
+        def t(x, dtype):
+            return torch.tensor(x, dtype=dtype).unsqueeze(0)
+
+        torch_feats = compute_neighbor_trajectory_features(
+            t(neighbor_ids, torch.int32),
+            t(positions, torch.float32),
+            t(goals, torch.float32),
+            t(spawn, torch.float32),
+            t(init_g, torch.float32),
+            t(cum_path, torch.float32),
+            t(pos_hist, torch.float32),
+            t(gdist_hist, torch.float32),
+            t(preferred, torch.float32),
+            torch.tensor([3], dtype=torch.int32),
+            env_cfg,
+        )  # (1, N, K*3)
+
+        npt.assert_allclose(torch_feats[0].numpy(), np_feats, atol=ATOL, rtol=RTOL)
+
+        # Empty slot sanity: agent 0 slot 2 -> last 3 dims of row 0 are zero
+        assert np.allclose(np_feats[0, 6:9], 0.0)
+
     def test_match_persistent_neighbors(self):
         """Numpy and torch match_persistent_neighbors must agree bit-for-bit
         on a deterministic fixture covering all four scenarios: first step

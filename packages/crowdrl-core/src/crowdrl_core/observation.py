@@ -125,6 +125,26 @@ class ObsConfig:
     plan/neighbor_memory_extension.md section 2.2.
     """
 
+    use_neighbor_trajectory_features: bool = False
+    """Whether to emit the (+K*3 = 24D) neighbor-trajectory feature block.
+    Three scalars per persistent slot, all computed on the **neighbor's
+    own** Option A temporal-memory state (looked up via neighbor_ids):
+
+        1. neighbor path_efficiency   (disp_from_spawn / cum_path, clipped)
+        2. neighbor displacement_over_window_norm
+        3. neighbor goal_progress_over_window_norm
+
+    Tells the policy whether each of its tracked neighbors is itself
+    making purposeful progress -- the core signal needed to distinguish
+    "we are all stuck together" from "I am the only one stuck".
+
+    Requires BOTH ``use_neighbor_memory=True`` AND
+    ``use_temporal_memory=True`` -- the former to know who the neighbor
+    slots point to, the latter to have Option A's per-agent buffers to
+    gather from. Corresponds to the A++ ablation step in
+    plan/neighbor_memory_extension.md section 2.3.
+    """
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""
@@ -138,7 +158,16 @@ class ObsConfig:
             if (self.use_neighbor_memory and self.use_neighbor_vel_history)
             else 0
         )
-        return ego + social + rays + nav + memory + nb_vel
+        nb_traj = (
+            self.k_neighbours * 3
+            if (
+                self.use_neighbor_memory
+                and self.use_temporal_memory
+                and self.use_neighbor_trajectory_features
+            )
+            else 0
+        )
+        return ego + social + rays + nav + memory + nb_vel + nb_traj
 
 
 def _temporal_features(
@@ -342,6 +371,14 @@ def build_observation(
     # --- Neighbor velocity history (optional, K*2 D) ---
     if config.use_neighbor_memory and config.use_neighbor_vel_history:
         parts.append(_per_agent_neighbor_vel_history_features(world, agent_idx, config, rot))
+
+    # --- Neighbor trajectory features (optional, K*3 D) ---
+    if (
+        config.use_neighbor_memory
+        and config.use_temporal_memory
+        and config.use_neighbor_trajectory_features
+    ):
+        parts.append(_per_agent_neighbor_trajectory_features(world, agent_idx, config))
 
     return np.concatenate(parts)
 
@@ -589,6 +626,55 @@ def build_observations_batch(
         obs[active_idx, offset : offset + K * 2] = flat
         offset += K * 2
 
+    # --- Neighbor trajectory features (batched, K*3 D) ---
+    if (
+        config.use_neighbor_memory
+        and config.use_temporal_memory
+        and config.use_neighbor_trajectory_features
+        and _memory_state_populated(world)
+        and world.neighbor_ids is not None
+    ):
+        K = config.k_neighbours
+        W = config.temporal_memory_window
+        buf_size = W + 1
+        read_idx = world.step_count % buf_size
+        dt = config.temporal_memory_dt
+        eps = _TEMPORAL_EPS
+
+        nb_ids_a = world.neighbor_ids[active_idx]  # (M, K) int
+        # Gather neighbor trajectory state for each (active ego, slot) pair.
+        # Use nb_ids_a as row indices into the per-agent arrays. Empty slots
+        # (-1) get clamped to 0 for safe indexing; we mask them to zero after.
+        ids_safe = np.clip(nb_ids_a, 0, world.n_agents - 1)
+
+        spawn_j = world.spawn_positions[ids_safe]  # (M, K, 2)
+        pos_j_now = world.positions[ids_safe]  # (M, K, 2)
+        cum_j = world.cumulative_path_length[ids_safe]  # (M, K)
+        pos_j_win = world.pos_history[ids_safe, read_idx]  # (M, K, 2)
+        gdist_j_win = world.gdist_history[ids_safe, read_idx]  # (M, K)
+        goal_j = world.goal_positions[ids_safe]  # (M, K, 2)
+        gdist_j_now = np.linalg.norm(goal_j - pos_j_now, axis=-1)  # (M, K)
+
+        if world.preferred_speeds is not None:
+            pref_j = np.maximum(world.preferred_speeds[ids_safe], eps)
+        else:
+            pref_j = np.full_like(cum_j, 1.3)
+        exp_win = np.maximum(pref_j * (W * dt), eps)  # (M, K)
+
+        disp_j = np.linalg.norm(pos_j_now - spawn_j, axis=-1)  # (M, K)
+        path_eff = np.clip(disp_j / np.maximum(cum_j, eps), 0.0, 1.0)
+        disp_win = np.linalg.norm(pos_j_now - pos_j_win, axis=-1)
+        disp_win_norm = disp_win / exp_win
+        goal_progress = (gdist_j_win - gdist_j_now) / exp_win
+
+        feats = np.stack([path_eff, disp_win_norm, goal_progress], axis=-1)  # (M, K, 3)
+        valid_slot = (nb_ids_a >= 0)[..., np.newaxis]
+        feats = np.where(valid_slot, feats, 0.0)
+
+        flat = feats.reshape(-1, K * 3)
+        obs[active_idx, offset : offset + K * 3] = flat
+        offset += K * 3
+
     return obs
 
 
@@ -601,6 +687,69 @@ def _memory_state_populated(world: WorldState) -> bool:
         and world.pos_history is not None
         and world.gdist_history is not None
     )
+
+
+def _per_agent_neighbor_trajectory_features(
+    world: WorldState,
+    agent_idx: int,
+    config: ObsConfig,
+) -> NDArray[np.float64]:
+    """Compute the (K*3,) neighbor-trajectory feature block for one agent.
+
+    For each of the K persistent neighbor slots, emits three scalars
+    computed on the NEIGHBOR's own Option A temporal-memory state (looked
+    up by agent index via ``world.neighbor_ids[agent_idx, k]``):
+
+      1. path_efficiency_neighbor   = disp_from_spawn_j / cum_path_j (clipped)
+      2. disp_window_norm_neighbor  = ||pos_j_now - pos_j_W_ago|| / (v_pref * W * dt)
+      3. goal_progress_window_norm  = (gdist_j_W_ago - gdist_j_now) / (v_pref * W * dt)
+
+    Empty slots (-1) emit 3 zeros. Returns an array of shape (K*3,)
+    flattened row-major (slot 0 scalars then slot 1 scalars, ...).
+    """
+    K = config.k_neighbours
+    if world.neighbor_ids is None or not _memory_state_populated(world):
+        return np.zeros(K * 3, dtype=np.float64)
+
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    read_idx = world.step_count % buf_size
+
+    nb_ids = world.neighbor_ids[agent_idx]  # (K,)
+    out = np.zeros((K, 3), dtype=np.float64)
+    dt = config.temporal_memory_dt
+
+    for k in range(K):
+        j = int(nb_ids[k])
+        if j < 0:
+            continue
+
+        spawn_j = world.spawn_positions[j]
+        pos_j_now = world.positions[j]
+        cum_j = float(world.cumulative_path_length[j])
+        pos_j_win = world.pos_history[j, read_idx]
+        gdist_j_win = float(world.gdist_history[j, read_idx])
+        gdist_j_now = float(np.linalg.norm(world.goal_positions[j] - pos_j_now))
+
+        if world.preferred_speeds is not None:
+            pref_j = max(float(world.preferred_speeds[j]), _TEMPORAL_EPS)
+        else:
+            pref_j = 1.3
+        exp_win = max(pref_j * W * dt, _TEMPORAL_EPS)
+
+        disp_j = float(np.linalg.norm(pos_j_now - spawn_j))
+        path_eff_j = max(0.0, min(1.0, disp_j / max(cum_j, _TEMPORAL_EPS)))
+
+        disp_win_j = float(np.linalg.norm(pos_j_now - pos_j_win))
+        disp_win_norm = disp_win_j / exp_win
+
+        goal_progress = (gdist_j_win - gdist_j_now) / exp_win
+
+        out[k, 0] = path_eff_j
+        out[k, 1] = disp_win_norm
+        out[k, 2] = goal_progress
+
+    return out.flatten()
 
 
 def _per_agent_neighbor_vel_history_features(

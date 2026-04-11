@@ -67,6 +67,44 @@ class TestObsConfig:
         # Still the base 79 (no navmesh, no temporal memory, no neighbor mem)
         assert config.obs_dim == 79
 
+    def test_neighbor_trajectory_features_dims(self):
+        """A++ full config: navmesh + ego memory + vel history + traj feats."""
+        config = ObsConfig(
+            use_navmesh=True,
+            use_temporal_memory=True,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            use_neighbor_trajectory_features=True,
+        )
+        # 7 + 56 + 16 + 3 + 6 + 16 + 24 = 128
+        assert config.obs_dim == 128
+
+    def test_neighbor_trajectory_requires_both_memory_flags(self):
+        """Trajectory features need both neighbor_memory AND temporal_memory."""
+        # Only neighbor memory -- no traj features
+        c1 = ObsConfig(
+            use_neighbor_memory=True,
+            use_temporal_memory=False,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c1.obs_dim == 79  # nothing added
+
+        # Only temporal memory -- no traj features
+        c2 = ObsConfig(
+            use_neighbor_memory=False,
+            use_temporal_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c2.obs_dim == 79 + 6  # only temporal memory
+
+        # Both enabled -- traj features active
+        c3 = ObsConfig(
+            use_neighbor_memory=True,
+            use_temporal_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c3.obs_dim == 79 + 6 + 24  # +6 temporal +24 traj
+
 
 class TestBuildObservation:
     def test_output_shape(self):

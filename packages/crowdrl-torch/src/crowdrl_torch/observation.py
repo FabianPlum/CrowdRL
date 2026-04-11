@@ -205,6 +205,92 @@ def compute_navmesh_signals(
     return torch.stack([dir_ego_x, dir_ego_y, path_dev], dim=-1)  # (E, N, 3)
 
 
+def compute_neighbor_trajectory_features(
+    neighbor_ids: Tensor,
+    positions: Tensor,
+    goal_positions: Tensor,
+    spawn_positions: Tensor,
+    initial_goal_distances: Tensor,
+    cumulative_path_length: Tensor,
+    pos_history: Tensor,
+    gdist_history: Tensor,
+    preferred_speeds: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the (E, N, K*3) neighbor trajectory-features block.
+
+    For each persistent neighbor slot, emits 3 scalars computed on the
+    neighbor's own Option A temporal-memory state, indexed via
+    ``neighbor_ids``:
+
+        1. path_efficiency  (neighbor's disp_from_spawn / cum_path, clipped)
+        2. disp_window_norm (neighbor's ||pos_now - pos_W_ago|| / (v_pref * W * dt))
+        3. goal_progress    (neighbor's (gdist_W_ago - gdist_now) / (v_pref * W * dt))
+
+    Empty slots (neighbor_ids == -1) emit zeros.
+    """
+    E, N = positions.shape[:2]
+    K = config.k_neighbours
+    W = config.temporal_memory_window
+    buf = W + 1
+    # EnvConfig stores simulation dt as ``dt`` directly (unlike ObsConfig which
+    # carries a redundant temporal_memory_dt). They must match in practice.
+    dt = config.dt
+    eps = _TEMPORAL_EPS
+
+    # Safe indices: clamp -1 to 0 so the gather never indexes out of bounds.
+    nb_ids_safe = neighbor_ids.clamp(min=0).long()  # (E, N, K)
+    valid = (neighbor_ids >= 0).to(positions.dtype)  # (E, N, K)
+
+    # Per-env expansion index for advanced indexing.
+    env_idx = torch.arange(E, device=positions.device).view(E, 1, 1).expand(E, N, K)
+
+    # Gather neighbor-agent temporal state: each shape (E, N, K, ...)
+    spawn_j = spawn_positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    pos_j_now = positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    goal_j = goal_positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    cum_j = cumulative_path_length[env_idx, nb_ids_safe]  # (E, N, K)
+    pref_j = preferred_speeds[env_idx, nb_ids_safe]  # (E, N, K)
+    # ``initial_goal_distances`` isn't needed for these three features -- path
+    # efficiency uses cum_j as its denominator, and the window features
+    # normalise by expected walking distance, not initial goal distance.
+
+    # pos_history: (E, N, buf, 2) -> gather neighbor rows -> (E, N, K, buf, 2)
+    # Then pick the oldest slot per-env (index step_count % buf).
+    read_idx = (step_count % buf).long()  # (E,)
+
+    # Gather per-neighbor pos_history: index along agent-dim of pos_history
+    # which is dim=1. We want output shape (E, N, K, buf, 2).
+    # Use advanced indexing on the agent dim.
+    pos_hist_j = pos_history[env_idx, nb_ids_safe]  # (E, N, K, buf, 2)
+    gdist_hist_j = gdist_history[env_idx, nb_ids_safe]  # (E, N, K, buf)
+
+    # Pick the "W steps ago" slot per env: index along buf dim with read_idx.
+    read_idx_exp = read_idx.view(E, 1, 1, 1, 1).expand(E, N, K, 1, 2)
+    pos_j_win = pos_hist_j.gather(dim=3, index=read_idx_exp).squeeze(3)  # (E, N, K, 2)
+    read_idx_gd = read_idx.view(E, 1, 1, 1).expand(E, N, K, 1)
+    gdist_j_win = gdist_hist_j.gather(dim=3, index=read_idx_gd).squeeze(3)  # (E, N, K)
+
+    # 1. Path efficiency
+    disp_j = ((pos_j_now - spawn_j) ** 2).sum(dim=-1).sqrt()  # (E, N, K)
+    path_eff = (disp_j / cum_j.clamp(min=eps)).clamp(min=0.0, max=1.0)
+
+    # 2. Displacement over window / expected
+    pref_safe = pref_j.clamp(min=eps)
+    expected_win = (pref_safe * (W * dt)).clamp(min=eps)
+    disp_win = ((pos_j_now - pos_j_win) ** 2).sum(dim=-1).sqrt()
+    disp_win_norm = disp_win / expected_win
+
+    # 3. Goal progress over window / expected
+    gdist_j_now = ((goal_j - pos_j_now) ** 2).sum(dim=-1).sqrt()
+    goal_progress = (gdist_j_win - gdist_j_now) / expected_win
+
+    feats = torch.stack([path_eff, disp_win_norm, goal_progress], dim=-1)  # (E, N, K, 3)
+    feats = feats * valid.unsqueeze(-1)  # zero empty slots
+    return feats.reshape(E, N, K * 3)
+
+
 def compute_neighbor_vel_history_features(
     neighbor_ids: Tensor,
     neighbor_vel_history: Tensor,
@@ -407,6 +493,27 @@ def build_observations(
             config,
         )
         parts.append(nb_vel_features)
+
+    # --- Neighbor trajectory features (E, N, K*3) ---
+    if (
+        config.use_neighbor_memory
+        and config.use_temporal_memory
+        and config.use_neighbor_trajectory_features
+    ):
+        nb_traj_features = compute_neighbor_trajectory_features(
+            neighbor_ids,
+            positions,
+            goal_positions,
+            spawn_positions,
+            initial_goal_distances,
+            cumulative_path_length,
+            pos_history,
+            gdist_history,
+            preferred_speeds,
+            step_count,
+            config,
+        )
+        parts.append(nb_traj_features)
 
     obs = torch.cat(parts, dim=-1)  # (E, N, obs_dim)
 

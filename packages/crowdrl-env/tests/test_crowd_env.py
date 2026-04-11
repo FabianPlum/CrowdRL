@@ -505,6 +505,35 @@ class TestNeighborMemoryWiring:
             # non-zero slot after the ring buffer fills.
             assert nb_block.shape == (env.n_agents, 2 * k)
 
+    def test_aplusplus_obs_dim_and_finite_after_steps(self):
+        """A++ config (ego memory + neighbor vel history + neighbor
+        trajectory features) produces a 128-dim obs that stays finite."""
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_navmesh=True,
+                use_temporal_memory=True,
+                temporal_memory_window=10,
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+                use_neighbor_trajectory_features=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        # 7 + 56 + 16 + 3 + 6 + 16 + 24 = 128
+        assert cfg.obs.obs_dim == 128
+        env = CrowdEnv(config=cfg, seed=17)
+        obs, _ = env.reset()
+        assert obs.shape[1] == 128
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.7
+        for _ in range(15):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+
     def test_vel_history_zero_for_empty_slot(self):
         """Slots with neighbor_ids == -1 must hold zero velocities even
         after several steps."""

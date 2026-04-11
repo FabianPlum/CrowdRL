@@ -140,6 +140,7 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             neighbor_sensing_radius=obs.get("neighbor_sensing_radius", 5.0),
             neighbor_vel_history_window=obs.get("neighbor_vel_history_window", 5),
             use_neighbor_vel_history=obs.get("use_neighbor_vel_history", False),
+            use_neighbor_trajectory_features=obs.get("use_neighbor_trajectory_features", False),
         ),
         action=ActionConfig(
             max_heading_change=np.radians(act.get("max_heading_change_deg", 15.0)),
