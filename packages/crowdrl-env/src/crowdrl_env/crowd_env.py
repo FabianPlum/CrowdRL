@@ -221,6 +221,22 @@ class CrowdEnv(gym.Env):
             self._world.preferred_speeds = self._preferred_speeds.copy()
             self._world.step_count = 0
 
+        # Initialise persistent neighbor-ID table. Seed with an initial
+        # match so the first observation sees populated slots. Mirrors the
+        # torch path in BatchedTorchEnv.reset_all.
+        if self.config.obs.use_neighbor_memory:
+            from crowdrl_core.sensing import match_persistent_neighbors
+
+            k = self.config.obs.k_neighbours
+            prev = np.full((self._n_agents, k), -1, dtype=np.int32)
+            self._world.neighbor_ids = match_persistent_neighbors(
+                self._world.positions,
+                prev,
+                self._active_mask,
+                sensing_radius=self.config.obs.neighbor_sensing_radius,
+                k=k,
+            )
+
         # Build initial observations
         obs = self._build_all_observations()
 
@@ -420,6 +436,18 @@ class CrowdEnv(gym.Env):
             self._world.gdist_history[:, write_idx] = new_goal_dists
 
             self._world.step_count = self._step_count
+
+        # --- 7c. Update persistent neighbor slots ---
+        if self.config.obs.use_neighbor_memory and self._world.neighbor_ids is not None:
+            from crowdrl_core.sensing import match_persistent_neighbors
+
+            self._world.neighbor_ids = match_persistent_neighbors(
+                self._world.positions,
+                self._world.neighbor_ids,
+                self._active_mask,
+                sensing_radius=self.config.obs.neighbor_sensing_radius,
+                k=self.config.obs.k_neighbours,
+            )
 
         # --- 8. Build observations ---
         obs = self._build_all_observations()

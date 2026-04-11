@@ -93,6 +93,24 @@ class BatchedTorchEnv:
 
         self.states = self._stack_reset_data(all_data)
 
+        # When neighbor memory is on, seed the persistent neighbor-ID table
+        # with a first-step match so the initial observation sees populated
+        # slots rather than all -1. Without this seed, slots would remain
+        # unpopulated until after the first step, giving the policy a stale
+        # all-empty neighbor context on reset (fine for commit 2, but a
+        # clean seed is simpler to reason about for commits 4/5).
+        if self.config.use_neighbor_memory:
+            from crowdrl_torch.sensing import match_persistent_neighbors
+
+            self.states.neighbor_ids = match_persistent_neighbors(
+                self.states.positions,
+                self.states.neighbor_ids,
+                self.states.active_mask,
+                self.states.n_agents,
+                sensing_radius=self.config.neighbor_sensing_radius,
+                config=self.config,
+            )
+
         # No episodes are over right after reset
         self.episode_over = torch.zeros(self.n_envs, dtype=torch.bool, device=self.device)
 
@@ -172,6 +190,22 @@ class BatchedTorchEnv:
         # Apply completed resets and rebuild observations for reset envs
         # so callers see the new episode's initial obs instead of stale zeros.
         reset_envs = self._apply_completed_resets()
+        if reset_envs and self.config.use_neighbor_memory:
+            # Re-seed the persistent neighbor slots for envs that just reset.
+            # We just cleared them to -1 in _apply_completed_resets; running
+            # the matcher on the full batch is idempotent for mid-episode
+            # envs (their positions haven't moved since batched_step already
+            # matched them) and populates the cleared reset envs.
+            from crowdrl_torch.sensing import match_persistent_neighbors
+
+            self.states.neighbor_ids = match_persistent_neighbors(
+                self.states.positions,
+                self.states.neighbor_ids,
+                self.states.active_mask,
+                self.states.n_agents,
+                sensing_radius=self.config.neighbor_sensing_radius,
+                config=self.config,
+            )
         if reset_envs:
             r = torch.tensor(reset_envs, device=self.device)
             fresh_obs = build_observations(

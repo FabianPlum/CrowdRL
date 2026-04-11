@@ -351,3 +351,71 @@ class TestTemporalMemory:
         for _ in range(30):
             obs, *_ = env.step(actions)
             assert np.all(np.isfinite(obs)), "observations must stay finite"
+
+
+class TestNeighborMemoryWiring:
+    """End-to-end wiring tests for the persistent neighbor-ID matcher.
+
+    Commit 2 of plan/neighbor_memory_extension.md: the matcher runs every
+    step when ``use_neighbor_memory`` is True, the slots stay stable across
+    steps for agents that remain in range, and commits 3-5 will read from
+    this table for observation features.
+    """
+
+    @staticmethod
+    def _build_env(use_neighbor_memory=True):
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=use_neighbor_memory,
+                neighbor_sensing_radius=5.0,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        return CrowdEnv(config=cfg, seed=11)
+
+    def test_disabled_leaves_neighbor_ids_as_none(self):
+        env = self._build_env(use_neighbor_memory=False)
+        env.reset()
+        assert env._world.neighbor_ids is None
+
+    def test_reset_populates_neighbor_ids(self):
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        nids = env._world.neighbor_ids
+        assert nids is not None
+        assert nids.shape == (env.n_agents, env.config.obs.k_neighbours)
+        assert nids.dtype == np.int32
+        # With >= 2 active agents there should be at least one non-empty slot
+        active_rows = nids[env._active_mask]
+        assert (active_rows >= 0).any(), "expected at least one populated slot after reset"
+
+    def test_step_updates_neighbor_ids(self):
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        pre = env._world.neighbor_ids.copy()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        env.step(actions)
+        post = env._world.neighbor_ids
+        assert post is not None
+        assert post.shape == pre.shape
+        # IDs must remain in [-1, n_agents). Values outside [-1, n-1] would be a bug.
+        n = env.n_agents
+        assert post.max() < n
+        assert post.min() >= -1
+
+    def test_no_self_assignment(self):
+        """An agent's own index must never appear in its own neighbor slots."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(5):
+            env.step(actions)
+            nids = env._world.neighbor_ids
+            for i in range(env.n_agents):
+                assert i not in nids[i], f"agent {i} appears in its own neighbor slots: {nids[i]}"

@@ -88,6 +88,23 @@ class ObsConfig:
     Only used when ``use_temporal_memory`` is True.
     """
 
+    use_neighbor_memory: bool = False
+    """Whether to maintain a persistent neighbor-ID table for per-neighbor
+    temporal memory features. On its own (commit 2 of the neighbor memory
+    plan) this only turns on the matcher -- no observation dims are added.
+    The dims come from ``use_neighbor_vel_history`` and
+    ``use_neighbor_trajectory`` in later commits.
+    """
+
+    neighbor_sensing_radius: float = 5.0
+    """Metres. A previously-tracked neighbor beyond this radius is evicted
+    from its persistent slot; empty slots are only filled with agents
+    within this radius. Defaults to the same 5m as the raycast max_range
+    -- anything further than that is already invisible to the policy
+    through the existing social channel, so tracking it here would be
+    wasteful. Only used when ``use_neighbor_memory`` is True.
+    """
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""

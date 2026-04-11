@@ -17,6 +17,7 @@ from crowdrl_torch.action import interpret_actions
 from crowdrl_torch.collision import compute_contact_forces, detect_collisions_pairwise
 from crowdrl_torch.observation import build_observations
 from crowdrl_torch.reward import compute_rewards
+from crowdrl_torch.sensing import match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
 
@@ -286,6 +287,24 @@ def batched_step(
         dim=2, index=write_idx_gd, src=new_goal_distances.unsqueeze(2)
     )
 
+    # --- 11c. Update persistent neighbor slots ---
+    # Recompute neighbor slot assignments from the new positions. Uses the
+    # post-update active mask so newly-deactivated agents (goal-reach or
+    # stuck-termination) are immediately evicted from other agents' slots.
+    # Guarded so we only pay the ~2% compute hit when neighbor memory is
+    # actually consumed by the observation builder (commits 4/5).
+    if config.use_neighbor_memory:
+        new_neighbor_ids = match_persistent_neighbors(
+            new_positions,
+            state.neighbor_ids,
+            new_active_mask,
+            state.n_agents,
+            sensing_radius=config.neighbor_sensing_radius,
+            config=config,
+        )
+    else:
+        new_neighbor_ids = state.neighbor_ids
+
     # --- 12. Build new state ---
     new_state = TorchWorldState(
         positions=new_positions,
@@ -320,7 +339,7 @@ def batched_step(
         cumulative_path_length=new_cumulative_path_length,
         pos_history=new_pos_history,
         gdist_history=new_gdist_history,
-        neighbor_ids=state.neighbor_ids,
+        neighbor_ids=new_neighbor_ids,
     )
 
     # --- 13. Build observations ---

@@ -170,6 +170,13 @@ class EnvConfig(NamedTuple):
     use_temporal_memory: bool = False
     temporal_memory_window: int = 50
 
+    # Neighbor memory: persistent per-agent neighbor ID table, the prerequisite
+    # for per-neighbor temporal features (velocity history, trajectory feats).
+    # When this flag is False, the matcher is not called and neighbor_ids
+    # stays all -1 -- used to run a clean A-vs-A+ ablation on the same build.
+    use_neighbor_memory: bool = False
+    neighbor_sensing_radius: float = 5.0
+
     @staticmethod
     def from_crowd_env_config(
         cfg: CrowdEnvConfig,
@@ -222,6 +229,8 @@ class EnvConfig(NamedTuple):
             stuck_progress_threshold=cfg.stuck_progress_threshold,
             use_temporal_memory=cfg.obs.use_temporal_memory,
             temporal_memory_window=cfg.obs.temporal_memory_window,
+            use_neighbor_memory=cfg.obs.use_neighbor_memory,
+            neighbor_sensing_radius=cfg.obs.neighbor_sensing_radius,
         )
 
 
