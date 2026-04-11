@@ -246,6 +246,20 @@ class LogConfig:
 
 
 @dataclass(frozen=True)
+class DDPConfig:
+    """Distributed Data Parallel configuration (single-node multi-GPU).
+
+    Uses the DD-PPO pattern (Wijmans et al. 2019): each GPU rank collects
+    rollouts independently, gradients are averaged via ``all_reduce``.
+
+    Launch with ``torchrun --standalone --nproc_per_node=N script.py``.
+    """
+
+    backend: str = "nccl"
+    """Communication backend. 'nccl' for GPU, 'gloo' for CPU."""
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     """Top-level training configuration. Composes all sub-configs."""
 
