@@ -66,6 +66,14 @@ class TorchWorldState:
     n_agents: Tensor  # (E,) int32
     step_count: Tensor  # (E,) int32
 
+    # Stuck-agent tracking (rolling progress window).
+    # ``stuck_window_step`` counts how many simulation steps have passed
+    # since the last stuck-check for each agent; ``stuck_window_start_dist``
+    # is that agent's goal distance when the current window started. Used
+    # by step.py when ``config.stuck_termination_enabled`` is True.
+    stuck_window_step: Tensor  # (E, N) int32
+    stuck_window_start_dist: Tensor  # (E, N) float32
+
     def clone(self) -> "TorchWorldState":
         """Return a copy with all tensors cloned (breaks CUDA graph aliasing)."""
         return TorchWorldState(
@@ -129,6 +137,16 @@ class EnvConfig(NamedTuple):
     # Episode
     max_steps: int = 5000
 
+    # Stuck-agent termination (see diagnose_stuck_agents.py). When enabled,
+    # any active agent that fails to reduce its goal distance by at least
+    # ``stuck_progress_threshold`` metres over a rolling window of
+    # ``stuck_window_steps`` simulation steps is terminated as "failed"
+    # (same reward as a timeout). The window restarts after every check.
+    # Disabled by default so existing behaviour is unchanged.
+    stuck_termination_enabled: bool = False
+    stuck_window_steps: int = 300
+    stuck_progress_threshold: float = 0.2
+
     @staticmethod
     def from_crowd_env_config(
         cfg: CrowdEnvConfig,
@@ -176,6 +194,9 @@ class EnvConfig(NamedTuple):
             speed_deviation_weight=cfg.reward.speed_deviation_weight,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
+            stuck_termination_enabled=cfg.stuck_termination_enabled,
+            stuck_window_steps=cfg.stuck_window_steps,
+            stuck_progress_threshold=cfg.stuck_progress_threshold,
         )
 
 
@@ -221,4 +242,8 @@ def make_initial_state(
         ),
         n_agents=torch.zeros(n_envs, dtype=torch.int32, device=device),
         step_count=torch.zeros(n_envs, dtype=torch.int32, device=device),
+        stuck_window_step=torch.zeros((n_envs, max_agents), dtype=torch.int32, device=device),
+        stuck_window_start_dist=torch.zeros(
+            (n_envs, max_agents), dtype=torch.float32, device=device
+        ),
     )
