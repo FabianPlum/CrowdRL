@@ -51,7 +51,18 @@
       "Bash(pip show:*)",
       "Bash(.venv/Scripts/ruff.exe format:*)",
       "Bash(.venv/Scripts/ruff.exe check:*)",
-      "Bash(.venv/Scripts/pytest.exe --tb=short -q)"
+      "Bash(.venv/Scripts/pytest.exe --tb=short -q)",
+      "Bash(uv run python train_mappo.py:*)",
+      "Bash(uv run python scripts/analyze_run.py:*)",
+      "Bash(uv run python -c:*)",
+      "Bash(cp -r results_full_training:*)",
+      "Bash(cp configs/full_training.yaml:*)",
+      "Bash(mkdir -p results_*:*)",
+      "Bash(tee:*)",
+      "Bash(nvidia-smi)",
+      "Bash(ps:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(date:*)"
     ]
   },
   "env":{
