@@ -252,8 +252,8 @@ quantities for temporal derivatives (velocities, accelerations, headings).
 |--------|-------|-----------|
 | Goal reached | +10.0 | `||pos - goal|| < 0.5 m` |
 | Collision (agent-agent) | -1.0 per step | While overlapping another agent |
-| Agent proximity | -0.3 per step | `dist_to_nearest_agent < 2.0 * agent_radius` |
-| Wall proximity | -0.3 per step | `dist_to_wall < 1.5 * agent_radius` |
+| Agent proximity (graded ramp) | -0.005 .. -0.0001 per step | Graded linear ramp between contact (`r_i + r_j`) and `personal_space_radius` (1.0 m absolute). Each agent pays the most-negative per-pair penalty from any neighbour in the zone |
+| Wall proximity | -0.1 per step | `dist_to_wall < 1.5 * agent_radius` |
 | Timeout | -5.0 | Episode reaches max_steps |
 | Existence | -0.01 per step | While agent is active (time pressure) |
 
@@ -261,7 +261,8 @@ The **agent proximity penalty** is a reward signal (not a physics force) that
 teaches the policy to maintain personal space. Unlike JuPedSim's Social Force
 Model which prescribes exponential repulsion as a world force, CrowdRL lets
 the policy discover its own avoidance strategy through this tunable reward
-term. See Project Plan v6, Section 3.2.
+term. See Project Plan v6, Section 3.2, and Section 8.3 below for the
+current graded-ramp form.
 
 ### Tier 2: Progress shaping (potential-based)
 
@@ -270,20 +271,22 @@ reward += progress_weight * (prev_goal_distance - current_goal_distance)
 ```
 
 Positive when moving toward goal, negative when moving away. Potential-based so
-it does not introduce spurious optima. Default `progress_weight = 0.1`.
+it does not introduce spurious optima. Default `progress_weight = 1.0`.
 
 ### Tier 3: Smoothness priors
 
 | Penalty | Weight | What it discourages |
 |---------|--------|---------------------|
-| Jerk (change in acceleration) | -0.01 * \|\|da/dt\|\| | Sudden acceleration changes |
-| Angular acceleration | -0.005 * \|d_omega/dt\| | Rapid heading oscillations |
-| Speed deviation | -0.03 * \|v - v_preferred\| | Deviating from natural walking speed |
-| Action rate | -0.05 * \|\|a_t - a_{t-1}\|\| | Chattering/oscillating policy outputs |
+| Jerk (change in acceleration) | -1e-6 * \|\|da/dt\|\| | Sudden acceleration changes |
+| Angular acceleration | -1e-4 * \|d_omega/dt\| | Rapid heading oscillations |
+| Speed deviation | -1e-3 * \|v - v_preferred\| | Deviating from natural walking speed |
+| Action rate | 0.0 (disabled) * \|\|a_t - a_{t-1}\|\| | Chattering/oscillating policy outputs |
 
 Jerk and angular acceleration require two steps of history to compute
 (acceleration needs previous velocity, jerk needs previous acceleration).
-Action rate needs one step of history.
+Action rate needs one step of history. The smoothness weights are kept
+deliberately small so they regularise without dominating the progress and
+collision signals in congested scenarios.
 
 ---
 
@@ -321,7 +324,9 @@ observations (N, 82)              79D base + 3D navmesh (when enabled)
        |
        v
   compute_rewards():
-    goal +10 / collision -1 / agent proximity -0.3 / wall proximity -0.3
+    goal +10 / collision -1 / wall proximity -0.1
+    agent proximity: graded ramp -0.005..-0.0001 (worst neighbour,
+      per-pair contact r_i+r_j, absolute 1.0 m personal_space_radius)
     existence -0.01 / progress / smoothness / action rate
        |
        v
@@ -346,36 +351,63 @@ of a wall. Provides a learnable gradient before hard wall contact.
 
 ```python
 wall_proximity = min_wall_distance < (agent_radius * 1.5)
-rewards[wall_proximity & active_mask] += -0.3
+rewards[wall_proximity & active_mask] += -0.1
 ```
 
-Configurable via `RewardConfig.wall_proximity_penalty` (default -0.3) and
+Configurable via `RewardConfig.wall_proximity_penalty` (default -0.1) and
 `RewardConfig.wall_proximity_threshold` (default 1.5x agent radius).
 
 ### 8.2 Smoothness improvements -- IMPLEMENTED
 
 **A. Action rate penalty** -- Penalises frame-to-frame changes in the raw policy
-output. Configured via `RewardConfig.action_rate_weight` (default -0.05).
+output. Configured via `RewardConfig.action_rate_weight` (default 0.0 -- disabled).
 Targets the network's output before the nonlinear action interpretation.
 
 **B. Tightened orientation limits** -- Heading and torso change limits reduced
 from pi/4 and pi/6 to pi/12 each (~15 deg/step, ~1500 deg/s). Still above
 human capability (~120 deg/s) but prevents physically impossible snap turns.
 
-### 8.3 Agent proximity penalty -- IMPLEMENTED
+### 8.3 Agent proximity penalty (graded linear ramp) -- IMPLEMENTED
 
-Distance-based penalty when agents are within `threshold * body_radius` of
-each other. This is a reward signal (not a physics force) that teaches the
-policy to maintain personal space. Unlike JuPedSim's deterministic repulsion
-forces, this lets the policy learn its own avoidance strategy.
+Reward-side social-distance signal. This is a reward signal (not a physics
+force) that teaches the policy to maintain personal space. Unlike JuPedSim's
+deterministic repulsion forces, this lets the policy learn its own avoidance
+strategy.
+
+The current form is a **graded linear ramp** over the center-to-center
+distance to the worst-offending neighbour, not a binary threshold:
 
 ```python
-agent_proximity = min_agent_distance < (agent_radius * 2.0)
-rewards[agent_proximity & active_mask] += -0.3
+# Pairwise center-to-center distance (E, N, N) or (N, N)
+pair_dist    = ||pos_i - pos_j||
+pair_contact = agent_radius_i + agent_radius_j      # per-pair contact distance
+
+# Linear ramp: 1 at contact -> 0 at personal_space_radius
+t = clip((pair_dist - pair_contact) /
+         (personal_space_radius - pair_contact), 0, 1)
+pair_penalty = (1 - t) * agent_proximity_penalty_near \
+             +      t  * agent_proximity_penalty_far
+
+# Each agent receives the most-negative per-pair penalty (worst neighbour).
+rewards[i] += min_j pair_penalty[i, j]   # self and inactive pairs masked
 ```
 
-Configurable via `RewardConfig.agent_proximity_penalty` (default -0.3) and
-`RewardConfig.agent_proximity_threshold` (default 2.0x agent radius).
+Configurable via three `RewardConfig` / `EnvConfig` fields:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `agent_proximity_penalty_near` | -0.005 | Per-pair penalty at contact distance `r_i + r_j` |
+| `agent_proximity_penalty_far`  | -0.0001 | Per-pair penalty right at `personal_space_radius` |
+| `personal_space_radius`        | 1.0 m | Absolute centre-to-centre cutoff (not body-relative) |
+
+The aggregation is `min` over neighbours, so an agent inside a crowd is
+penalised by its single nearest neighbour rather than by a sum over
+density. The previous implementation had a flat `-0.005` inside a
+`2.0 * agent_radius` threshold; the graded ramp supplies a continuous
+gradient from 1 m all the way down to contact. The pair-distance
+computation now lives inside `compute_rewards` itself (CPU and torch paths);
+the `agent_distances` parameter has been removed from the function
+signature.
 
 ### 8.4 Mass-based inertia -- IMPLEMENTED
 
@@ -392,7 +424,93 @@ ellipse. The new boundary-distance method computes the closest boundary
 points of each ellipse along the line connecting their centres, detecting
 overlap when the sum of boundary reaches exceeds the centre distance.
 
-### 8.6 Remaining potential improvements
+### 8.6 Rollout collector: cross-collect episode carry-over -- IMPLEMENTED
+
+Previously, both `RolloutCollector` (CPU subproc path) and
+`TorchRolloutCollector` (GPU path) called `env.reset_all()` at the start of
+every `collect()`. Any in-flight episode was discarded, and the recorded
+episode statistics biased toward episodes short enough to finish inside one
+rollout.
+
+The fix is a **persistent episode state** that spans multiple `collect()`
+calls:
+
+- The initial reset happens **lazily** on the very first `collect()`.
+- Subsequent calls reuse the existing env + episode tracking state, so an
+  episode that straddles a collect boundary counts the full episode reward
+  across both rollouts.
+- The first segment in a new collect is treated as "segment 0" (possibly a
+  carry-over), and GAE handles it as a regular trailing-incomplete segment
+  bootstrapped from the critic at the segment's last observation.
+- The trailing-incomplete-segment bootstrap now uses the **post-step**
+  observation (`s_T`), not the already-normalised `s_{T-1}` that used to
+  sit in the buffer. The post-step obs is normalised exactly once at the
+  end of `collect()`.
+- The torch collector slices each segment over the full `max_agents` axis
+  and relies on the per-step `active_mask` to select real agents, rather
+  than inferring `n_agents` from the first step (which breaks when a
+  carry-over segment has terminated agents scattered across the row).
+
+The GPU `BatchedTorchEnv` also grew an `env_tiers: list[str]` field that
+records each env's current geometry tier name (e.g. `"TIER_3B"`) on every
+reset, so per-tier episode statistics can be attached as
+`ep_dict["geometry_tier"]` without adding a new collective.
+
+### 8.7 Single-node multi-GPU training (DDP) -- IMPLEMENTED
+
+Added a DD-PPO-style single-node multi-GPU path (Wijmans et al. 2019)
+living in the new `crowdrl_torch/distributed.py` module, with gradient
+sync and normaliser sync hooks wired into `crowdrl_train.mappo`.
+
+| Helper | Role |
+|--------|------|
+| `init_distributed(backend="nccl")` | Reads `RANK` / `LOCAL_RANK` / `WORLD_SIZE` from `torchrun`, sets the CUDA device, returns `(rank, world_size, device)` |
+| `cleanup_distributed()` | Destroys the process group |
+| `is_distributed` / `is_main_rank` / `get_rank` / `get_world_size` | Rank queries (fall back to single-process values) |
+| `allreduce_gradients(model)` | Flattens every `.grad` into one buffer, issues a single `all_reduce(SUM)`, divides by world size, unflattens |
+| `TorchRunningNormalizer.sync_across_ranks()` | Merges obs-normaliser statistics via parallel Welford (weighted mean + variance) |
+| `sync_reward_normalizer(rnorm, device)` | Same parallel Welford merge for the reward normalizer's return-variance tracker, plus averaged running return |
+| `gather_episode_stats(local)` | `all_gather_object` episode dicts to rank 0 |
+| `broadcast_curriculum_state(mgr)` | After rank 0 decides phase advancement, broadcast the new state to all ranks |
+| `distributed_seed(base)` / `seed_everything` | Per-rank seed helpers |
+
+`MAPPOUpdater` now accepts a `distributed: bool | None` flag (auto-detected
+from `torch.distributed.is_initialized()` by default). When distributed,
+every `actor_loss.backward()` / `critic_loss.backward()` is followed by an
+`allreduce_gradients(...)` call before the optimiser step, making the
+effective batch `local_batch * world_size` without any learning-rate
+scaling (matching CleanRL's convention).
+
+**KL early-stopping fix.** Under DDP, each rank's minibatch produces a
+different local approximate KL. If each rank early-stops independently,
+one rank can exit the epoch loop while another is still issuing gradient
+all-reduces, which deadlocks NCCL on mismatched collectives. `MAPPOUpdater`
+now averages the KL tensor across ranks (`all_reduce(SUM)` / `world_size`)
+inside the loop and uses the **global** KL for the early-stop decision, so
+all ranks agree. Regression tests live in
+`packages/crowdrl-train/tests/test_mappo.py` (two subprocess-based tests
+that spin up a `world_size=1` gloo group and spy on the KL collective).
+
+Launch pattern:
+
+```
+torchrun --standalone --nproc_per_node=N train_mappo.py
+```
+
+Full design rationale, synchronisation table and launch script are in
+`plan/ddp_single_node.md`.
+
+### 8.8 Export wrapper device isolation -- IMPLEMENTED
+
+`PolicyForExport` (in `crowdrl_train/export.py`) now **deep-copies** the
+actor's `feature_net` and `action_mean` before wrapping them. Previously it
+held references, so a downstream `wrapper.cpu()` would silently move the
+original actor's parameters to CPU -- breaking any subsequent GPU operation
+on the training model. Regression tests in
+`packages/crowdrl-train/tests/test_export.py` verify that `export_onnx`
+leaves the source actor on its original device.
+
+### 8.9 Remaining potential improvements
 
 **C. Increase velocity damping** -- Raising `velocity_damping` from 0.8 toward
 0.9 or 0.95 increases inertia. Trades responsiveness for smoother trajectories.
