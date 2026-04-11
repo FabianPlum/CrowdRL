@@ -124,22 +124,13 @@ def batched_step(
     )
 
     # --- 7. Rewards ---
-    # Compute distances for proximity penalties
+    # Wall distances for wall-proximity penalty. Agent-agent pair distances
+    # are computed inside compute_rewards so the graded proximity ramp can
+    # use per-pair contact distances.
     wall_distances = compute_min_wall_distances(
         new_positions, state.wall_segments, state.n_segments
     )
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
-
-    # Min agent-agent centre distance (E, N)
-    _diff = new_positions.unsqueeze(2) - new_positions.unsqueeze(1)  # (E, N, N, 2)
-    _adist = (_diff**2).sum(dim=-1).sqrt()  # (E, N, N)
-    _eye = torch.eye(new_positions.shape[1], device=new_positions.device, dtype=torch.bool)
-    _adist = torch.where(
-        _eye.unsqueeze(0) | ~state.active_mask.unsqueeze(1),
-        torch.tensor(float("inf"), device=new_positions.device),
-        _adist,
-    )
-    agent_distances = _adist.min(dim=2).values  # (E, N)
 
     rewards, reached_goal, new_goal_distances = compute_rewards(
         new_positions,
@@ -150,7 +141,6 @@ def batched_step(
         state.prev_goal_distances,
         config,
         wall_distances=wall_distances,
-        agent_distances=agent_distances,
         agent_radii=agent_radii,
         actions=actions,
         prev_actions=state.prev_actions,
