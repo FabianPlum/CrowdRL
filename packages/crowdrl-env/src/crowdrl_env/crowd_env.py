@@ -101,6 +101,22 @@ class CrowdEnvConfig:
     max_steps: int = 5000
     """Maximum timesteps per episode."""
 
+    # Stuck-agent termination
+    stuck_termination_enabled: bool = False
+    """When True, terminate individual agents that fail to make progress
+    toward their goal over a rolling window. Applies a timeout penalty
+    (same as episode truncation) and removes the agent from the episode
+    without waiting for the full max_steps budget."""
+
+    stuck_window_steps: int = 300
+    """Length of the rolling stuck-detection window, in simulation steps."""
+
+    stuck_progress_threshold: float = 0.2
+    """Minimum goal-distance reduction required within the stuck window
+    (metres). Agents reducing their goal distance by less than this over
+    ``stuck_window_steps`` consecutive steps are terminated as stuck.
+    Only applied when ``stuck_termination_enabled`` is True."""
+
 
 class CrowdEnv(gym.Env):
     """Multi-agent pedestrian navigation environment.
@@ -142,6 +158,12 @@ class CrowdEnv(gym.Env):
         self._step_count = 0
         self._n_agents = 0
 
+        # Stuck-agent tracking (rolling progress window). Mirrors the torch
+        # implementation in crowdrl_torch.step; see CrowdEnvConfig for the
+        # three knobs that control it.
+        self._stuck_window_step: NDArray[np.int32] | None = None
+        self._stuck_window_start_dist: NDArray[np.float64] | None = None
+
     @property
     def n_agents(self) -> int:
         """Current number of agents in the episode."""
@@ -176,6 +198,10 @@ class CrowdEnv(gym.Env):
         # Initialise reward state
         goal_distances = np.linalg.norm(world.goal_positions - world.positions, axis=1)
         self._reward_state.reset(self._n_agents, goal_distances)
+
+        # Initialise stuck-agent tracking (start dist = initial goal dist)
+        self._stuck_window_step = np.zeros(self._n_agents, dtype=np.int32)
+        self._stuck_window_start_dist = goal_distances.copy()
 
         # Build initial observations
         obs = self._build_all_observations()
@@ -306,9 +332,36 @@ class CrowdEnv(gym.Env):
         # Zero out velocities for inactive agents
         self._world.velocities[~self._active_mask] = 0.0
 
+        # --- 6b. Stuck-agent termination (rolling progress window) ---
+        truncated = np.zeros(self._n_agents, dtype=np.bool_)
+        if (
+            cfg.stuck_termination_enabled
+            and self._stuck_window_step is not None
+            and self._stuck_window_start_dist is not None
+        ):
+            new_goal_distances = np.linalg.norm(
+                self._world.goal_positions - self._world.positions, axis=1
+            )
+            inc_mask = self._active_mask.copy()
+            self._stuck_window_step[inc_mask] += 1
+
+            window_full = self._stuck_window_step >= cfg.stuck_window_steps
+            progress = self._stuck_window_start_dist - new_goal_distances
+            stuck_mask = window_full & inc_mask & (progress < cfg.stuck_progress_threshold)
+            reset_mask = window_full & inc_mask & ~stuck_mask
+
+            # Apply timeout penalty and mark truncated
+            rewards[stuck_mask] += cfg.reward.timeout_penalty
+            truncated[stuck_mask] = True
+            self._active_mask[stuck_mask] = False
+            self._world.velocities[stuck_mask] = 0.0
+
+            # Reset window for non-stuck window-full agents
+            self._stuck_window_step[window_full & inc_mask] = 0
+            self._stuck_window_start_dist[reset_mask] = new_goal_distances[reset_mask]
+
         # --- 7. Termination / truncation ---
         terminated = reached_goal.copy()
-        truncated = np.zeros(self._n_agents, dtype=np.bool_)
 
         episode_over = False
         if self._step_count >= cfg.max_steps:
