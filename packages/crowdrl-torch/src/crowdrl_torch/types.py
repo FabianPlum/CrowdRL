@@ -84,6 +84,13 @@ class TorchWorldState:
     pos_history: Tensor  # (E, N, W+1, 2) float32 — ring buffer of positions
     gdist_history: Tensor  # (E, N, W+1) float32 — ring buffer of goal distances
 
+    # Neighbor memory state: persistent per-agent neighbor slot assignments.
+    # Updated once per step by sensing.match_persistent_neighbors so that
+    # neighbor identity stays stable across steps, which is the prerequisite
+    # for per-neighbor temporal memory features (commits 3-5 of the
+    # neighbor-memory plan). All -1 when neighbor memory is disabled.
+    neighbor_ids: Tensor  # (E, N, K) int32 -- global agent index or -1
+
     def clone(self) -> "TorchWorldState":
         """Return a copy with all tensors cloned (breaks CUDA graph aliasing)."""
         return TorchWorldState(
@@ -224,6 +231,7 @@ def make_initial_state(
     max_segments: int = 128,
     max_waypoints: int = 16,
     memory_window: int = 50,
+    k_neighbours: int = 8,
     device: torch.device | str = "cpu",
 ) -> TorchWorldState:
     """Create a zeroed-out TorchWorldState with the given sizes.
@@ -232,6 +240,10 @@ def make_initial_state(
     history (buffer has ``memory_window + 1`` slots). Passing a value that
     differs from the config at runtime will silently miscompute the memory
     features, so prefer to derive it from the same EnvConfig field.
+
+    ``k_neighbours`` sizes the persistent neighbor-ID table. Prefer to pass
+    the same value used by the observation builder so the table and the
+    social obs channel stay aligned.
     """
     buf_size = memory_window + 1
     return TorchWorldState(
@@ -284,5 +296,8 @@ def make_initial_state(
         ),
         gdist_history=torch.zeros(
             (n_envs, max_agents, buf_size), dtype=torch.float32, device=device
+        ),
+        neighbor_ids=torch.full(
+            (n_envs, max_agents, k_neighbours), -1, dtype=torch.int32, device=device
         ),
     )

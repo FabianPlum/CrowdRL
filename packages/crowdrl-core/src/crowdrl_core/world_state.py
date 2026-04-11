@@ -142,6 +142,21 @@ class WorldState:
     ring buffers.
     """
 
+    # --- Neighbor memory state (optional; populated when ObsConfig.use_neighbor_memory is True) ---
+
+    neighbor_ids: NDArray[np.int32] | None = None
+    """(n_agents, K) -- persistent neighbor slot assignments. Each row holds
+    the global agent indices of the K neighbors currently tracked by ego
+    agent i, or -1 for empty slots. Unlike the per-step KNN used by
+    ``knn_social``, these IDs remain stable across timesteps so long as the
+    assigned neighbor stays within sensing range -- enabling per-neighbor
+    temporal memory lookups (velocity history, trajectory features).
+
+    Updated once per step by ``sensing.match_persistent_neighbors`` after
+    the new positions are computed. See ``plan/neighbor_memory_extension.md``
+    for the greedy matching algorithm and the rationale.
+    """
+
     @property
     def n_agents(self) -> int:
         return self.positions.shape[0]

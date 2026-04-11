@@ -320,6 +320,7 @@ def batched_step(
         cumulative_path_length=new_cumulative_path_length,
         pos_history=new_pos_history,
         gdist_history=new_gdist_history,
+        neighbor_ids=state.neighbor_ids,
     )
 
     # --- 13. Build observations ---

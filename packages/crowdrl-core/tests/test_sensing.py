@@ -3,7 +3,12 @@
 import numpy as np
 from shapely.geometry import Polygon
 
-from crowdrl_core.sensing import RaycastConfig, cast_rays, knn_social
+from crowdrl_core.sensing import (
+    RaycastConfig,
+    cast_rays,
+    knn_social,
+    match_persistent_neighbors,
+)
 from conftest import make_world_state
 
 
@@ -184,3 +189,121 @@ class TestKNNSocial:
         assert abs(social[0, 0] - 2.0) < 1e-6
         # Second slot should be empty
         np.testing.assert_array_equal(social[1], np.zeros(7))
+
+
+class TestMatchPersistentNeighbors:
+    """Persistent-neighbor matching keeps neighbor identity stable across steps.
+
+    See ``plan/neighbor_memory_extension.md`` section 2.1 for the rationale.
+    """
+
+    def test_first_step_fills_slots_with_nearest(self):
+        """On the first step (all prev_slots == -1), the function degenerates
+        to standard KNN -- each ego gets the k nearest active agents, sorted
+        by distance, in its slot table."""
+        positions = np.array(
+            [[0.0, 0.0], [1.0, 0.0], [3.0, 0.0], [2.0, 0.0], [5.0, 0.0]],
+            dtype=np.float64,
+        )
+        n = positions.shape[0]
+        prev = np.full((n, 3), -1, dtype=np.int32)
+        active = np.ones(n, dtype=np.bool_)
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=10.0, k=3)
+
+        # Agent 0 at (0,0): nearest are 1 @ dist 1, 3 @ dist 2, 2 @ dist 3
+        assert slots[0, 0] == 1
+        assert slots[0, 1] == 3
+        assert slots[0, 2] == 2
+
+    def test_retains_stable_neighbor(self):
+        """A neighbor already assigned a slot and still in range keeps its
+        slot, even if another agent is now closer -- that's the whole point
+        of persistent matching."""
+        # Agent 0 at origin. Initially slot 0 = agent 2 (dist 3).
+        # Then agent 1 appears closer (dist 1), but slot 0 should still
+        # point to agent 2 because it's still in range.
+        positions = np.array([[0.0, 0.0], [1.0, 0.0], [3.0, 0.0]], dtype=np.float64)
+        prev = np.array([[2, -1], [-1, -1], [-1, -1]], dtype=np.int32)
+        active = np.ones(3, dtype=np.bool_)
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=10.0, k=2)
+
+        # Slot 0 must still be agent 2 (stable)
+        assert slots[0, 0] == 2
+        # Slot 1 was empty; should now hold the nearest unassigned = agent 1
+        assert slots[0, 1] == 1
+
+    def test_evicts_out_of_range_neighbor(self):
+        """A previously-assigned neighbor that moved beyond sensing_radius
+        gets evicted and replaced with the nearest in-range agent."""
+        positions = np.array([[0.0, 0.0], [1.0, 0.0], [10.0, 0.0]], dtype=np.float64)
+        # Agent 0 had agent 2 in slot 0, but agent 2 is now 10m away
+        # and our sensing_radius is 5m -> evicted. Slot 0 should be
+        # refilled with agent 1 (the nearest remaining in-range agent).
+        prev = np.array([[2, -1], [-1, -1], [-1, -1]], dtype=np.int32)
+        active = np.ones(3, dtype=np.bool_)
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=5.0, k=2)
+
+        # Agent 2 evicted, slot 0 refilled with nearest in-range = agent 1
+        assert slots[0, 0] == 1
+        # Slot 1 left empty (no other candidates within range)
+        assert slots[0, 1] == -1
+
+    def test_evicts_inactive_neighbor(self):
+        """If a previously-assigned neighbor became inactive (e.g. reached
+        its goal), it is evicted even if still close."""
+        positions = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=np.float64)
+        prev = np.array([[1, -1], [-1, -1], [-1, -1]], dtype=np.int32)
+        active = np.array([True, False, True])
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=10.0, k=2)
+
+        # Agent 1 is inactive -> evicted from slot 0
+        # Agent 2 is the nearest remaining active neighbor -> fills slot 0
+        assert slots[0, 0] == 2
+        assert slots[0, 1] == -1
+
+    def test_no_duplicate_slot_assignments(self):
+        """Filling empty slots must never assign the same neighbor to two
+        slots of the same ego."""
+        n = 6
+        positions = np.array(
+            [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0]],
+            dtype=np.float64,
+        )
+        prev = np.full((n, 3), -1, dtype=np.int32)
+        active = np.ones(n, dtype=np.bool_)
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=10.0, k=3)
+
+        for i in range(n):
+            assigned = [s for s in slots[i] if s >= 0]
+            assert len(assigned) == len(set(assigned)), (
+                f"Duplicate assignment in row {i}: {slots[i]}"
+            )
+
+    def test_inactive_ego_row_is_all_negative_one(self):
+        """An inactive ego agent's slot row must be all -1."""
+        positions = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=np.float64)
+        prev = np.array([[1, 2], [0, 2], [0, 1]], dtype=np.int32)
+        active = np.array([False, True, True])
+
+        slots = match_persistent_neighbors(positions, prev, active, sensing_radius=10.0, k=2)
+
+        np.testing.assert_array_equal(slots[0], np.array([-1, -1], dtype=np.int32))
+
+    def test_multistep_stability(self):
+        """Across multiple steps with agents moving slowly, a neighbor that
+        stays in range keeps the same slot number throughout."""
+        # Two agents initially 1m apart, agent 1 drifts to 2m, 3m, 4m
+        # from agent 0. Slot 0 should always hold agent 1.
+        prev = np.array([[-1, -1], [-1, -1]], dtype=np.int32)
+        active = np.ones(2, dtype=np.bool_)
+
+        for drift in [1.0, 2.0, 3.0, 4.0]:
+            positions = np.array([[0.0, 0.0], [drift, 0.0]], dtype=np.float64)
+            prev = match_persistent_neighbors(positions, prev, active, sensing_radius=5.0, k=2)
+            assert prev[0, 0] == 1, f"At drift {drift}, slot 0 lost stable assignment"
+            assert prev[1, 0] == 0

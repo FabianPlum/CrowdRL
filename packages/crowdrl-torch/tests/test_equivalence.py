@@ -24,6 +24,7 @@ from crowdrl_torch.observation import build_observations as torch_build_observat
 from crowdrl_torch.reward import compute_rewards as torch_compute_rewards
 from crowdrl_torch.sensing import cast_rays as torch_cast_rays
 from crowdrl_torch.sensing import knn_social as torch_knn_social
+from crowdrl_torch.sensing import match_persistent_neighbors as torch_match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig
 from crowdrl_torch.walls import point_in_polygon, points_to_segments_nearest
 
@@ -304,6 +305,73 @@ class TestSensingEquivalence:
 
         n = world.n_agents
         npt.assert_allclose(torch_social[0, :n].numpy(), np_social, atol=ATOL, rtol=RTOL)
+
+    def test_match_persistent_neighbors(self):
+        """Numpy and torch match_persistent_neighbors must agree bit-for-bit
+        on a deterministic fixture covering all four scenarios: first step
+        fill, stable retention, out-of-range eviction, inactive eviction."""
+        from crowdrl_core.sensing import match_persistent_neighbors as np_match
+
+        # Hand-built 6-agent scene. Agents live on a line at x = 0..5.
+        # Agent 2 sits in an initially-valid slot of agent 0 but is about
+        # to go inactive (simulates goal reach).
+        n = 6
+        positions = np.array(
+            [[0.0, 0.0], [1.2, 0.0], [2.0, 0.0], [3.5, 0.0], [6.0, 0.0], [9.0, 0.0]],
+            dtype=np.float32,
+        )
+        K = 3
+        prev_np = np.array(
+            [
+                [2, 4, -1],  # agent 0: slot 0 -> inactive below, slot 1 -> out of range below
+                [0, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        active_np = np.array([True, True, False, True, True, True])  # agent 2 inactive
+        sensing_radius = 5.0
+
+        # NumPy reference
+        np_slots = np_match(
+            positions.astype(np.float64),
+            prev_np,
+            active_np,
+            sensing_radius=sensing_radius,
+            k=K,
+        )
+
+        # PyTorch (E=1)
+        config = EnvConfig(max_agents=n, k_neighbours=K)
+        torch_positions = torch.tensor(positions, dtype=torch.float32).unsqueeze(0)
+        torch_prev = torch.tensor(prev_np, dtype=torch.int32).unsqueeze(0)
+        torch_active = torch.tensor(active_np, dtype=torch.bool).unsqueeze(0)
+        torch_nagents = torch.tensor([n], dtype=torch.int32)
+
+        torch_slots = torch_match_persistent_neighbors(
+            torch_positions,
+            torch_prev,
+            torch_active,
+            torch_nagents,
+            sensing_radius=sensing_radius,
+            config=config,
+        )
+
+        npt.assert_array_equal(torch_slots[0].numpy(), np_slots)
+
+        # Sanity check the semantics independently of bit-equivalence:
+        # - agent 0's slot 0 (prev agent 2) is evicted because 2 is inactive
+        # - agent 0's slot 1 (prev agent 4 at dist 6) is evicted because out of range
+        # -> both slots should be refilled from the nearest in-range active set
+        #    = {1 (dist 1.2), 3 (dist 3.5)}, which are agents 1 and 3
+        slot0 = set(int(x) for x in np_slots[0] if x >= 0)
+        assert 1 in slot0, "nearest in-range active neighbor (agent 1) should be kept"
+        assert 3 in slot0, "second nearest (agent 3) should be kept"
+        assert 2 not in slot0, "inactive agent should be evicted"
+        assert 4 not in slot0, "out-of-range agent should be evicted"
 
 
 class TestObservationEquivalence:
