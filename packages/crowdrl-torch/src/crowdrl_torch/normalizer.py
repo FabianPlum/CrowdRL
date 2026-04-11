@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import Tensor
 
 if TYPE_CHECKING:
@@ -127,6 +128,44 @@ class TorchRunningNormalizer:
         self.mean = torch.tensor(state["mean"], dtype=torch.float64, device=self.device)
         self.var = torch.tensor(state["var"], dtype=torch.float64, device=self.device)
         self.count = state["count"]
+
+    def sync_across_ranks(self) -> None:
+        """Merge running statistics across DDP ranks via parallel Welford.
+
+        After calling, each rank holds the combined statistics as if all
+        data from every rank had been processed by a single normalizer.
+
+        No-op when ``torch.distributed`` is not initialised.
+
+        Note: called every rollout by default. For more complex curricula
+        where early-phase behaviour has stabilised, the caller may reduce
+        sync frequency to every K rollouts.
+        """
+        if not (dist.is_available() and dist.is_initialized()):
+            return
+
+        local_count = torch.tensor([self.count], dtype=torch.float64, device=self.device)
+
+        total_count = local_count.clone()
+        dist.all_reduce(total_count, op=dist.ReduceOp.SUM)
+
+        if total_count.item() < 1e-3:
+            return
+
+        # Weighted mean: sum(count_i * mean_i) / total_count
+        weighted_mean = self.mean * local_count
+        dist.all_reduce(weighted_mean, op=dist.ReduceOp.SUM)
+        new_mean = weighted_mean / total_count
+
+        # Parallel variance: sum(count_i * (var_i + (mean_i - new_mean)^2)) / total_count
+        delta = self.mean - new_mean
+        weighted_var = local_count * (self.var + delta**2)
+        dist.all_reduce(weighted_var, op=dist.ReduceOp.SUM)
+        new_var = weighted_var / total_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = total_count.item()
 
     @staticmethod
     def from_cpu_normalizer(
