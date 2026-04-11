@@ -138,7 +138,7 @@ Shared-parameter PPO with an actor-critic MLP. All agents share one policy netwo
 
 The reward function is the core scientific contribution. It operates in three tiers:
 
-- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (-1 per timestep in contact), proximity penalty (tunable, distance-based penalty that ramps up as agents approach each other, providing gradient signal to learn spacing behaviour before contact occurs), timeout penalty (-5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation. The proximity penalty is the reward-side counterpart to the physics-side decision not to include proximity repulsion forces (see Section 3.2, Physics): the environment enforces only physical constraints (contact, inertia), while spacing behaviour is learned through this reward term.
+- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (-1 per timestep in contact), proximity penalty (a graded linear ramp on centre-to-centre distance to the worst-offending neighbour: strongest at contact distance `r_i + r_j`, decaying to a near-zero value at an absolute `personal_space_radius` of 1 m, zero beyond; each agent pays the most-negative per-pair penalty across its active neighbours), timeout penalty (-5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation. The proximity penalty is the reward-side counterpart to the physics-side decision not to include proximity repulsion forces (see Section 3.2, Physics): the environment enforces only physical constraints (contact, inertia), while spacing behaviour is learned through this reward term. The graded-ramp form replaced an earlier binary "flat penalty inside a body-radius multiple" variant because the sharp threshold produced a discontinuous reward surface with zero gradient outside the critical zone.
 - **Tier 2 — Smoothness priors.** Acceleration penalty (penalise jerk and angular acceleration), preferred-speed deviation penalty. These regularise the motion toward physically plausible trajectories without using any human data.
 - **Tier 3 — Trajectory-matching from real data.** This is where IAS-7’s experimental data becomes an unfair advantage. Using trajectory datasets from PeTrack experiments (bottleneck flow, counterflow, unidirectional flow), compute distributional statistics: velocity autocorrelation functions, neighbour-distance distributions, angular change distributions. Define a style reward that penalises deviations from these distributions at the population level. This is not imitation learning on individual trajectories (which would overfit to specific experiments) but distributional matching—the agent should produce trajectories that are statistically indistinguishable from real pedestrians.
 
@@ -767,6 +767,216 @@ Full 200-rollout training run (`examples/06_full_training.ipynb`) with all tiers
 - [ ] Document emergent behaviours from 200-rollout run (M4)
 - [ ] Run longer training (500+ rollouts) to push curriculum to later phases
 - [ ] Quantify emergent phenomena: lane formation, shoulder turning, gap exploitation
+
+**Medium-term:**
+- [ ] Geometry Tiers 4-5 (building floors, multi-floor evacuation)
+- [ ] External geometry importer (IAS-7 test geometries)
+- [ ] Tier 3 reward (distributional style matching from PeTrack data)
+
+**Deployment:**
+- [ ] crowdrl-jupedsim package (ONNX runtime adapter)
+- [ ] Integration tests (obs parity between training and deployment)
+
+## 2026-04-11 -- Graded proximity ramp, single-node DDP, rollout carry-over
+
+### Graded agent-proximity ramp (crowdrl-env + crowdrl-torch)
+
+Replaced the previous binary agent-proximity penalty (flat `-0.005` inside a
+`2.0 * agent_radius` threshold) with a **graded linear ramp on the
+centre-to-centre distance to the worst-offending neighbour**. The new form
+has three config fields on `RewardConfig` / `EnvConfig`:
+
+| Field | Default | Role |
+|-------|---------|------|
+| `agent_proximity_penalty_near` | -0.005 | Per-pair penalty at contact (`r_i + r_j`) |
+| `agent_proximity_penalty_far`  | -0.0001 | Per-pair penalty right at `personal_space_radius` |
+| `personal_space_radius`        | 1.0 m   | Absolute centre-to-centre cutoff (not body-relative) |
+
+Each ordered pair `(i, j)` contributes
+`pair_penalty = (1 - t) * near + t * far` with
+`t = clip((d_ij - contact) / (personal_space_radius - contact), 0, 1)`.
+Each agent pays `min over j of pair_penalty_ij` -- the **worst** per-neighbour
+penalty in its personal-space zone. This tracks the closest encroachment
+rather than summing over density, and provides a continuous gradient all
+the way from 1 m out to contact (the old binary form was flat inside and
+had no gradient outside, so the policy only learned the threshold, not the
+distance).
+
+The per-pair distance computation now lives inside `compute_rewards` itself
+(both the NumPy path in `crowdrl-env/reward.py` and the vectorised torch
+path in `crowdrl-torch/reward.py`). The `agent_distances` parameter was
+removed from both signatures; callers no longer compute a scalar
+"min distance per agent" outside the reward function.
+
+### Reward weight re-tuning
+
+While touching the reward module, the other weights were aligned with the
+current training runs rather than the stale values in the docs:
+
+| Field | Old default | New default |
+|-------|-------------|-------------|
+| `wall_proximity_penalty` | -0.3 | -0.1 |
+| `progress_weight` | 0.1 | 1.0 |
+| `jerk_penalty_weight` | -0.01 | -1e-6 |
+| `angular_accel_penalty_weight` | -0.005 | -1e-4 |
+| `speed_deviation_weight` | -0.03 | -1e-3 |
+
+The smoothness weights are deliberately tiny so they regularise without
+overriding collision/progress in congested scenarios. `progress_weight` at
+1.0 (rather than 0.1) makes the potential-based shaping term comparable in
+magnitude to the goal bonus over an episode, which visibly accelerates
+learning in the early curriculum phases.
+
+`docs/environment_mechanics.md` and `docs/agent_pipeline.md` reward tables,
+budget breakdown, and Section B.1 / 8.3 have been rewritten to match.
+
+### Single-node multi-GPU training via DD-PPO
+
+Added a DD-PPO-style distributed training path (Wijmans et al. 2019)
+without moving to the standard PyTorch `DistributedDataParallel` wrapper.
+Rationale: the actor is invoked via `evaluate_actions()` (re-scoring the
+rollout actions for the PPO log-ratio), not through `forward()`, so DDP's
+autograd hooks would not fire on the rollout minibatches. A manual
+gradient all-reduce is both explicit and matches the pattern CleanRL uses
+for PPO.
+
+**New module:** `packages/crowdrl-torch/src/crowdrl_torch/distributed.py`
+
+| Helper | Purpose |
+|--------|---------|
+| `init_distributed(backend="nccl")` / `cleanup_distributed()` | Process group lifecycle driven by `torchrun` env vars |
+| `is_distributed` / `is_main_rank` / `get_rank` / `get_world_size` | Rank queries with single-process fall-backs |
+| `allreduce_gradients(model)` | Flatten all `.grad` tensors into one contiguous buffer, single `all_reduce(SUM)`, divide by world size, unflatten |
+| `TorchRunningNormalizer.sync_across_ranks()` | Parallel Welford merge of obs-normaliser mean / var / count |
+| `sync_reward_normalizer(rn, device)` | Same parallel Welford merge for the reward normalizer's return-variance tracker, plus averaged running return |
+| `gather_episode_stats(local)` | `all_gather_object` of per-rank episode dicts to rank 0 |
+| `broadcast_curriculum_state(mgr)` | Broadcast curriculum phase after rank 0 advancement decisions |
+| `distributed_seed(base)` / `seed_everything(seed)` | Per-rank seed helpers (env diversity, deterministic model init) |
+
+**Integration into `crowdrl-train/mappo.py`:**
+
+- `MAPPOUpdater` learned a `distributed: bool | None` flag (auto-detected
+  via `torch.distributed.is_initialized()` by default).
+- Every `actor_loss.backward()` and `critic_loss.backward()` is followed by
+  an inlined flat all-reduce before the optimiser step. Effective batch
+  becomes `local_batch * world_size`; no learning-rate scaling (matching
+  CleanRL convention).
+- **KL early-stopping fix:** under DDP each rank's minibatch produces a
+  different local approximate KL. If ranks early-stop independently, one
+  rank exits the epoch loop while another is still issuing gradient
+  all-reduces, deadlocking NCCL on mismatched collectives. The updater
+  now `all_reduce`s the KL tensor inside the loop and uses the **global**
+  KL for the early-stop decision, so all ranks agree. Two regression
+  tests live in `packages/crowdrl-train/tests/test_mappo.py` (subprocess
+  gloo groups with a spy on `dist.all_reduce`).
+
+**New frozen dataclass:** `DDPConfig(backend="nccl")` in
+`crowdrl_train.config`, exported from `crowdrl_train/__init__.py`.
+
+**Launch pattern:**
+`torchrun --standalone --nproc_per_node=N train_mappo.py`.
+
+Full design rationale, synchronisation table, and a usage snippet for the
+training loop are in `plan/ddp_single_node.md`.
+
+### Rollout collector: cross-collect episode carry-over
+
+Both `RolloutCollector` (CPU subproc path, `crowdrl-train`) and
+`TorchRolloutCollector` (GPU path, `crowdrl-torch`) previously called
+`env.reset_all()` at the start of **every** `collect()`. Any in-flight
+episode was discarded, wasting agent-steps and biasing recorded episode
+statistics toward short episodes that happen to fit inside one rollout.
+
+Both collectors now persist episode tracking state across `collect()`
+calls:
+
+- Initial reset is **lazy** (first `collect()` only); subsequent calls
+  reuse the existing env and episode trackers.
+- An episode that straddles a collect boundary counts the full episode
+  reward across both rollouts. Episode statistics now reflect real
+  episode lengths, not rollout-length caps.
+- A new "trailing incomplete segment" is bootstrapped from the critic at
+  the segment's **post-step** observation (`s_T`), not the already-normalised
+  `s_{T-1}` that used to sit in the buffer. `s_T` is normalised exactly once
+  at the end of `collect()` via a new `_final_obs_norm` field.
+- The torch collector slices each segment over the full `max_agents` axis
+  and relies on the per-step `active_mask` to select real agents, rather
+  than inferring `n_agents` from the first step (which broke for
+  carry-over segments where terminated agents can be scattered across the
+  row).
+- `BatchedTorchEnv` grew a per-env `env_tiers: list[str]` field that
+  records each env's current geometry tier (e.g. `"TIER_3B"`) on every
+  reset, and the collector attaches it as `ep_dict["geometry_tier"]` so
+  per-tier episode statistics are available without a new collective.
+- `BatchedTorchEnv._async_step()` rebuilds observations for envs whose
+  async reset completed mid-collect, so callers see the new episode's
+  initial obs instead of stale zeros.
+
+### Export wrapper device isolation fix
+
+`PolicyForExport` in `crowdrl_train/export.py` used to hold references to
+the actor's `feature_net` and `action_mean` modules. A downstream
+`wrapper.cpu()` (used in the ONNX export pipeline) would silently move the
+original actor's parameters to CPU, breaking any subsequent GPU operation
+on the training model. `PolicyForExport.__init__` now **deep-copies**
+both submodules so the wrapper and the live training actor are fully
+independent. Regression tests in
+`packages/crowdrl-train/tests/test_export.py` verify that `export_onnx`
+leaves the source actor on its original device with and without a
+normalizer.
+
+### New tests and CI
+
+- `packages/crowdrl-torch/tests/test_distributed.py` -- single-process no-op
+  checks for all distributed helpers (safe without `torchrun`).
+- `packages/crowdrl-train/tests/test_export.py` -- export wrapper device
+  isolation + numerical parity with the source actor.
+- `packages/crowdrl-train/tests/test_mappo.py` -- two new subprocess-based
+  DDP regression tests that spin up a single-rank `gloo` group and verify
+  the KL collective fires and the global KL is the one used for the
+  early-stop check.
+- `pyproject.toml`: `testpaths` extended to `["packages", "tests"]` so a
+  repo-root `tests/` directory can host cross-package integration tests.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `crowdrl-env/reward.py` | Graded proximity ramp (three new config fields), removed `agent_distances` arg |
+| `crowdrl-env/crowd_env.py` | Drop `compute_min_agent_distances` call (pair distances now live in `compute_rewards`) |
+| `crowdrl-torch/reward.py` | Vectorised graded proximity ramp; drop `agent_distances` arg |
+| `crowdrl-torch/step.py` | Drop pairwise distance computation; `compute_rewards` now handles it |
+| `crowdrl-torch/types.py` | `EnvConfig`: new `agent_proximity_penalty_near/_far/personal_space_radius` fields |
+| `crowdrl-torch/distributed.py` | **New** -- DDP lifecycle, grad sync, normalizer sync, curriculum broadcast |
+| `crowdrl-torch/normalizer.py` | `TorchRunningNormalizer.sync_across_ranks()` -- parallel Welford merge |
+| `crowdrl-torch/batched_env.py` | Per-env `env_tiers`, post-reset obs rebuild, tier name threaded through async resets |
+| `crowdrl-torch/torch_collector.py` | Cross-collect episode carry-over, full-N slicing, post-step bootstrap, per-tier stats |
+| `crowdrl-torch/__init__.py` | Re-export DDP helpers |
+| `crowdrl-train/config.py` | **New** `DDPConfig` frozen dataclass |
+| `crowdrl-train/__init__.py` | Re-export `DDPConfig` |
+| `crowdrl-train/mappo.py` | `distributed` flag, global KL early stop, inline grad all-reduce |
+| `crowdrl-train/rollout_collector.py` | Cross-collect episode carry-over, post-step bootstrap |
+| `crowdrl-train/export.py` | Deep-copy actor modules inside `PolicyForExport` |
+| `crowdrl-train/tests/test_mappo.py` | +2 DDP regression tests (subprocess gloo) |
+| `crowdrl-train/tests/test_export.py` | **New** -- export wrapper device isolation |
+| `crowdrl-torch/tests/test_distributed.py` | **New** -- DDP no-op tests |
+| `pyproject.toml` | `testpaths = ["packages", "tests"]` |
+| `plan/ddp_single_node.md` | **New** -- DDP design doc |
+| `docs/environment_mechanics.md` | Reward values, B.1 / B.6 / B.7 rewrite, appendix table |
+| `docs/agent_pipeline.md` | Reward tables, Section 8 expansion (proximity ramp, carry-over, DDP, export fix) |
+
+### What remains
+
+Most of the list from 2026-03-31 still stands. The current run in
+`examples/06_full_training.ipynb` needs to be re-executed against the new
+reward surface before its results become the canonical baseline for M4
+emergent-phenomena analysis.
+
+**Immediate:**
+- [ ] Re-run `examples/06_full_training.ipynb` with the graded proximity
+      ramp and re-tuned reward weights
+- [ ] Document emergent behaviours once the new baseline is in
+- [ ] Shake-down a real 2+ GPU DDP run on the HPC cluster (single-node)
 
 **Medium-term:**
 - [ ] Geometry Tiers 4-5 (building floors, multi-floor evacuation)
