@@ -140,6 +140,9 @@ class CurriculumManager:
             contact_damping=base_config.contact_damping,
             velocity_damping=base_config.velocity_damping,
             max_steps=base_config.max_steps,
+            stuck_termination_enabled=base_config.stuck_termination_enabled,
+            stuck_window_steps=base_config.stuck_window_steps,
+            stuck_progress_threshold=base_config.stuck_progress_threshold,
         )
 
     def state_dict(self) -> dict:
