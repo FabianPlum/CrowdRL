@@ -118,29 +118,37 @@ class RolloutCollector:
 
         Transitions are stored in per-env buffers (not interleaved).
         Returns a list of completed-episode stat dicts.
+
+        Episodes that do not finish within a single ``collect()`` call are
+        carried over to the next call via ``self._env_states``, so no
+        agent-steps are wasted and recorded episode statistics reflect real
+        episodes rather than a biased short-episode tail.
         """
         completed_episodes: list[dict] = []
         steps_collected = 0
 
-        # Clear all buffers
+        # Clear per-collect buffers (they only hold the current rollout's
+        # transitions; env-side episode state persists across collects).
         for buf in self._buffers:
             buf.clear()
 
-        # Reset all envs and init per-env state
-        reset_results = self.vec_env.reset_all()
-        self._env_states = []
-        for obs, info in reset_results:
-            n_agents = info["n_agents"]
-            self._env_states.append(
-                _EnvState(
-                    obs=obs,
-                    n_agents=n_agents,
-                    active_mask=np.ones(n_agents, dtype=np.bool_),
-                    cumulative_terminated=np.zeros(n_agents, dtype=np.bool_),
-                    episode_rewards=np.zeros(n_agents, dtype=np.float64),
-                    info=info,
+        # Lazy one-time initialisation: reset envs on the first call only.
+        # Subsequent calls reuse the persistent _env_states so in-progress
+        # episodes survive the collect boundary.
+        if not self._env_states:
+            reset_results = self.vec_env.reset_all()
+            for obs, info in reset_results:
+                n_agents = info["n_agents"]
+                self._env_states.append(
+                    _EnvState(
+                        obs=obs,
+                        n_agents=n_agents,
+                        active_mask=np.ones(n_agents, dtype=np.bool_),
+                        cumulative_terminated=np.zeros(n_agents, dtype=np.bool_),
+                        episode_rewards=np.zeros(n_agents, dtype=np.float64),
+                        info=info,
+                    )
                 )
-            )
 
         # Collection loop
         while steps_collected < n_agent_steps:
@@ -264,6 +272,10 @@ class RolloutCollector:
                 else:
                     es.obs = sr.obs
 
+        # Store post-step observations for bootstrap (correct s_T,
+        # not the already-normalized s_{T-1} sitting in buf._obs[-1]).
+        self._last_raw_obs = [es.obs.copy() for es in self._env_states]
+
         # Collect any remaining pending resets so state is clean
         self._finish_pending_resets()
 
@@ -301,8 +313,10 @@ class RolloutCollector:
                 last_values = np.zeros(n_agents, dtype=np.float64)
                 last_dones = np.ones(n_agents, dtype=np.bool_)
             else:
-                # Last episode is incomplete — bootstrap from critic
-                last_obs = buf._obs[-1]
+                # Last episode is incomplete — bootstrap from critic.
+                # Use the raw post-step observation (correct s_T), not the
+                # already-normalized s_{T-1} in buf._obs[-1].
+                last_obs = self._last_raw_obs[i]
                 if self.obs_normalizer is not None:
                     last_obs = self.obs_normalizer.normalize(last_obs)
                 with torch.no_grad():
