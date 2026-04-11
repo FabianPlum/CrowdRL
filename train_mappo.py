@@ -112,6 +112,7 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
     obs = cfg.get("observation", {})
     act = cfg.get("action", {})
     rew = cfg.get("reward", {})
+    ep = cfg.get("episode", {})
 
     return CrowdEnvConfig(
         geometry=GeometryConfig(
@@ -142,6 +143,9 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             action_rate_weight=rew.get("action_rate_weight", -0.01),
         ),
         max_steps=cfg.get("max_steps", 2000),
+        stuck_termination_enabled=ep.get("stuck_termination_enabled", False),
+        stuck_window_steps=ep.get("stuck_window_steps", 300),
+        stuck_progress_threshold=ep.get("stuck_progress_threshold", 0.2),
     )
 
 
