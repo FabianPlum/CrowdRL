@@ -41,16 +41,27 @@ class RewardConfig:
     wall_proximity_threshold: float = 1.5
     """Wall proximity threshold as a multiple of agent radius."""
 
-    # Agent proximity penalty (learned collision avoidance)
-    agent_proximity_penalty: float = -0.005
-    """Penalty applied per step when another agent is within the proximity
-    threshold.  This is a reward signal, NOT a physics force -- it teaches
-    the policy to maintain personal space rather than prescribing a
-    deterministic repulsion law.  See Project Plan v6, Section 3.2."""
+    # Agent proximity penalty (graded linear ramp, learned collision avoidance)
+    # The penalty per step is linearly interpolated on the center-to-center
+    # distance between an agent and its nearest active neighbour:
+    #   - at contact distance (r_i + r_j): ``agent_proximity_penalty_near``
+    #   - at ``personal_space_radius``:    ``agent_proximity_penalty_far``
+    #   - beyond ``personal_space_radius``: no penalty
+    # This provides a continuous gradient for the policy to maintain personal
+    # space, while the binary ``collision_penalty`` handles the hard "you
+    # touched someone" signal on top. See Project Plan v6, Section 3.2.
+    agent_proximity_penalty_near: float = -0.005
+    """Strongest proximity penalty magnitude, applied when agents are at
+    contact distance (sum of body radii, center-to-center)."""
 
-    agent_proximity_threshold: float = 2.0
-    """Agent proximity threshold as a multiple of agent radius.  Agents
-    within ``radius * threshold`` of each other receive the penalty."""
+    agent_proximity_penalty_far: float = -0.0001
+    """Weakest proximity penalty magnitude, applied when agents are right at
+    the ``personal_space_radius`` boundary."""
+
+    personal_space_radius: float = 1.0
+    """Absolute center-to-center distance (metres) at which the proximity
+    penalty first kicks in. Decoupled from body dimensions so the ramp has
+    a meaningful approach zone regardless of agent size."""
 
     # Action rate penalty
     action_rate_weight: float = 0.0
@@ -137,7 +148,6 @@ def compute_rewards(
     dt: float,
     *,
     wall_distances: NDArray[np.float64] | None = None,
-    agent_distances: NDArray[np.float64] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
     actions: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
@@ -156,8 +166,8 @@ def compute_rewards(
     config : RewardConfig
     dt : float — timestep duration
     wall_distances : (n_agents,) optional — min distance to nearest wall per agent
-    agent_distances : (n_agents,) optional — min distance to nearest other agent
-    agent_radii : (n_agents,) optional — agent body radii (for proximity thresholds)
+    agent_radii : (n_agents,) optional — agent body radii (used for the
+        graded agent-proximity penalty: contact distance = r_i + r_j)
     actions : (n_agents, action_dim) optional — raw policy output this step
 
     Returns
@@ -191,15 +201,38 @@ def compute_rewards(
         wall_proximity = (wall_distances < threshold) & active_mask
         rewards[wall_proximity] += config.wall_proximity_penalty
 
-    # Agent proximity penalty (learned collision avoidance signal)
+    # Agent proximity penalty (graded linear ramp, min over neighbours).
+    # Penalty interpolates between ``near`` (at contact, r_i + r_j) and
+    # ``far`` (at personal_space_radius). Each agent pays the penalty of its
+    # most-penalised neighbour inside the zone.
     if (
-        config.agent_proximity_penalty != 0.0
-        and agent_distances is not None
+        (config.agent_proximity_penalty_near != 0.0 or config.agent_proximity_penalty_far != 0.0)
         and agent_radii is not None
+        and n_agents >= 2
     ):
-        threshold = agent_radii * config.agent_proximity_threshold
-        too_close = (agent_distances < threshold) & active_mask
-        rewards[too_close] += config.agent_proximity_penalty
+        # Pairwise center-to-center distances (n, n)
+        diff = positions[np.newaxis, :, :] - positions[:, np.newaxis, :]
+        pair_dist = np.sqrt(np.sum(diff**2, axis=-1))
+
+        # Per-pair contact distance r_i + r_j (n, n)
+        pair_contact = agent_radii[:, np.newaxis] + agent_radii[np.newaxis, :]
+
+        # Linear interpolation factor t in [0, 1]: 0 at contact, 1 at boundary.
+        denom = np.maximum(config.personal_space_radius - pair_contact, 1e-6)
+        t = np.clip((pair_dist - pair_contact) / denom, 0.0, 1.0)
+        pair_penalty = (1.0 - t) * config.agent_proximity_penalty_near + (
+            t * config.agent_proximity_penalty_far
+        )
+
+        # Mask: no self-pairs, only active-active pairs, only pairs inside zone.
+        eye = np.eye(n_agents, dtype=np.bool_)
+        valid_pair = (~eye) & active_mask[:, np.newaxis] & active_mask[np.newaxis, :]
+        in_zone = pair_dist < config.personal_space_radius
+        pair_penalty = np.where(valid_pair & in_zone, pair_penalty, 0.0)
+
+        # Per-agent: most-negative penalty from any neighbour.
+        proximity = pair_penalty.min(axis=1)
+        rewards[active_mask] += proximity[active_mask]
 
     # Action rate penalty (change in raw policy output between steps)
     if config.action_rate_weight != 0.0 and actions is not None:
