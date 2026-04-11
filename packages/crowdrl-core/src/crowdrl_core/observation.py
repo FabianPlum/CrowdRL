@@ -113,6 +113,18 @@ class ObsConfig:
     when ``use_neighbor_memory`` is True.
     """
 
+    use_neighbor_vel_history: bool = False
+    """Whether to emit the (+K*2 = 16D) neighbor velocity-history feature
+    block: for each of the K persistent slots, the difference between the
+    neighbor's current velocity and its velocity W_n steps ago, rotated
+    into the current ego frame. This is an acceleration proxy -- positive
+    along the ego x-axis = neighbor accelerating forward relative to ego.
+
+    Requires ``use_neighbor_memory=True``. With both flags set, obs_dim
+    grows by K*2 (16 for K=8). Corresponds to the A+ ablation step in
+    plan/neighbor_memory_extension.md section 2.2.
+    """
+
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""
@@ -121,7 +133,12 @@ class ObsConfig:
         rays = self.raycast.n_rays * (2 if self.raycast.two_channel else 1)
         nav = 3 if self.use_navmesh else 0
         memory = 6 if self.use_temporal_memory else 0
-        return ego + social + rays + nav + memory
+        nb_vel = (
+            self.k_neighbours * 2
+            if (self.use_neighbor_memory and self.use_neighbor_vel_history)
+            else 0
+        )
+        return ego + social + rays + nav + memory + nb_vel
 
 
 def _temporal_features(
@@ -321,6 +338,10 @@ def build_observation(
     # --- Temporal memory (optional, 6D) ---
     if config.use_temporal_memory:
         parts.append(_per_agent_temporal_features(world, agent_idx, config, ego_pos, goal_dist))
+
+    # --- Neighbor velocity history (optional, K*2 D) ---
+    if config.use_neighbor_memory and config.use_neighbor_vel_history:
+        parts.append(_per_agent_neighbor_vel_history_features(world, agent_idx, config, rot))
 
     return np.concatenate(parts)
 
@@ -530,6 +551,43 @@ def build_observations_batch(
             window=W,
         )  # (M, 6)
         obs[active_idx, offset : offset + 6] = temporal
+        offset += 6
+
+    # --- Neighbor velocity history (batched, K*2 D) ---
+    if (
+        config.use_neighbor_memory
+        and config.use_neighbor_vel_history
+        and world.neighbor_ids is not None
+        and world.neighbor_vel_history is not None
+    ):
+        K = config.k_neighbours
+        W_n = config.neighbor_vel_history_window
+        nb_buf = W_n + 1
+        newest = (world.step_count - 1) % nb_buf
+        oldest = world.step_count % nb_buf
+
+        nb_ids_a = world.neighbor_ids[active_idx]  # (M, K)
+        hist_a = world.neighbor_vel_history[active_idx]  # (M, W_n+1, K, 2)
+        vel_now = hist_a[:, newest, :, :]  # (M, K, 2)
+        vel_old = hist_a[:, oldest, :, :]  # (M, K, 2)
+        diff_global = vel_now - vel_old  # (M, K, 2)
+
+        # Rotate each diff into ego frame: (M, K, 2) by per-M rotation.
+        diff_ex = (
+            cos_h[:, np.newaxis] * diff_global[..., 0] - sin_h[:, np.newaxis] * diff_global[..., 1]
+        )
+        diff_ey = (
+            sin_h[:, np.newaxis] * diff_global[..., 0] + cos_h[:, np.newaxis] * diff_global[..., 1]
+        )
+        diff_ego = np.stack([diff_ex, diff_ey], axis=-1)  # (M, K, 2)
+
+        # Mask empty slots
+        valid = nb_ids_a >= 0  # (M, K)
+        diff_ego = np.where(valid[..., np.newaxis], diff_ego, 0.0)
+
+        flat = diff_ego.reshape(M, K * 2)
+        obs[active_idx, offset : offset + K * 2] = flat
+        offset += K * 2
 
     return obs
 
@@ -543,3 +601,53 @@ def _memory_state_populated(world: WorldState) -> bool:
         and world.pos_history is not None
         and world.gdist_history is not None
     )
+
+
+def _per_agent_neighbor_vel_history_features(
+    world: WorldState,
+    agent_idx: int,
+    config: ObsConfig,
+    rot: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Compute the (K*2,) neighbor velocity-history feature block for one
+    agent. Returns the difference ``vel_now - vel_W_ago`` for each of the
+    K persistent slots, rotated into the current ego frame.
+
+    Empty slots (neighbor_ids == -1) return zeros. Until the ring buffer
+    fills (first W_n+1 steps), ``vel_W_ago`` is zero by reset-initialisation,
+    so the feature is just the current neighbor velocity -- a cautious
+    fallback that degrades gracefully.
+
+    The flat layout is (K * 2,): [slot_0_dx, slot_0_dy, slot_1_dx, ...].
+
+    Parameters
+    ----------
+    rot : (2, 2) -- precomputed global->ego rotation matrix for this agent.
+    """
+    if world.neighbor_ids is None or world.neighbor_vel_history is None:
+        return np.zeros(config.k_neighbours * 2, dtype=np.float64)
+
+    W_n = config.neighbor_vel_history_window
+    buf = W_n + 1
+
+    # Newest write index corresponds to the PRE-step step_count used by the
+    # scatter write, i.e. (world.step_count - 1) post-step. Read oldest at
+    # world.step_count % buf. Subtle: on a fresh reset where world.step_count
+    # is 0, the newest slot is buf-1 (holds zero, never written), and the
+    # oldest slot is 0 (also zero). Diff is zero -- correct.
+    newest = (world.step_count - 1) % buf
+    oldest = world.step_count % buf
+
+    nb_ids = world.neighbor_ids[agent_idx]  # (K,)
+    hist = world.neighbor_vel_history[agent_idx]  # (W_n+1, K, 2)
+    vel_now = hist[newest]  # (K, 2)
+    vel_old = hist[oldest]  # (K, 2)
+
+    diff_global = vel_now - vel_old  # (K, 2)
+    # Rotate each slot's diff into ego frame: (2, 2) @ (2,) per slot
+    diff_ego = diff_global @ rot.T  # (K, 2)
+
+    # Zero out empty slots
+    diff_ego = np.where(nb_ids[:, np.newaxis] >= 0, diff_ego, 0.0)
+
+    return diff_ego.flatten()

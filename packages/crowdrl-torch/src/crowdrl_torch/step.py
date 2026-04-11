@@ -409,6 +409,8 @@ def batched_step(
         gdist_history=new_state.gdist_history,
         preferred_speeds=new_state.preferred_speeds,
         step_count=step_count,
+        neighbor_ids=new_state.neighbor_ids,
+        neighbor_vel_history=new_state.neighbor_vel_history,
     )
 
     return new_state, observations, rewards, terminated, truncated

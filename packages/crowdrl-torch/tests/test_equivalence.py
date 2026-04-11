@@ -306,6 +306,123 @@ class TestSensingEquivalence:
         n = world.n_agents
         npt.assert_allclose(torch_social[0, :n].numpy(), np_social, atol=ATOL, rtol=RTOL)
 
+    def test_neighbor_vel_history_features(self):
+        """compute_neighbor_vel_history_features in torch must match the
+        numpy reference _per_agent_neighbor_vel_history_features.
+
+        We construct a hand-rolled WorldState / TorchWorldState pair with:
+          - 4 agents in a 2-agent-per-env x 2-env layout (E=1, N=4)
+          - A fully-populated ring buffer (all W_n+1 slots written)
+          - A mix of ego rotations so the frame change is non-trivial
+          - One empty slot so masking is exercised
+        and compare the per-agent feature blocks element-wise.
+        """
+        from crowdrl_core.observation import _per_agent_neighbor_vel_history_features
+        from crowdrl_core.sensing import RaycastConfig
+        from crowdrl_core.world_state import WorldState
+        from crowdrl_torch.observation import compute_neighbor_vel_history_features
+
+        rng = np.random.default_rng(7)
+        N = 4
+        K = 3
+        W_n = 2  # buf_size = 3
+        buf = W_n + 1
+
+        positions = rng.uniform(1.0, 9.0, (N, 2))
+        velocities = rng.uniform(-1.0, 1.0, (N, 2))
+        torso = rng.uniform(-np.pi, np.pi, N)
+        heads = torso.copy()
+        shoulder = np.full(N, 0.25)
+        chest = np.full(N, 0.18)
+        masses = np.full(N, 80.0)
+        goals = rng.uniform(1.0, 9.0, (N, 2))
+
+        wall_segments = np.array(
+            [
+                [[0, 0], [10, 0]],
+                [[10, 0], [10, 10]],
+                [[10, 10], [0, 10]],
+                [[0, 10], [0, 0]],
+            ],
+            dtype=np.float64,
+        )
+
+        # Fully-populated ring buffer. Fill each (W_n+1, K, 2) slot with a
+        # unique value so we can verify the rotation & diff work correctly.
+        nb_vel_history = rng.uniform(-1.0, 1.0, (N, buf, K, 2))
+
+        # Slot 2 of agent 0 is empty (-1). All other slots point to valid
+        # neighbors.
+        neighbor_ids = np.array(
+            [
+                [1, 2, -1],
+                [0, 2, 3],
+                [0, 1, 3],
+                [0, 1, 2],
+            ],
+            dtype=np.int32,
+        )
+
+        world = WorldState(
+            positions=positions,
+            velocities=velocities,
+            torso_orientations=torso,
+            head_orientations=heads,
+            shoulder_widths=shoulder,
+            chest_depths=chest,
+            masses=masses,
+            goal_positions=goals,
+            walkable_polygon=None,
+            wall_segments=wall_segments,
+            navmesh=None,
+            neighbor_ids=neighbor_ids,
+            neighbor_vel_history=nb_vel_history,
+            step_count=5,  # post-step, so newest = (5-1) % 3 = 1, oldest = 5 % 3 = 2
+        )
+
+        config_core = ObsConfig(
+            k_neighbours=K,
+            raycast=RaycastConfig(n_rays=16),
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            neighbor_vel_history_window=W_n,
+        )
+
+        # NumPy reference: per-agent with precomputed rotation
+        np_feats = np.zeros((N, K * 2), dtype=np.float64)
+        for i in range(N):
+            cos_h, sin_h = np.cos(-torso[i]), np.sin(-torso[i])
+            rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]], dtype=np.float64)
+            np_feats[i] = _per_agent_neighbor_vel_history_features(world, i, config_core, rot)
+
+        # Torch path
+        env_cfg = EnvConfig(
+            max_agents=N,
+            k_neighbours=K,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            neighbor_vel_history_window=W_n,
+        )
+        cos_h_t = torch.tensor(np.cos(-torso), dtype=torch.float32).unsqueeze(0)
+        sin_h_t = torch.tensor(np.sin(-torso), dtype=torch.float32).unsqueeze(0)
+        nb_ids_t = torch.tensor(neighbor_ids, dtype=torch.int32).unsqueeze(0)
+        nb_hist_t = torch.tensor(nb_vel_history, dtype=torch.float32).unsqueeze(0)
+        step_t = torch.tensor([5], dtype=torch.int32)
+
+        torch_feats = compute_neighbor_vel_history_features(
+            nb_ids_t,
+            nb_hist_t,
+            cos_h_t,
+            sin_h_t,
+            step_t,
+            env_cfg,
+        )  # (1, N, K*2)
+
+        npt.assert_allclose(torch_feats[0].numpy(), np_feats, atol=ATOL, rtol=RTOL)
+
+        # Sanity: empty-slot entries (agent 0, slot 2) must be zero
+        assert np.allclose(np_feats[0, 4:6], 0.0), "empty slot must yield zero diff"
+
     def test_match_persistent_neighbors(self):
         """Numpy and torch match_persistent_neighbors must agree bit-for-bit
         on a deterministic fixture covering all four scenarios: first step

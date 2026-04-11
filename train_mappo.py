@@ -136,6 +136,10 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             temporal_memory_window=obs.get("temporal_memory_window", 50),
             temporal_memory_max_steps=cfg.get("max_steps", 2000),
             temporal_memory_dt=cfg.get("dt", 0.01),
+            use_neighbor_memory=obs.get("use_neighbor_memory", False),
+            neighbor_sensing_radius=obs.get("neighbor_sensing_radius", 5.0),
+            neighbor_vel_history_window=obs.get("neighbor_vel_history_window", 5),
+            use_neighbor_vel_history=obs.get("use_neighbor_vel_history", False),
         ),
         action=ActionConfig(
             max_heading_change=np.radians(act.get("max_heading_change_deg", 15.0)),

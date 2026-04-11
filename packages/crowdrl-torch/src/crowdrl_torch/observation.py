@@ -205,6 +205,58 @@ def compute_navmesh_signals(
     return torch.stack([dir_ego_x, dir_ego_y, path_dev], dim=-1)  # (E, N, 3)
 
 
+def compute_neighbor_vel_history_features(
+    neighbor_ids: Tensor,
+    neighbor_vel_history: Tensor,
+    cos_h: Tensor,
+    sin_h: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the (E, N, K*2) neighbor velocity-history feature block.
+
+    For each of the K persistent slots:
+        diff_global = vel_at_step_now - vel_at_W_steps_ago
+        diff_ego    = rot(-ego_heading) @ diff_global
+    Empty slots (neighbor_ids == -1) are zeroed out.
+
+    The newest ring-buffer slot corresponds to the last write index, and
+    the oldest to the NEXT write index (which currently holds W_n+1
+    steps ago or zeros if the buffer hasn't filled yet). See the numpy
+    reference in crowdrl_core.observation for the same derivation.
+    """
+    E, N, buf_size, K, _ = neighbor_vel_history.shape
+    W_n = config.neighbor_vel_history_window
+    assert buf_size == W_n + 1, "neighbor_vel_history buffer size must equal W_n+1"
+
+    # Indices are per-env scalars: (E,). Cast to long for gather.
+    newest = ((step_count - 1) % buf_size).long()  # (E,)
+    oldest = (step_count % buf_size).long()  # (E,)
+
+    # Gather vel_now at newest index: output (E, N, K, 2)
+    newest_idx = newest.view(E, 1, 1, 1, 1).expand(E, N, 1, K, 2)
+    vel_now = neighbor_vel_history.gather(dim=2, index=newest_idx).squeeze(2)
+
+    oldest_idx = oldest.view(E, 1, 1, 1, 1).expand(E, N, 1, K, 2)
+    vel_old = neighbor_vel_history.gather(dim=2, index=oldest_idx).squeeze(2)
+
+    diff_global = vel_now - vel_old  # (E, N, K, 2)
+
+    # Rotate each diff into the current ego frame. cos_h / sin_h are (E, N).
+    cos_exp = cos_h.unsqueeze(-1)  # (E, N, 1)
+    sin_exp = sin_h.unsqueeze(-1)  # (E, N, 1)
+    diff_ex = cos_exp * diff_global[..., 0] - sin_exp * diff_global[..., 1]
+    diff_ey = sin_exp * diff_global[..., 0] + cos_exp * diff_global[..., 1]
+    diff_ego = torch.stack([diff_ex, diff_ey], dim=-1)  # (E, N, K, 2)
+
+    # Mask empty slots
+    valid = (neighbor_ids >= 0).unsqueeze(-1)  # (E, N, K, 1)
+    diff_ego = torch.where(valid, diff_ego, torch.zeros_like(diff_ego))
+
+    # Flatten slot x feature to K*2
+    return diff_ego.reshape(E, N, K * 2)
+
+
 def build_observations(
     positions: Tensor,
     velocities: Tensor,
@@ -229,6 +281,8 @@ def build_observations(
     gdist_history: Tensor | None = None,
     preferred_speeds: Tensor | None = None,
     step_count: Tensor | None = None,
+    neighbor_ids: Tensor | None = None,
+    neighbor_vel_history: Tensor | None = None,
 ) -> Tensor:
     """Build observations for all agents.
 
@@ -341,6 +395,18 @@ def build_observations(
             config,
         )
         parts.append(memory)
+
+    # --- Neighbor velocity history (E, N, K*2) ---
+    if config.use_neighbor_memory and config.use_neighbor_vel_history:
+        nb_vel_features = compute_neighbor_vel_history_features(
+            neighbor_ids,
+            neighbor_vel_history,
+            cos_h,
+            sin_h,
+            step_count,
+            config,
+        )
+        parts.append(nb_vel_features)
 
     obs = torch.cat(parts, dim=-1)  # (E, N, obs_dim)
 

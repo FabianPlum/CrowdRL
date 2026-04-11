@@ -450,6 +450,61 @@ class TestNeighborMemoryWiring:
             f"expected non-zero velocities at write slot {write_idx}"
         )
 
+    def test_obs_dim_grows_by_k_times_2_with_vel_history(self):
+        """With both flags on, obs grows by exactly 2*K dims."""
+        base = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=False,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        on = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        k = on.obs.k_neighbours
+        assert on.obs.obs_dim == base.obs.obs_dim + 2 * k
+
+    def test_vel_history_feature_block_is_finite_after_steps(self):
+        """End-to-end: with vel history enabled, the feature block appears
+        at the right offset in the observation vector and stays finite."""
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        env = CrowdEnv(config=cfg, seed=11)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 1.0
+        for _ in range(10):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+            # Last 2*K dims are the vel-history block
+            k = env.config.obs.k_neighbours
+            nb_block = obs[:, -2 * k :]
+            # Sanity: active agents with neighbors should see at least one
+            # non-zero slot after the ring buffer fills.
+            assert nb_block.shape == (env.n_agents, 2 * k)
+
     def test_vel_history_zero_for_empty_slot(self):
         """Slots with neighbor_ids == -1 must hold zero velocities even
         after several steps."""

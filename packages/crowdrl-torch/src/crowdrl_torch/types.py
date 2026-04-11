@@ -185,6 +185,7 @@ class EnvConfig(NamedTuple):
     use_neighbor_memory: bool = False
     neighbor_sensing_radius: float = 5.0
     neighbor_vel_history_window: int = 5
+    use_neighbor_vel_history: bool = False
 
     @staticmethod
     def from_crowd_env_config(
@@ -241,6 +242,7 @@ class EnvConfig(NamedTuple):
             use_neighbor_memory=cfg.obs.use_neighbor_memory,
             neighbor_sensing_radius=cfg.obs.neighbor_sensing_radius,
             neighbor_vel_history_window=cfg.obs.neighbor_vel_history_window,
+            use_neighbor_vel_history=cfg.obs.use_neighbor_vel_history,
         )
 
 

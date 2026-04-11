@@ -139,6 +139,8 @@ class BatchedTorchEnv:
             gdist_history=self.states.gdist_history,
             preferred_speeds=self.states.preferred_speeds,
             step_count=self.states.step_count,
+            neighbor_ids=self.states.neighbor_ids,
+            neighbor_vel_history=self.states.neighbor_vel_history,
         )
 
         return self.states, obs
@@ -232,6 +234,8 @@ class BatchedTorchEnv:
                 gdist_history=self.states.gdist_history[r],
                 preferred_speeds=self.states.preferred_speeds[r],
                 step_count=self.states.step_count[r],
+                neighbor_ids=self.states.neighbor_ids[r],
+                neighbor_vel_history=self.states.neighbor_vel_history[r],
             )
             obs[r] = fresh_obs
 

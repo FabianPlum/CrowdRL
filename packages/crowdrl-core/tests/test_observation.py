@@ -46,6 +46,27 @@ class TestObsConfig:
         # 7 + 56 + 16 + 3 + 6 = 88
         assert config.obs_dim == 88
 
+    def test_neighbor_vel_history_dims(self):
+        config = ObsConfig(
+            use_navmesh=True,
+            use_temporal_memory=True,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+        )
+        # 88 + 8*2 = 104
+        assert config.obs_dim == 104
+
+    def test_neighbor_vel_history_requires_memory_flag(self):
+        """Without ``use_neighbor_memory``, the vel history flag alone
+        should NOT add dimensions -- the matcher isn't running so the
+        buffer can't be read."""
+        config = ObsConfig(
+            use_neighbor_memory=False,
+            use_neighbor_vel_history=True,
+        )
+        # Still the base 79 (no navmesh, no temporal memory, no neighbor mem)
+        assert config.obs_dim == 79
+
 
 class TestBuildObservation:
     def test_output_shape(self):
