@@ -373,7 +373,55 @@ move on. Neighbor memory should further drop three specific metrics:
   is computed from WorldState, not observations. But the normalizer must
   re-accumulate its running stats.
 
-## 7. Not in scope for this doc
+## 7. Experimental results (A+ run, 2026-04-12)
+
+Full 500-rollout, seed 43, 2x RTX 4090 DDP training of the A+ variant
+(commits 1-4 + 6 + vectorise fix, obs_dim 104). Wall time 1h 57m.
+
+### A+ vs A (ego memory only, 88D) -- last 2000 full-phase episodes
+
+Overall: goal_rate -1.3 pp, **reward +2.99** (A+ better on reward).
+Every tier shows positive reward delta and reduced penalty_rate.
+The mechanism is reduced per-step collision/proximity penalties from
+the neighbor velocity-history feature -- agents can read second-order
+motion of their neighbors and act preemptively.
+
+### A+ vs pre-memory baseline (82D) -- last 2000 full-phase episodes
+
+Overall: goal_rate -4.8 pp, **reward +1.23** (A+ beats baseline on
+reward for the first time among memory variants). On complex tiers
+(TIER_2/3A/3B) the reward improvement is strongest (+3.56 on T2,
++3.48 on T3B), confirming the social-coordination hypothesis.
+
+### Stuck-termination interaction (persistent across all memory variants)
+
+All three memory runs (A, A+, and presumably A++) share the same
+goal-rate regression vs baseline, and it tracks with the eval/training
+discrepancy: eval (no stuck termination, low density) shows memory
+policies matching or beating baseline, while training (stuck
+termination enabled, high density) shows them underperforming. The
+mechanism: memory features give agents path_efficiency/window
+signals that correlate with the stuck-termination threshold -> the
+policy learns "self-diagnose and accept the timeout_penalty" instead of
+"escape the deadlock". This is an observation x environment-design
+interaction, not a feature-quality problem.
+
+### A++ decision: deferred
+
+At 104D, the first hidden layer (256 wide) has 26,624 weights -- a
+16:1 compression ratio from input to first hidden. Going to 128D
+pushes that to 32,768 (20:1 ratio at the bottleneck). Without
+widening the first layer, A++ risks underfitting the richer feature
+space. Recommended: revisit A++ with [384, 256] or [512, 256] hidden
+layers after the stuck-termination coupling is resolved.
+
+### Recommended next step
+
+**A+ with stuck_termination_enabled=false** -- single YAML line flip.
+If the goal-rate gap closes while reward stays better, A+ is the
+clear winner for the observation stack and we ship it as the default.
+
+## 8. Not in scope for this doc
 
 - Self-attention / transformer social encoders (too much engineering for
   the marginal gain at our current tier depth).
