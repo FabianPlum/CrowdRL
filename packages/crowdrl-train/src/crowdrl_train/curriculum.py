@@ -138,7 +138,7 @@ class CurriculumManager:
             dt=base_config.dt,
             contact_stiffness=base_config.contact_stiffness,
             contact_damping=base_config.contact_damping,
-            velocity_damping=base_config.velocity_damping,
+            desired_velocity_weight=base_config.desired_velocity_weight,
             max_steps=base_config.max_steps,
             stuck_termination_enabled=base_config.stuck_termination_enabled,
             stuck_window_steps=base_config.stuck_window_steps,

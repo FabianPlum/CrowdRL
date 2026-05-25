@@ -155,7 +155,7 @@ harder than heavier ones -- matching real crowd dynamics.
 | Parameter | Value | Unit | Source |
 |-----------|-------|------|--------|
 | `dt` | 0.01 | s | `CrowdEnvConfig.dt` |
-| `velocity_damping` | 0.8 | -- | `CrowdEnvConfig.velocity_damping` |
+| `desired_velocity_weight` | 0.8 | -- | `CrowdEnvConfig.desired_velocity_weight` |
 | `contact_stiffness` | 30,000 | N / overlap | `CrowdEnvConfig.contact_stiffness` |
 | `contact_damping` | 500 | N*s/m | `CrowdEnvConfig.contact_damping` |
 | `max_speed_multiplier` | 2.0 | -- | `CrowdEnvConfig.max_speed_multiplier` |
@@ -512,8 +512,10 @@ leaves the source actor on its original device.
 
 ### 8.9 Remaining potential improvements
 
-**C. Increase velocity damping** -- Raising `velocity_damping` from 0.8 toward
-0.9 or 0.95 increases inertia. Trades responsiveness for smoother trajectories.
+**C. Decrease desired_velocity_weight** -- Lowering `desired_velocity_weight`
+from 0.8 toward 0.1 or 0.05 increases inertia (more weight on previous velocity).
+Trades responsiveness for smoother trajectories. (Renamed from `velocity_damping`;
+the old name suggested the opposite direction.)
 
 **D. Temporal action smoothing** -- Low-pass filter on the policy output:
 `smoothed = alpha * raw + (1 - alpha) * prev`. Guarantees smooth trajectories

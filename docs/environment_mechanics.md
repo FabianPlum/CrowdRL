@@ -810,7 +810,7 @@ body because:
 | Parameter | Default | Unit | Role |
 |-----------|---------|------|------|
 | `dt` | 0.01 | s | Simulation timestep |
-| `velocity_damping` | 0.8 | -- | Blend factor: 0.8 = desired, 0.2 = carry-over |
+| `desired_velocity_weight` | 0.8 | -- | Weight on desired velocity; 0.8 = 80% desired, 20% carry-over. Higher = less smoothing. (Renamed from `velocity_damping`; the old name was inverted.) |
 | `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
 | `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
 | `max_speed_multiplier` | 2.0 | -- | Speed clamp = 2.0 * 1.5 = 3.0 m/s |

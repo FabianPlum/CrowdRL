@@ -32,8 +32,8 @@ for contact force application. Both are trivially vectorizable.
 ```python
 mask = self._active_mask
 self._world.velocities[mask] = (
-    cfg.velocity_damping * batch_result.desired_velocities[mask]
-    + (1 - cfg.velocity_damping) * self._world.velocities[mask]
+    cfg.desired_velocity_weight * batch_result.desired_velocities[mask]
+    + (1 - cfg.desired_velocity_weight) * self._world.velocities[mask]
 )
 ```
 Same for contact forces and orientation updates.

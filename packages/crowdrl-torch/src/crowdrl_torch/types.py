@@ -134,7 +134,7 @@ class EnvConfig(NamedTuple):
 
     # Physics
     dt: float = 0.01
-    velocity_damping: float = 0.8
+    desired_velocity_weight: float = 0.8
     contact_stiffness: float = 30000.0
     contact_damping: float = 500.0
     wall_strength: float = 400.0
@@ -213,7 +213,7 @@ class EnvConfig(NamedTuple):
             max_head_change=cfg.action.max_head_change,
             head_limit=cfg.action.head_limit,
             dt=cfg.dt,
-            velocity_damping=cfg.velocity_damping,
+            desired_velocity_weight=cfg.desired_velocity_weight,
             contact_stiffness=cfg.contact_stiffness,
             contact_damping=cfg.contact_damping,
             max_speed_multiplier=cfg.max_speed_multiplier,

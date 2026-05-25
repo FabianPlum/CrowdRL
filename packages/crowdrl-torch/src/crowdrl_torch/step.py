@@ -59,8 +59,8 @@ def batched_step(
     mask_2d = state.active_mask.unsqueeze(-1)
     new_velocities = torch.where(
         mask_2d,
-        config.velocity_damping * desired_velocities
-        + (1.0 - config.velocity_damping) * state.velocities,
+        config.desired_velocity_weight * desired_velocities
+        + (1.0 - config.desired_velocity_weight) * state.velocities,
         state.velocities,
     )
     new_torso_orientations = torch.where(state.active_mask, new_torsos, state.torso_orientations)

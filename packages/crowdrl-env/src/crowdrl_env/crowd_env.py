@@ -84,8 +84,12 @@ class CrowdEnvConfig:
     """Agent-agent velocity-dependent damping (N*s/m). Calibrated so that
     two agents closing at 2 m/s with moderate overlap experience ~12 m/s^2
     damping deceleration (comparable to JuPedSim's friction term)."""
-    velocity_damping: float = 0.8
-    """Velocity damping factor: v_new = damping * v_desired + (1-damping) * v_old."""
+    desired_velocity_weight: float = 0.8
+    """Weight on desired velocity in v_new = w * v_desired + (1-w) * v_old.
+    Higher value = less smoothing (more responsive to policy output);
+    lower value = more inertia. Formerly named ``velocity_damping`` --
+    that name was misleading because the formula meant the opposite of
+    what the word suggested."""
 
     max_speed_multiplier: float = 2.0
     """Velocity magnitude clamp as a multiple of action.max_speed.
@@ -301,8 +305,8 @@ class CrowdEnv(gym.Env):
         # --- 2. Apply velocity update (damped blending) — vectorized ---
         mask = self._active_mask
         self._world.velocities[mask] = (
-            cfg.velocity_damping * batch_result.desired_velocities[mask]
-            + (1.0 - cfg.velocity_damping) * self._world.velocities[mask]
+            cfg.desired_velocity_weight * batch_result.desired_velocities[mask]
+            + (1.0 - cfg.desired_velocity_weight) * self._world.velocities[mask]
         )
         self._world.torso_orientations[mask] = batch_result.new_torso_orientations[mask]
         self._world.head_orientations[mask] = batch_result.new_head_orientations[mask]
