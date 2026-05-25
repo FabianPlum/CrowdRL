@@ -155,6 +155,49 @@ class TestInterpretAction:
         assert abs(result.new_head_orientation - result.new_torso_orientation) < 1e-6
 
 
+class TestBiomechanicalEnvelope:
+    """Layer 1 of agent_dynamics_refactor: default per-step caps should
+    correspond to angular velocities within the human envelope at the
+    default simulation rate (dt=0.01s).
+    """
+
+    def test_default_caps_within_human_envelope(self):
+        """Heading/torso/head rates < 200 deg/s at dt=0.01s.
+
+        Human walking yaw envelope (Hicheur 2007): 30-60 deg/s comfortable,
+        ~120 deg/s aggressive cornering, ~360 deg/s only when pivoting in
+        place. Layer 1 targets the walking envelope, not the pivot.
+        """
+        config = ActionConfig()
+        dt = 0.01
+
+        heading_rate_deg = np.degrees(config.max_heading_change) / dt
+        torso_rate_deg = np.degrees(config.max_torso_change) / dt
+        head_rate_deg = np.degrees(config.max_head_change) / dt
+
+        assert heading_rate_deg < 200.0, (
+            f"max_heading_change implies {heading_rate_deg:.0f} deg/s at "
+            f"dt={dt}, above 200 deg/s human envelope"
+        )
+        assert torso_rate_deg < 200.0, (
+            f"max_torso_change implies {torso_rate_deg:.0f} deg/s at dt={dt}"
+        )
+        assert head_rate_deg < 200.0, (
+            f"max_head_change implies {head_rate_deg:.0f} deg/s at dt={dt}"
+        )
+
+    def test_default_caps_ordering_torso_heading_head(self):
+        """Torso changes slower than heading; head changes fastest.
+
+        Biomechanical ordering: hips constrain torso rotation independent
+        of feet, so torso is the slowest axis. Head can scan freely on
+        the neck, so it is the fastest. Heading sits between them.
+        """
+        config = ActionConfig()
+        assert config.max_torso_change < config.max_heading_change
+        assert config.max_heading_change < config.max_head_change
+
+
 class TestInterpretActionsBatch:
     def test_batch_matches_individual(self):
         n = 5

@@ -127,14 +127,16 @@ class EnvConfig(NamedTuple):
 
     # Action
     max_speed: float = 1.5
-    max_heading_change: float = 0.2617993877991494  # pi/12
-    max_torso_change: float = 0.2617993877991494  # pi/12
-    max_head_change: float = 1.0471975511965976  # pi/3
+    max_heading_change: float = 0.020  # ~115 deg/s at dt=0.01s (Layer 1; was pi/12)
+    max_torso_change: float = 0.010  # ~57 deg/s at dt=0.01s (Layer 1; was pi/12)
+    max_head_change: float = 0.030  # ~172 deg/s at dt=0.01s (Layer 1; was pi/3)
     head_limit: float = 1.5707963267948966  # pi/2
 
     # Physics
     dt: float = 0.01
-    desired_velocity_weight: float = 0.8
+    desired_velocity_weight: float = (
+        0.05  # tau ~200ms at dt=0.01s (Layer 1; was 0.8 = essentially no filter)
+    )
     contact_stiffness: float = 30000.0
     contact_damping: float = 500.0
     wall_strength: float = 400.0
@@ -152,12 +154,12 @@ class EnvConfig(NamedTuple):
     agent_proximity_penalty_near: float = -0.005
     agent_proximity_penalty_far: float = -0.0001
     personal_space_radius: float = 1.0
-    action_rate_weight: float = 0.0
+    action_rate_weight: float = -0.01  # Layer 1: was 0.0 (disabled)
     existence_penalty: float = -0.01
     use_smoothness: bool = True
-    jerk_penalty_weight: float = -0.000001
-    angular_accel_penalty_weight: float = -0.0001
-    speed_deviation_weight: float = -0.001
+    jerk_penalty_weight: float = -0.0001  # Layer 1: was -1e-6 (100x up)
+    angular_accel_penalty_weight: float = -0.01  # Layer 1: was -1e-4 (100x up)
+    speed_deviation_weight: float = -0.1  # Layer 1: was -1e-3 (100x up)
 
     # Episode
     max_steps: int = 5000

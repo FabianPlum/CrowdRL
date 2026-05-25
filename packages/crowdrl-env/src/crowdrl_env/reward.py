@@ -64,26 +64,36 @@ class RewardConfig:
     a meaningful approach zone regardless of agent size."""
 
     # Action rate penalty
-    action_rate_weight: float = 0.0
+    action_rate_weight: float = -0.01
     """Weight for penalising large changes in raw policy output between steps.
-    Negative value (e.g. -0.05). 0.0 = disabled."""
+    0.0 = disabled. Layer 1 of plan/agent_dynamics_refactor.md
+    (2026-05-25) enabled this at -0.01 so the penalty can compete with
+    the goal bonus."""
 
     # Tier 2: smoothness
     use_smoothness: bool = True
     """Whether to apply Tier 2 smoothness penalties."""
 
-    jerk_penalty_weight: float = -0.000001
-    """Weight for acceleration change (jerk) penalty.  Kept very small
-    because jerk scales as 1/dt^2; with dt=0.01 even a 0.1 m/s
-    velocity glitch produces jerk ~1000 m/s^3."""
+    jerk_penalty_weight: float = -0.0001
+    """Weight for acceleration change (jerk) penalty. Layer 1 of
+    plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x (from
+    -1e-6 to -1e-4) so the penalty can compete with the goal bonus.
+    Jerk scales as 1/dt^2 so raw magnitudes are large -- but that is
+    the symptom of a too-permissive action space, not a reason to
+    silence the signal."""
 
-    angular_accel_penalty_weight: float = -0.0001
-    """Weight for angular acceleration penalty."""
+    angular_accel_penalty_weight: float = -0.01
+    """Weight for angular acceleration penalty. Layer 1 of
+    plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x
+    (from -1e-4 to -1e-2)."""
 
-    speed_deviation_weight: float = -0.001
-    """Weight for deviation from preferred speed. Kept low to avoid
-    dominating the reward budget in congested scenarios where agents
-    must slow down."""
+    speed_deviation_weight: float = -0.1
+    """Weight for deviation from preferred speed. Layer 1 of
+    plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x
+    (from -1e-3 to -1e-1). Historical YAMLs override this to 0.0
+    because earlier experiments found it dominated congested
+    scenarios where agents must slow down -- worth a sweep under
+    the new action caps."""
 
     # Existence penalty (per-step cost for being alive)
     existence_penalty: float = -0.01

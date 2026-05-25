@@ -155,7 +155,7 @@ harder than heavier ones -- matching real crowd dynamics.
 | Parameter | Value | Unit | Source |
 |-----------|-------|------|--------|
 | `dt` | 0.01 | s | `CrowdEnvConfig.dt` |
-| `desired_velocity_weight` | 0.8 | -- | `CrowdEnvConfig.desired_velocity_weight` |
+| `desired_velocity_weight` | 0.05 | -- | `CrowdEnvConfig.desired_velocity_weight` (Layer 1; was 0.8) |
 | `contact_stiffness` | 30,000 | N / overlap | `CrowdEnvConfig.contact_stiffness` |
 | `contact_damping` | 500 | N*s/m | `CrowdEnvConfig.contact_damping` |
 | `max_speed_multiplier` | 2.0 | -- | `CrowdEnvConfig.max_speed_multiplier` |

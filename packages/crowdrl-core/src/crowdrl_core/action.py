@@ -30,14 +30,23 @@ class ActionConfig:
     max_speed: float = 1.5
     """Maximum desired speed (m/s). Typical preferred pedestrian speed ~1.34 m/s."""
 
-    max_heading_change: float = np.pi / 12
-    """Maximum heading change per step (radians). π/12 = 15° per step."""
+    max_heading_change: float = 0.020
+    """Max heading change per step (radians). 0.020 rad/step = 1.15 deg/step,
+    115 deg/s at dt=0.01s -- mid-range of human walking yaw (Hicheur 2007:
+    30-60 deg/s comfortable, ~120 deg/s aggressive). Layer 1 of
+    plan/agent_dynamics_refactor.md (2026-05-25); was pi/12 = 1500 deg/s."""
 
-    max_torso_change: float = np.pi / 12
-    """Maximum torso orientation change per step (radians). π/12 = 15° per step."""
+    max_torso_change: float = 0.010
+    """Max torso orientation change per step (radians). 0.010 rad/step =
+    0.57 deg/step, 57 deg/s at dt=0.01s. Slower than max_heading_change
+    because hip constraints cap sustained torso rotation around 60-90 deg/s.
+    Layer 1 of plan/agent_dynamics_refactor.md (2026-05-25); was pi/12."""
 
-    max_head_change: float = np.pi / 3
-    """Maximum head orientation change per step (radians). π/3 = 60° per step."""
+    max_head_change: float = 0.030
+    """Max head orientation change per step (radians). 0.030 rad/step =
+    1.72 deg/step, 172 deg/s at dt=0.01s. Fastest axis (head scans faster
+    than body commits). Layer 1 of plan/agent_dynamics_refactor.md
+    (2026-05-25); was pi/3 = 6000 deg/s."""
 
     head_limit: float = np.pi / 2
     """Maximum head angle relative to torso (±90°)."""

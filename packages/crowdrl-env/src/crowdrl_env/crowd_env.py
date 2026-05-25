@@ -84,12 +84,20 @@ class CrowdEnvConfig:
     """Agent-agent velocity-dependent damping (N*s/m). Calibrated so that
     two agents closing at 2 m/s with moderate overlap experience ~12 m/s^2
     damping deceleration (comparable to JuPedSim's friction term)."""
-    desired_velocity_weight: float = 0.8
+    desired_velocity_weight: float = 0.05
     """Weight on desired velocity in v_new = w * v_desired + (1-w) * v_old.
     Higher value = less smoothing (more responsive to policy output);
-    lower value = more inertia. Formerly named ``velocity_damping`` --
-    that name was misleading because the formula meant the opposite of
-    what the word suggested."""
+    lower value = more inertia.
+
+    Layer 1 of plan/agent_dynamics_refactor.md (2026-05-25) lowered the
+    default from 0.8 (tau ~12 ms, effectively no filter at dt=0.01s) to
+    0.05 (tau ~200 ms). Helbing's social force model uses tau ~500 ms;
+    a value of 0.02 here would match that, kept as a future tunable.
+    Historical configs in configs/exp_memory_*.yaml pin
+    ``desired_velocity_weight: 0.8`` explicitly to preserve their
+    pre-Layer-1 behaviour. Formerly named ``velocity_damping`` -- that
+    name was misleading because the formula meant the opposite of what
+    the word suggested."""
 
     max_speed_multiplier: float = 2.0
     """Velocity magnitude clamp as a multiple of action.max_speed.

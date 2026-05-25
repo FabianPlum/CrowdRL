@@ -143,8 +143,12 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             use_neighbor_trajectory_features=obs.get("use_neighbor_trajectory_features", False),
         ),
         action=ActionConfig(
-            max_heading_change=np.radians(act.get("max_heading_change_deg", 15.0)),
-            max_torso_change=np.radians(act.get("max_torso_change_deg", 15.0)),
+            # Layer 1 defaults: 115 / 57 / 172 deg/s at dt=0.01s.
+            # Historical YAMLs set these to 15.0 deg/step explicitly,
+            # giving the pre-Layer-1 1500 deg/s rates.
+            max_heading_change=np.radians(act.get("max_heading_change_deg", 1.146)),
+            max_torso_change=np.radians(act.get("max_torso_change_deg", 0.573)),
+            max_head_change=np.radians(act.get("max_head_change_deg", 1.719)),
         ),
         reward=RewardConfig(
             goal_bonus=rew.get("goal_bonus", 20.0),
@@ -163,6 +167,9 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             action_rate_weight=rew.get("action_rate_weight", -0.01),
         ),
         max_steps=cfg.get("max_steps", 2000),
+        # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this
+        # to 0.8 to preserve their pre-Layer-1 behaviour.
+        desired_velocity_weight=cfg.get("desired_velocity_weight", 0.05),
         stuck_termination_enabled=ep.get("stuck_termination_enabled", False),
         stuck_window_steps=ep.get("stuck_window_steps", 300),
         stuck_progress_threshold=ep.get("stuck_progress_threshold", 0.2),

@@ -148,6 +148,7 @@ reward:
 # Episode
 # ---------------------------------------------------------------------------
 max_steps: 2000              # simulation steps per episode (dt=0.01 -> 20s)
+desired_velocity_weight: 0.8  # pin to pre-Layer-1 value (Layer 1 default is 0.05)
 
 # Stuck-agent termination: diagnosed via scripts/diagnose_stuck_agents.py
 # that ~11% of TIER_3B agents become permanently frozen in local minima

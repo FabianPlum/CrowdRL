@@ -810,7 +810,7 @@ body because:
 | Parameter | Default | Unit | Role |
 |-----------|---------|------|------|
 | `dt` | 0.01 | s | Simulation timestep |
-| `desired_velocity_weight` | 0.8 | -- | Weight on desired velocity; 0.8 = 80% desired, 20% carry-over. Higher = less smoothing. (Renamed from `velocity_damping`; the old name was inverted.) |
+| `desired_velocity_weight` | 0.05 | -- | Weight on desired velocity; 0.05 = 5% desired + 95% carry-over (tau ~200ms at dt=0.01s). Higher = less smoothing. Layer 1 of agent_dynamics_refactor (was 0.8). Renamed from `velocity_damping`. |
 | `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
 | `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
 | `max_speed_multiplier` | 2.0 | -- | Speed clamp = 2.0 * 1.5 = 3.0 m/s |
@@ -821,9 +821,9 @@ body because:
 | Parameter | Default | Unit | Equivalent rate |
 |-----------|---------|------|-----------------|
 | `max_speed` | 1.5 | m/s | -- |
-| `max_heading_change` | pi/12 | rad/step | 1500 deg/s |
-| `max_torso_change` | pi/12 | rad/step | 1500 deg/s |
-| `max_head_change` | pi/3 | rad/step | 6000 deg/s |
+| `max_heading_change` | 0.020 | rad/step | 115 deg/s (walking yaw envelope, Hicheur 2007) |
+| `max_torso_change` | 0.010 | rad/step | 57 deg/s (hip constraints) |
+| `max_head_change` | 0.030 | rad/step | 172 deg/s (head scans fastest) |
 | `head_limit` | pi/2 | rad | +/-90 deg from torso |
 
 ### Wall forces (in [compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L255))
@@ -847,10 +847,10 @@ body because:
 | `wall_proximity_threshold` | 1.5x radius | Yes |
 | `existence_penalty` | -0.01 | Yes |
 | `progress_weight` | +1.0 | Yes |
-| `jerk_penalty_weight` | -1e-6 | Yes (Tier 2) |
-| `angular_accel_penalty_weight` | -1e-4 | Yes (Tier 2) |
-| `speed_deviation_weight` | -1e-3 | Yes (Tier 2) |
-| `action_rate_weight` | 0.0 | No |
+| `jerk_penalty_weight` | -1e-4 | Yes (Tier 2; Layer 1: 100x up from -1e-6) |
+| `angular_accel_penalty_weight` | -1e-2 | Yes (Tier 2; Layer 1: 100x up from -1e-4) |
+| `speed_deviation_weight` | -1e-1 | Yes (Tier 2; Layer 1: 100x up from -1e-3) |
+| `action_rate_weight` | -1e-2 | Yes (Layer 1: enabled, was 0.0) |
 | `inverse_distance_weight` | 0.0 | No |
 
 The agent proximity penalty replaced a binary "inside 2x radius -> flat -0.3"
