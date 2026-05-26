@@ -389,7 +389,7 @@ def build_observations(
     """
     E, N = positions.shape[:2]
 
-    # --- Ego state (E, N, 7) ---
+    # --- Ego state (E, N, 8) ---
     cos_h = torch.cos(-torso_orientations)
     sin_h = torch.sin(-torso_orientations)
 
@@ -412,6 +412,15 @@ def build_observations(
     # Speed
     speed = (velocities**2).sum(dim=-1).sqrt()
 
+    # Preferred speed (raw m/s, per-agent target). Falls back to Bohannon mean
+    # if not provided -- training always passes the real array via step state.
+    if preferred_speeds is None:
+        preferred_speeds_ego = torch.full(
+            (E, N), 1.34, dtype=positions.dtype, device=positions.device
+        )
+    else:
+        preferred_speeds_ego = preferred_speeds.to(positions.dtype)
+
     # Torso angle in ego frame is 0 by construction
     torso_angle = torch.zeros(E, N, dtype=positions.dtype, device=positions.device)
 
@@ -419,9 +428,18 @@ def build_observations(
     head_rel_torso = (head_orientations - torso_orientations + math.pi) % (2 * math.pi) - math.pi
 
     ego_state = torch.stack(
-        [goal_dir_x, goal_dir_y, vel_ego_x, vel_ego_y, speed, torso_angle, head_rel_torso],
+        [
+            goal_dir_x,
+            goal_dir_y,
+            vel_ego_x,
+            vel_ego_y,
+            speed,
+            preferred_speeds_ego,
+            torso_angle,
+            head_rel_torso,
+        ],
         dim=-1,
-    )  # (E, N, 7)
+    )  # (E, N, 8)
 
     # --- Social sensing (E, N, K*7) ---
     social = knn_social(

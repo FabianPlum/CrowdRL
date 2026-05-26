@@ -262,9 +262,9 @@ class TestTemporalMemory:
     def test_obs_dim_includes_memory(self):
         env = self._build_env()
         obs, _ = env.reset()
-        # 7 ego + 8*7 social + 16 rays + 6 memory = 85
-        assert env.config.obs.obs_dim == 85
-        assert obs.shape[1] == 85
+        # 8 ego + 8*7 social + 16 rays + 6 memory = 86
+        assert env.config.obs.obs_dim == 86
+        assert obs.shape[1] == 86
 
     def test_reset_initialises_memory_state(self):
         env = self._build_env()
@@ -523,11 +523,11 @@ class TestNeighborMemoryWiring:
             max_steps=50,
             dt=0.01,
         )
-        # 7 + 56 + 16 + 3 + 6 + 16 + 24 = 128
-        assert cfg.obs.obs_dim == 128
+        # 8 + 56 + 16 + 3 + 6 + 16 + 24 = 129
+        assert cfg.obs.obs_dim == 129
         env = CrowdEnv(config=cfg, seed=17)
         obs, _ = env.reset()
-        assert obs.shape[1] == 128
+        assert obs.shape[1] == 129
         actions = np.zeros((env.n_agents, env.config.action.action_dim))
         actions[:, 0] = 0.7
         for _ in range(15):

@@ -10,41 +10,41 @@ from conftest import make_world_state
 class TestObsConfig:
     def test_default_dims(self):
         config = ObsConfig()
-        # 7 ego + 56 social (8×7) + 16 rays = 79
-        assert config.obs_dim == 79
+        # 8 ego + 56 social (8x7) + 16 rays = 80
+        assert config.obs_dim == 80
 
     def test_two_channel_dims(self):
         config = ObsConfig(raycast=RaycastConfig(two_channel=True))
-        # 7 + 56 + 32 = 95
-        assert config.obs_dim == 95
+        # 8 + 56 + 32 = 96
+        assert config.obs_dim == 96
 
     def test_navmesh_dims(self):
         config = ObsConfig(use_navmesh=True)
-        # 7 + 56 + 16 + 3 = 82
-        assert config.obs_dim == 82
+        # 8 + 56 + 16 + 3 = 83
+        assert config.obs_dim == 83
 
     def test_full_dims(self):
         config = ObsConfig(
             raycast=RaycastConfig(two_channel=True),
             use_navmesh=True,
         )
-        # 7 + 56 + 32 + 3 = 98
-        assert config.obs_dim == 98
+        # 8 + 56 + 32 + 3 = 99
+        assert config.obs_dim == 99
 
     def test_custom_k(self):
         config = ObsConfig(k_neighbours=4)
-        # 7 + 28 (4×7) + 16 = 51
-        assert config.obs_dim == 51
+        # 8 + 28 (4x7) + 16 = 52
+        assert config.obs_dim == 52
 
     def test_temporal_memory_dims(self):
         config = ObsConfig(use_temporal_memory=True)
-        # 7 + 56 + 16 + 6 = 85
-        assert config.obs_dim == 85
+        # 8 + 56 + 16 + 6 = 86
+        assert config.obs_dim == 86
 
     def test_temporal_memory_with_navmesh_dims(self):
         config = ObsConfig(use_navmesh=True, use_temporal_memory=True)
-        # 7 + 56 + 16 + 3 + 6 = 88
-        assert config.obs_dim == 88
+        # 8 + 56 + 16 + 3 + 6 = 89
+        assert config.obs_dim == 89
 
     def test_neighbor_vel_history_dims(self):
         config = ObsConfig(
@@ -53,8 +53,8 @@ class TestObsConfig:
             use_neighbor_memory=True,
             use_neighbor_vel_history=True,
         )
-        # 88 + 8*2 = 104
-        assert config.obs_dim == 104
+        # 89 + 8*2 = 105
+        assert config.obs_dim == 105
 
     def test_neighbor_vel_history_requires_memory_flag(self):
         """Without ``use_neighbor_memory``, the vel history flag alone
@@ -64,8 +64,8 @@ class TestObsConfig:
             use_neighbor_memory=False,
             use_neighbor_vel_history=True,
         )
-        # Still the base 79 (no navmesh, no temporal memory, no neighbor mem)
-        assert config.obs_dim == 79
+        # Still the base 80 (no navmesh, no temporal memory, no neighbor mem)
+        assert config.obs_dim == 80
 
     def test_neighbor_trajectory_features_dims(self):
         """A++ full config: navmesh + ego memory + vel history + traj feats."""
@@ -76,8 +76,8 @@ class TestObsConfig:
             use_neighbor_vel_history=True,
             use_neighbor_trajectory_features=True,
         )
-        # 7 + 56 + 16 + 3 + 6 + 16 + 24 = 128
-        assert config.obs_dim == 128
+        # 8 + 56 + 16 + 3 + 6 + 16 + 24 = 129
+        assert config.obs_dim == 129
 
     def test_neighbor_trajectory_requires_both_memory_flags(self):
         """Trajectory features need both neighbor_memory AND temporal_memory."""
@@ -87,7 +87,7 @@ class TestObsConfig:
             use_temporal_memory=False,
             use_neighbor_trajectory_features=True,
         )
-        assert c1.obs_dim == 79  # nothing added
+        assert c1.obs_dim == 80  # nothing added
 
         # Only temporal memory -- no traj features
         c2 = ObsConfig(
@@ -95,7 +95,7 @@ class TestObsConfig:
             use_temporal_memory=True,
             use_neighbor_trajectory_features=True,
         )
-        assert c2.obs_dim == 79 + 6  # only temporal memory
+        assert c2.obs_dim == 80 + 6  # only temporal memory
 
         # Both enabled -- traj features active
         c3 = ObsConfig(
@@ -103,7 +103,7 @@ class TestObsConfig:
             use_temporal_memory=True,
             use_neighbor_trajectory_features=True,
         )
-        assert c3.obs_dim == 79 + 6 + 24  # +6 temporal +24 traj
+        assert c3.obs_dim == 80 + 6 + 24  # +6 temporal +24 traj
 
 
 class TestBuildObservation:
@@ -180,8 +180,9 @@ class TestBuildObservation:
         )
         config = ObsConfig(k_neighbours=0, raycast=RaycastConfig(n_rays=1))
         obs = build_observation(world, 0, config)
-        # head_rel_torso is the last element of ego state (index 6)
-        assert abs(obs[6] - 0.5) < 1e-6
+        # head_rel_torso is the last element of ego state (index 7 now,
+        # since preferred_speed sits at index 5 and shifted everything down).
+        assert abs(obs[7] - 0.5) < 1e-6
 
     def test_two_channel_rays(self):
         config = ObsConfig(raycast=RaycastConfig(n_rays=8, two_channel=True))

@@ -12,14 +12,14 @@ from crowdrl_train.networks import Actor, ActorCritic, Critic
 class TestActor:
     def test_output_shapes(self, tiny_actor: Actor):
         """Forward pass should return Normal distribution with correct shapes."""
-        obs = torch.randn(5, 79)
+        obs = torch.randn(5, 80)
         dist = tiny_actor(obs)
         assert dist.mean.shape == (5, 4)
         assert dist.stddev.shape == (5, 4)
 
     def test_get_action_shapes(self, tiny_actor: Actor):
         """get_action should return action, log_prob, entropy with correct shapes."""
-        obs = torch.randn(10, 79)
+        obs = torch.randn(10, 80)
         action, log_prob, entropy = tiny_actor.get_action(obs)
         assert action.shape == (10, 4)
         assert log_prob.shape == (10,)
@@ -27,28 +27,28 @@ class TestActor:
 
     def test_actions_in_range(self, tiny_actor: Actor):
         """Clipped actions should be in [-1, 1]."""
-        obs = torch.randn(100, 79)
+        obs = torch.randn(100, 80)
         action, _, _ = tiny_actor.get_action(obs)
         assert action.min() >= -1.0
         assert action.max() <= 1.0
 
     def test_deterministic_mode(self, tiny_actor: Actor):
         """Deterministic actions should be reproducible."""
-        obs = torch.randn(5, 79)
+        obs = torch.randn(5, 80)
         a1, _, _ = tiny_actor.get_action(obs, deterministic=True)
         a2, _, _ = tiny_actor.get_action(obs, deterministic=True)
         assert torch.allclose(a1, a2)
 
     def test_log_prob_finite(self, tiny_actor: Actor):
         """Log-probabilities should be finite (no NaN or Inf)."""
-        obs = torch.randn(20, 79)
+        obs = torch.randn(20, 80)
         _, log_prob, _ = tiny_actor.get_action(obs)
         assert torch.isfinite(log_prob).all()
 
     def test_evaluate_matches_get_action(self, tiny_actor: Actor):
         """evaluate_actions on the raw action should give same log_prob."""
         torch.manual_seed(42)
-        obs = torch.randn(10, 79)
+        obs = torch.randn(10, 80)
         dist = tiny_actor(obs)
         raw_action = dist.rsample()
         log_prob_direct = dist.log_prob(raw_action).sum(dim=-1)
@@ -58,7 +58,7 @@ class TestActor:
     def test_initial_std_approximately_0_5(self):
         """Initial std should be ~0.5 per Andrychowicz et al. (2021)."""
         config = NetworkConfig(
-            obs_dim=79,
+            obs_dim=80,
             action_dim=4,
             actor_hidden_sizes=(32, 32),
         )
@@ -83,19 +83,19 @@ class TestActor:
 
 class TestCritic:
     def test_output_shape(self, tiny_critic: Critic):
-        obs = torch.randn(5, 79)
+        obs = torch.randn(5, 80)
         value = tiny_critic(obs)
         assert value.shape == (5, 1)
 
     def test_output_finite(self, tiny_critic: Critic):
-        obs = torch.randn(20, 79)
+        obs = torch.randn(20, 80)
         value = tiny_critic(obs)
         assert torch.isfinite(value).all()
 
     def test_custom_critic_input_dim(self):
         """Critic can have different input dim (CTDE)."""
         config = NetworkConfig(
-            obs_dim=79,
+            obs_dim=80,
             action_dim=4,
             critic_hidden_sizes=(32,),
             critic_obs_dim=85,
@@ -108,7 +108,7 @@ class TestCritic:
 
 class TestActorCritic:
     def test_get_action_and_value(self, tiny_actor_critic: ActorCritic):
-        obs = torch.randn(5, 79)
+        obs = torch.randn(5, 80)
         action, raw_action, log_prob, entropy, value = tiny_actor_critic.get_action_and_value(obs)
         assert action.shape == (5, 4)
         assert raw_action.shape == (5, 4)
@@ -117,7 +117,7 @@ class TestActorCritic:
         assert value.shape == (5,)
 
     def test_get_value_only(self, tiny_actor_critic: ActorCritic):
-        obs = torch.randn(5, 79)
+        obs = torch.randn(5, 80)
         value = tiny_actor_critic.get_value(obs)
         assert value.shape == (5,)
 
@@ -129,13 +129,13 @@ class TestActorCritic:
 
     def test_single_agent_batch(self, tiny_actor_critic: ActorCritic):
         """Should work with batch size 1."""
-        obs = torch.randn(1, 79)
+        obs = torch.randn(1, 80)
         action, raw, lp, ent, val = tiny_actor_critic.get_action_and_value(obs)
         assert action.shape == (1, 4)
         assert val.shape == (1,)
 
     def test_large_batch(self, tiny_actor_critic: ActorCritic):
         """Should work with batch size 100 (max agents per episode)."""
-        obs = torch.randn(100, 79)
+        obs = torch.randn(100, 80)
         action, raw, lp, ent, val = tiny_actor_critic.get_action_and_value(obs)
         assert action.shape == (100, 4)

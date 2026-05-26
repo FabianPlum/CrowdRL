@@ -4,8 +4,9 @@
 Any discrepancy here means the policy sees a different world and produces wrong actions.
 
 Observation layout (all in egocentric frame):
-  Ego state (7D):
-    goal_dir (2), velocity (2), heading (1), torso_angle (1), head_angle_rel_torso (1)
+  Ego state (8D):
+    goal_dir (2), velocity (2), speed (1), preferred_speed (1),
+    torso_angle (1), head_angle_rel_torso (1)
   Social (K*7 = 56D):
     per-neighbour: rel_pos (2), rel_vel (2), body_orient (1), body_dims (2)
   Raycasts (N or N*2):
@@ -148,7 +149,7 @@ class ObsConfig:
     @property
     def obs_dim(self) -> int:
         """Total observation dimensionality."""
-        ego = 7
+        ego = 8
         social = self.k_neighbours * 7
         rays = self.raycast.n_rays * (2 if self.raycast.two_channel else 1)
         nav = 3 if self.use_navmesh else 0
@@ -296,7 +297,7 @@ def build_observation(
     cos_h, sin_h = np.cos(-ego_heading), np.sin(-ego_heading)
     rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]], dtype=np.float64)
 
-    # --- Ego state (7D) ---
+    # --- Ego state (8D) ---
     # Goal direction in ego frame (unit vector)
     goal_diff = goal - ego_pos
     goal_dist = np.linalg.norm(goal_diff)
@@ -312,6 +313,13 @@ def build_observation(
     # But we include the speed as a proxy
     speed = np.linalg.norm(ego_vel)
 
+    # Preferred speed (raw m/s) -- exposes the per-agent target to the policy
+    # so it knows what it's being asked to track. Falls back to the Bohannon
+    # 1997 population mean if the field isn't populated.
+    preferred_speed = (
+        float(world.preferred_speeds[agent_idx]) if world.preferred_speeds is not None else 1.34
+    )
+
     # Torso angle (relative to velocity direction, or 0 if standing still)
     torso_angle = 0.0  # In ego frame, torso IS the reference
 
@@ -326,6 +334,7 @@ def build_observation(
             vel_ego[0],
             vel_ego[1],
             speed,
+            preferred_speed,
             torso_angle,
             head_rel_torso,
         ],
@@ -471,7 +480,7 @@ def build_observations_batch(
 
     M = len(active_idx)
 
-    # --- Vectorized ego state (M, 7) ---
+    # --- Vectorized ego state (M, 8) ---
     ego_pos = world.positions[active_idx]  # (M, 2)
     ego_vel = world.velocities[active_idx]  # (M, 2)
     ego_heading = world.torso_orientations[active_idx]  # (M,)
@@ -498,6 +507,13 @@ def build_observations_batch(
     # Speed
     speed = np.sqrt(np.sum(ego_vel**2, axis=-1))
 
+    # Preferred speed (raw m/s, per-agent target). Default to Bohannon mean
+    # if the field isn't populated.
+    if world.preferred_speeds is not None:
+        preferred_speed = world.preferred_speeds[active_idx].astype(np.float64)
+    else:
+        preferred_speed = np.full(M, 1.34, dtype=np.float64)
+
     # Torso angle in ego frame is 0 by construction
     torso_angle = np.zeros(M, dtype=np.float64)
 
@@ -511,10 +527,11 @@ def build_observations_batch(
             vel_ego_x,
             vel_ego_y,
             speed,
+            preferred_speed,
             torso_angle,
             head_rel_torso,
         ]
-    )  # (M, 7)
+    )  # (M, 8)
 
     # --- Batch social sensing (M, K*7) ---
     social = knn_social_batch(world, active_idx, k=config.k_neighbours)  # (M, K, 7)
@@ -526,8 +543,8 @@ def build_observations_batch(
 
     # --- Assemble ---
     offset = 0
-    obs[active_idx, offset : offset + 7] = ego_state
-    offset += 7
+    obs[active_idx, offset : offset + 8] = ego_state
+    offset += 8
 
     social_dim = config.k_neighbours * 7
     obs[active_idx, offset : offset + social_dim] = social_flat

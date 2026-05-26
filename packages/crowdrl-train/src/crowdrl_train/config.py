@@ -26,7 +26,7 @@ class NetworkConfig:
     separate outperformed shared trunk on 4/5 continuous control envs.
     """
 
-    obs_dim: int = 79
+    obs_dim: int = 80
     """Observation dimensionality (from ObsConfig.obs_dim)."""
 
     action_dim: int = 4

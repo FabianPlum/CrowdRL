@@ -6,7 +6,7 @@ are detected, resolved, and penalised.
 
 ---
 
-## 1. Perception: building the 79-D observation vector
+## 1. Perception: building the 80-D observation vector
 
 Every timestep, each agent receives an **egocentric** observation assembled in
 `crowdrl_core/observation.py` from a `WorldState` struct. Everything is rotated
@@ -15,12 +15,12 @@ into the agent's own torso-heading frame via a 2-D rotation matrix built from
 
 | Component | Dims | Details |
 |-----------|------|---------|
-| **Ego state** | 7 | Goal direction (2, unit vector), velocity (2, ego frame), scalar speed (1), torso angle (1, always 0 in ego frame), head angle relative to torso (1, wrapped to [-pi, pi]) |
+| **Ego state** | 8 | Goal direction (2, unit vector), velocity (2, ego frame), scalar speed (1), preferred speed (1, raw m/s), torso angle (1, always 0 in ego frame), head angle relative to torso (1, wrapped to [-pi, pi]) |
 | **Social** | 56 | 8 nearest neighbours x 7: relative position (2), relative velocity (2), body orientation relative to ego (1), shoulder width (1), chest depth (1). Zero-padded when fewer than 8 neighbours exist |
 | **Raycasts** | 16 | 16 rays over 200 deg FOV anchored to the **head** (not torso). Max range 5 m. Each ray yields a normalised distance in [0, 1] where 1.0 = max range / no hit. Optional 2-channel mode adds a hit-type channel |
 | **Navmesh** *(optional)* | 3 | Next-waypoint direction in ego frame (2) + path deviation from A\* shortest path (1) |
 
-**Total**: `7 + (8 x 7) + 16 = 79` (default, single-channel rays, navmesh off).
+**Total**: `8 + (8 x 7) + 16 = 80` (default, single-channel rays, navmesh off).
 
 Key implementation details:
 - Goal direction is safe-divided (zero vector if at goal).
@@ -38,8 +38,8 @@ Defined in `crowdrl_train/networks.py`. Both actor and critic are **separate**
 2-hidden-layer MLPs (no shared trunk, per Andrychowicz et al. 2021):
 
 ```
-Actor:   79 --> [256, tanh] --> [256, tanh] --> 4  (action means)
-Critic:  79 --> [256, tanh] --> [256, tanh] --> 1  (state value)
+Actor:   80 --> [256, tanh] --> [256, tanh] --> 4  (action means)
+Critic:  80 --> [256, tanh] --> [256, tanh] --> 1  (state value)
 ```
 
 ### Policy distribution
@@ -293,7 +293,7 @@ collision signals in congested scenarios.
 ## 7. The full loop (single timestep)
 
 ```
-observations (N, 82)              79D base + 3D navmesh (when enabled)
+observations (N, 83)              80D base + 3D navmesh (when enabled)
        |
        v
   Actor network: obs -> mu (4) + sigma

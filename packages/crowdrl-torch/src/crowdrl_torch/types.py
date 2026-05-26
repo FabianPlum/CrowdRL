@@ -120,7 +120,7 @@ class EnvConfig(NamedTuple):
     fov_deg: float = 200.0
     max_range: float = 5.0
     k_neighbours: int = 8
-    obs_dim: int = 79  # 7 + 8*7 + 16
+    obs_dim: int = 80  # 8 + 8*7 + 16  (ego now includes preferred_speed)
     use_navmesh: bool = False
     max_waypoints: int = 16
     waypoint_crossing_threshold: float = 0.5

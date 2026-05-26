@@ -19,7 +19,7 @@ from crowdrl_train.config import (
 class TestNetworkConfig:
     def test_defaults(self):
         cfg = NetworkConfig()
-        assert cfg.obs_dim == 79
+        assert cfg.obs_dim == 80
         assert cfg.action_dim == 4
         assert cfg.actor_hidden_sizes == (256, 256)
         assert cfg.activation == "tanh"
