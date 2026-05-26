@@ -70,4 +70,5 @@ dev = [
     "nvidia-nccl-cu12; sys_platform == 'linux'",
     "nvidia-nvjitlink-cu12; sys_platform == 'linux'",
     "nvidia-nvtx-cu12; sys_platform == 'linux'",
+    "pandas>=3.0.3",
 ]
