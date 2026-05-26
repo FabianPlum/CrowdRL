@@ -99,14 +99,18 @@ class CrowdEnvConfig:
     name was misleading because the formula meant the opposite of what
     the word suggested."""
 
-    max_speed_multiplier: float = 2.0
-    """Velocity magnitude clamp as a multiple of action.max_speed.
+    max_velocity_magnitude: float = 3.0
+    """Hard clamp on velocity magnitude (m/s).
 
-    After contact forces are applied, agent speeds are clamped to
-    ``max_speed_multiplier * action.max_speed``.  This prevents contact
-    forces from launching agents at unrealistic velocities while still
-    allowing brief bursts above the desired-speed ceiling (e.g. being
-    pushed by a crowd).
+    After contact forces are applied, agent speeds are clamped to this
+    value. This prevents contact forces from launching agents at
+    unrealistic velocities while still allowing brief bursts above
+    the desired-speed ceiling (e.g. being pushed by a crowd).
+
+    Sits above ``action.max_forward_speed`` so policy-commanded motion
+    is never the binding constraint. Experimental starting point; the
+    literature on transient running and emergency-evacuation
+    pedestrian speeds should refine this value.
     """
 
     # Episode
@@ -343,7 +347,7 @@ class CrowdEnv(gym.Env):
         self._world.velocities[mask] += contact_forces[mask] * cfg.dt
 
         # Clamp velocity magnitudes to prevent contact-force blow-up
-        max_vel = cfg.max_speed_multiplier * cfg.action.max_speed
+        max_vel = cfg.max_velocity_magnitude
         speeds = np.linalg.norm(self._world.velocities[mask], axis=1)
         too_fast = speeds > max_vel
         if np.any(too_fast):

@@ -125,8 +125,10 @@ class EnvConfig(NamedTuple):
     max_waypoints: int = 16
     waypoint_crossing_threshold: float = 0.5
 
-    # Action
-    max_speed: float = 1.5
+    # Action (asymmetric: humans walk forward faster than backward).
+    # Experimental defaults; to be backed by literature -- see ActionConfig.
+    max_forward_speed: float = 2.0
+    max_backward_speed: float = 0.5
     max_heading_change: float = 0.020  # ~115 deg/s at dt=0.01s (Layer 1; was pi/12)
     max_torso_change: float = 0.010  # ~57 deg/s at dt=0.01s (Layer 1; was pi/12)
     max_head_change: float = 0.030  # ~172 deg/s at dt=0.01s (Layer 1; was pi/3)
@@ -141,7 +143,13 @@ class EnvConfig(NamedTuple):
     contact_damping: float = 500.0
     wall_strength: float = 400.0
     wall_range: float = 0.3
-    max_speed_multiplier: float = 2.0
+    max_velocity_magnitude: float = 3.0
+    """Hard clamp on actual velocity magnitude (m/s). Safety against
+    contact-force-induced blowup, not a behavioural constraint -- sits
+    above max_forward_speed so policy-commanded motion is never the
+    binding constraint. Experimental starting point; the literature on
+    transient running and emergency-evacuation pedestrian speeds should
+    refine this."""
 
     # Reward
     goal_bonus: float = 10.0
@@ -209,7 +217,8 @@ class EnvConfig(NamedTuple):
             max_range=cfg.obs.raycast.max_range,
             k_neighbours=cfg.obs.k_neighbours,
             obs_dim=cfg.obs.obs_dim,
-            max_speed=cfg.action.max_speed,
+            max_forward_speed=cfg.action.max_forward_speed,
+            max_backward_speed=cfg.action.max_backward_speed,
             max_heading_change=cfg.action.max_heading_change,
             max_torso_change=cfg.action.max_torso_change,
             max_head_change=cfg.action.max_head_change,
@@ -218,7 +227,7 @@ class EnvConfig(NamedTuple):
             desired_velocity_weight=cfg.desired_velocity_weight,
             contact_stiffness=cfg.contact_stiffness,
             contact_damping=cfg.contact_damping,
-            max_speed_multiplier=cfg.max_speed_multiplier,
+            max_velocity_magnitude=cfg.max_velocity_magnitude,
             goal_bonus=cfg.reward.goal_bonus,
             collision_penalty=cfg.reward.collision_penalty,
             timeout_penalty=cfg.reward.timeout_penalty,

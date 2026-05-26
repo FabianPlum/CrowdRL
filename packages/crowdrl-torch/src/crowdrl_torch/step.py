@@ -98,7 +98,7 @@ def batched_step(
     )
 
     # Clamp velocity magnitudes to prevent contact-force blow-up
-    max_vel = config.max_speed_multiplier * config.max_speed
+    max_vel = config.max_velocity_magnitude
     speeds = (new_velocities**2).sum(dim=-1, keepdim=True).sqrt()
     scale = torch.where(
         speeds > max_vel, max_vel / torch.clamp(speeds, min=1e-10), torch.ones_like(speeds)

@@ -813,14 +813,19 @@ body because:
 | `desired_velocity_weight` | 0.05 | -- | Weight on desired velocity; 0.05 = 5% desired + 95% carry-over (tau ~200ms at dt=0.01s). Higher = less smoothing. Layer 1 of agent_dynamics_refactor (was 0.8). Renamed from `velocity_damping`. |
 | `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
 | `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
-| `max_speed_multiplier` | 2.0 | -- | Speed clamp = 2.0 * 1.5 = 3.0 m/s |
+| `max_velocity_magnitude` | 3.0 | m/s | Hard velocity clamp; safety vs contact-force blowup. Sits above max_forward_speed so policy commands are never the binding constraint. Experimental starting point. |
 | `max_steps` | 5000 | steps | Episode timeout (50 seconds) |
 
 ### Action limits ([ActionConfig](../packages/crowdrl-core/src/crowdrl_core/action.py#L27))
 
+Desired speed is asymmetric: humans walk forward much faster than backward.
+action[0] linearly remaps [-1, 1] -> [-max_backward_speed, +max_forward_speed].
+Negative desired_speed means motion opposite to heading (backing up).
+
 | Parameter | Default | Unit | Equivalent rate |
 |-----------|---------|------|-----------------|
-| `max_speed` | 1.5 | m/s | -- |
+| `max_forward_speed` | 2.0 | m/s | action[0]=+1 -> +2.0 m/s (slow run; experimental, see code docstring) |
+| `max_backward_speed` | 0.5 | m/s | action[0]=-1 -> -0.5 m/s; ~25% of forward (experimental) |
 | `max_heading_change` | 0.020 | rad/step | 115 deg/s (walking yaw envelope, Hicheur 2007) |
 | `max_torso_change` | 0.010 | rad/step | 57 deg/s (hip constraints) |
 | `max_head_change` | 0.030 | rad/step | 172 deg/s (head scans fastest) |

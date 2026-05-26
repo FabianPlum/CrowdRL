@@ -1,15 +1,21 @@
 """Action interpreter: maps 4D policy output to kinematic quantities.
 
 Action space (4D continuous):
-  0. Desired speed (scalar, mapped from [-1,1] → [0, max_speed])
-  1. Desired heading change (scalar, mapped from [-1,1] → [-max_turn, max_turn])
+  0. Desired speed (scalar, mapped from [-1,1] -> [-max_backward_speed,
+     +max_forward_speed]; negative values mean motion opposite to heading)
+  1. Desired heading change (scalar, mapped from [-1,1] -> [-max_turn, max_turn])
   2. Desired torso orientation change (scalar, same range as heading)
-  3. Desired head orientation change relative to torso (scalar, clamped ±90°)
+  3. Desired head orientation change relative to torso (scalar, clamped +-90 deg)
 
 The head and torso are independently actuated:
-- Head can rotate up to ±90° relative to torso (cheap information-gathering)
+- Head can rotate up to +-90 deg relative to torso (cheap information-gathering)
 - Torso rotation alters the collision ellipse orientation (physical reorientation)
 - Raycasts follow the head, not the torso
+
+Desired-speed range is asymmetric: humans walk forward much faster than
+backward. The signed value enables backing up (useful for queuing and
+tight reversals) at a biomechanically realistic ratio. Current limits
+are experimental starting points and should be backed by literature.
 
 During training, outputs feed back into the physics step.
 During deployment, the desired velocity feeds into JuPedSim's simulation loop.
@@ -27,8 +33,28 @@ from numpy.typing import NDArray
 class ActionConfig:
     """Configuration for the action interpreter."""
 
-    max_speed: float = 1.5
-    """Maximum desired speed (m/s). Typical preferred pedestrian speed ~1.34 m/s."""
+    max_forward_speed: float = 2.0
+    """Maximum desired forward speed (m/s); action[0] = +1 maps here.
+
+    Experimental starting point. 2.0 m/s sits at the upper end of
+    comfortable walking / lower end of slow running per Bohannon
+    (1997) and the walking-to-running gait transition literature.
+    The matching spawn-time preferred_speed clip in SpawnConfig is
+    also 2.0 m/s, so every agent's preferred speed is reachable by
+    the action interpreter. To be confirmed and refined via
+    literature review of pedestrian-dynamics evacuation data.
+    """
+
+    max_backward_speed: float = 0.5
+    """Maximum desired backward speed magnitude (m/s); action[0] = -1
+    maps to -max_backward_speed (i.e. motion opposite to heading).
+
+    Asymmetric with max_forward_speed because humans can walk backward
+    at only a fraction of their forward speed (roughly 30-50% in normal
+    locomotion). The 0.5 m/s starting point is biomechanically plausible
+    but experimental; literature on reverse-gait pedestrian speeds is
+    sparse and should be filled in as the model matures.
+    """
 
     max_heading_change: float = 0.020
     """Max heading change per step (radians). 0.020 rad/step = 1.15 deg/step,
@@ -100,8 +126,10 @@ def interpret_action(
     # Clamp raw action to [-1, 1]
     action = np.clip(raw_action, -1.0, 1.0)
 
-    # 1. Desired speed: map [−1, 1] → [0, max_speed]
-    desired_speed = (action[0] + 1.0) / 2.0 * config.max_speed
+    # 1. Desired speed: linear remap [-1, 1] -> [-max_backward_speed, +max_forward_speed].
+    # Negative values mean motion opposite to heading (i.e. backing up).
+    speed_range = config.max_forward_speed + config.max_backward_speed
+    desired_speed = -config.max_backward_speed + (action[0] + 1.0) / 2.0 * speed_range
 
     # 2. Heading change
     heading_change = action[1] * config.max_heading_change
@@ -191,8 +219,9 @@ def interpret_actions_batch(
     """
     actions = np.clip(raw_actions, -1.0, 1.0)
 
-    # 1. Desired speed: map [-1, 1] -> [0, max_speed]
-    desired_speeds = (actions[:, 0] + 1.0) / 2.0 * config.max_speed
+    # 1. Desired speed: linear remap [-1, 1] -> [-max_backward_speed, +max_forward_speed].
+    speed_range = config.max_forward_speed + config.max_backward_speed
+    desired_speeds = -config.max_backward_speed + (actions[:, 0] + 1.0) / 2.0 * speed_range
 
     # 2. Heading change
     new_headings = current_headings + actions[:, 1] * config.max_heading_change

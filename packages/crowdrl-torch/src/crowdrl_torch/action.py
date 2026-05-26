@@ -47,8 +47,10 @@ def interpret_actions(
     """
     actions = torch.clamp(raw_actions, -1.0, 1.0)
 
-    # 1. Desired speed: map [-1, 1] -> [0, max_speed]
-    desired_speeds = (actions[..., 0] + 1.0) / 2.0 * config.max_speed
+    # 1. Desired speed: linear remap [-1, 1] -> [-max_backward_speed, +max_forward_speed].
+    # Negative values mean motion opposite to heading (backing up).
+    speed_range = config.max_forward_speed + config.max_backward_speed
+    desired_speeds = -config.max_backward_speed + (actions[..., 0] + 1.0) / 2.0 * speed_range
 
     # 2. Heading change
     new_headings = current_headings + actions[..., 1] * config.max_heading_change

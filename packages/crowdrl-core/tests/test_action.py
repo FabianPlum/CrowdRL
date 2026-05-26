@@ -10,21 +10,22 @@ from crowdrl_core.action import (
 
 
 class TestInterpretAction:
-    def test_zero_action(self):
-        """Zero action should produce zero speed (since speed maps [-1,1] → [0, max])."""
+    def test_zero_action_midpoint(self):
+        """action[0]=0 lands at midpoint of [-max_back, +max_fwd] = +0.75 m/s."""
         result = interpret_action(
             np.array([0.0, 0.0, 0.0, 0.0]),
             current_heading=0.0,
             current_torso=0.0,
             current_head=0.0,
         )
-        # Speed: (0 + 1) / 2 * 1.5 = 0.75
+        # Linear remap: -0.5 + (0 + 1) / 2 * 2.5 = +0.75 m/s
         expected_speed = 0.75
+        # Magnitude only (negative desired_speed would also give positive magnitude)
         actual_speed = np.linalg.norm(result.desired_velocity)
         assert abs(actual_speed - expected_speed) < 1e-6
 
-    def test_max_speed(self):
-        """Action[0] = 1.0 should produce max speed."""
+    def test_max_forward_speed(self):
+        """action[0]=+1 produces max_forward_speed (default 2.0 m/s)."""
         result = interpret_action(
             np.array([1.0, 0.0, 0.0, 0.0]),
             current_heading=0.0,
@@ -32,12 +33,33 @@ class TestInterpretAction:
             current_head=0.0,
         )
         speed = np.linalg.norm(result.desired_velocity)
-        assert abs(speed - 1.5) < 1e-6
+        assert abs(speed - 2.0) < 1e-6
 
-    def test_zero_speed(self):
-        """Action[0] = -1.0 should produce zero speed."""
+    def test_max_backward_speed(self):
+        """action[0]=-1 produces max_backward_speed magnitude (default 0.5 m/s),
+        with the velocity vector pointing OPPOSITE to heading."""
         result = interpret_action(
             np.array([-1.0, 0.0, 0.0, 0.0]),
+            current_heading=0.0,  # facing +x
+            current_torso=0.0,
+            current_head=0.0,
+        )
+        # Magnitude should equal max_backward_speed
+        speed = np.linalg.norm(result.desired_velocity)
+        assert abs(speed - 0.5) < 1e-6
+        # Direction should be -x (opposite to heading)
+        assert result.desired_velocity[0] < 0.0
+        assert abs(result.desired_velocity[1]) < 1e-9
+
+    def test_zero_speed_at_inverse_midpoint(self):
+        """action[0] that maps to desired_speed=0 sits at the asymmetric
+        zero-crossing (a0 = -max_back / (max_fwd + max_back) * 2 - 1)."""
+        cfg = ActionConfig()
+        # Inverse of: desired = -max_back + (a0+1)/2 * (max_fwd + max_back)
+        speed_range = cfg.max_forward_speed + cfg.max_backward_speed
+        a0_zero = 2.0 * cfg.max_backward_speed / speed_range - 1.0
+        result = interpret_action(
+            np.array([a0_zero, 0.0, 0.0, 0.0]),
             current_heading=0.0,
             current_torso=0.0,
             current_head=0.0,
@@ -119,7 +141,7 @@ class TestInterpretAction:
         assert abs(vel_angle - result.new_heading) < 1e-6
 
     def test_action_clipping(self):
-        """Actions outside [-1, 1] should be clipped."""
+        """Actions outside [-1, 1] should be clipped to max_forward_speed."""
         result = interpret_action(
             np.array([5.0, -5.0, 3.0, -3.0]),
             current_heading=0.0,
@@ -127,7 +149,8 @@ class TestInterpretAction:
             current_head=0.0,
         )
         speed = np.linalg.norm(result.desired_velocity)
-        assert speed <= 1.5 + 1e-6
+        cfg = ActionConfig()
+        assert speed <= cfg.max_forward_speed + 1e-6
 
     def test_2d_action_mode(self):
         """With action_dim=2, torso and head should fuse with heading."""
