@@ -74,26 +74,36 @@ class RewardConfig:
     use_smoothness: bool = True
     """Whether to apply Tier 2 smoothness penalties."""
 
-    jerk_penalty_weight: float = -0.0001
-    """Weight for acceleration change (jerk) penalty. Layer 1 of
-    plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x (from
-    -1e-6 to -1e-4) so the penalty can compete with the goal bonus.
-    Jerk scales as 1/dt^2 so raw magnitudes are large -- but that is
-    the symptom of a too-permissive action space, not a reason to
-    silence the signal."""
+    jerk_penalty_weight: float = -1e-5
+    """Weight for acceleration change (jerk) penalty. Layer 1 v2
+    (notebook 09 diagnostic showed Layer 1 v1's -1e-4 made deceleration
+    expensive enough to flip the brake-vs-collide trade-off the wrong
+    way). Dropped 10x to -1e-5. Jerk scales as 1/dt^2 so raw magnitudes
+    are large; this weight just makes the signal informative without
+    dominating the brake decision."""
 
     angular_accel_penalty_weight: float = -0.01
     """Weight for angular acceleration penalty. Layer 1 of
     plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x
     (from -1e-4 to -1e-2)."""
 
-    speed_deviation_weight: float = -0.1
-    """Weight for deviation from preferred speed. Layer 1 of
-    plan/agent_dynamics_refactor.md (2026-05-25) raised this 100x
-    (from -1e-3 to -1e-1). Historical YAMLs override this to 0.0
-    because earlier experiments found it dominated congested
-    scenarios where agents must slow down -- worth a sweep under
-    the new action caps."""
+    speed_deviation_weight: float = -0.005
+    """Weight for |actual_speed - preferred_speed| penalty (m/s units).
+
+    Layer 1 v2 (notebook 09 surfaced the ice-skating pathology: at -0.1,
+    braking for 1 s cost ~-13 reward in speed_deviation alone, more than
+    the cost of plowing through a wall; the policy correctly converged
+    to never brake). Dropped 20x to -0.005 so braking is cheap enough
+    that collision-avoidance becomes the dominant signal, but still
+    biases the policy toward the per-agent preferred speed under
+    unconstrained motion. The policy can now observe its preferred
+    speed directly (ego state index 5) so this is a true tracking
+    signal, not a hidden target.
+
+    Future tunable: scale this weight down further in dense-proximity
+    contexts so queuing behaviour is not punished. Likely emerges
+    implicitly from the agent_proximity penalties; revisit if it
+    does not."""
 
     # Existence penalty (per-step cost for being alive)
     existence_penalty: float = -0.01

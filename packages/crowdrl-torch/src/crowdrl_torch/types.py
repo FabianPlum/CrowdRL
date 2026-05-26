@@ -165,9 +165,13 @@ class EnvConfig(NamedTuple):
     action_rate_weight: float = -0.01  # Layer 1: was 0.0 (disabled)
     existence_penalty: float = -0.01
     use_smoothness: bool = True
-    jerk_penalty_weight: float = -0.0001  # Layer 1: was -1e-6 (100x up)
+    jerk_penalty_weight: float = (
+        -1e-5
+    )  # Layer 1 v2: was -1e-4 (10x down -- see reward.py docstring)
     angular_accel_penalty_weight: float = -0.01  # Layer 1: was -1e-4 (100x up)
-    speed_deviation_weight: float = -0.1  # Layer 1: was -1e-3 (100x up)
+    speed_deviation_weight: float = (
+        -0.005
+    )  # Layer 1 v2: was -0.1 (20x down -- see reward.py docstring)
 
     # Episode
     max_steps: int = 5000
