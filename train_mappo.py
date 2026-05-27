@@ -29,7 +29,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
-from matplotlib import cm
 
 # -- CrowdRL imports ---------------------------------------------------------
 from crowdrl_core.action import ActionConfig
@@ -63,8 +62,9 @@ from crowdrl_torch.distributed import (
 )
 from crowdrl_torch.types import EnvConfig
 
-# Non-interactive matplotlib backend -- no display needed for headless training
-matplotlib.use("Agg")
+# Note: matplotlib backend is switched to "Agg" inside main(), not at module
+# import time, so importing helpers from this module (e.g. build_env_config in
+# notebooks) does not silently disable interactive plotting in the caller.
 
 # Suppress harmless torch.compile warning: "skipping cudagraphs due to cpu device".
 # Our EnvConfig is a NamedTuple with plain Python scalars (dt, max_speed, ...) that
@@ -654,7 +654,7 @@ def save_trajectory_plots(
         plot_geometry(polygon, ax=ax)
 
         n_agents = len(trajs)
-        cmap_fn = cm.get_cmap("tab20", n_agents)
+        cmap_fn = plt.get_cmap("tab20", n_agents)
         for i in range(n_agents):
             traj = np.array(trajs[i])
             color = cmap_fn(i % 20)
@@ -831,6 +831,7 @@ def train_worker(
     results_dir: Path,
     resume_training: bool = False,
     start_from_zero: bool = False,
+    init_from: str | Path | None = None,
 ) -> None:
     """Main training loop -- runs on each DDP rank.
 
@@ -847,6 +848,10 @@ def train_worker(
         Only valid with ``resume_training``. Load weights and normalizer
         statistics from the checkpoint but restart rollout counting, curriculum,
         and history from scratch. Optimizer state is also reset.
+    init_from
+        Path to a checkpoint to initialize weights and normalizer statistics
+        from before a fresh training run. Optimizer, curriculum, and history
+        start from scratch. Mutually exclusive with ``resume_training``.
     """
     rank, world_size, device = init_distributed(cfg.get("ddp_backend", "nccl"))
 
@@ -866,6 +871,10 @@ def train_worker(
     n_rollouts = cfg.get("n_rollouts", 500)
     log_interval = cfg.get("log_interval", 5)
     compile_step = cfg.get("compile_step", True)
+    checkpoint_interval = cfg.get("checkpoint_interval", 0)
+    # 0 = only save the final checkpoint (legacy behaviour).
+    # >0 = also save ``checkpoint_rollout_<N>.pt`` every N rollouts so we can
+    # diff/replay/eval intermediate policy states for debugging.
 
     # -- Validate max_agents covers curriculum --------------------------------
     max_phase_agents = max(p.n_agents_range[1] for p in curriculum_config.phases)
@@ -963,6 +972,31 @@ def train_worker(
                         f"({n_rollouts}); increase n_rollouts in the config to "
                         "continue training."
                     )
+    elif init_from is not None:
+        ckpt_path = Path(init_from)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"--init_from checkpoint not found at {ckpt_path}")
+        # Load weights + normalizer stats only; discard optimizer, curriculum,
+        # and rollout counters. Throwaway objects let load_checkpoint populate
+        # them without polluting our real state.
+        throwaway_updater = MAPPOUpdater(actor_critic, ppo_config, device)
+        throwaway_curriculum = CurriculumManager(curriculum_config)
+        load_checkpoint(
+            ckpt_path,
+            actor_critic,
+            throwaway_updater,
+            obs_normalizer,
+            reward_normalizer,
+            throwaway_curriculum,
+        )
+        if is_main_rank():
+            print(f"--init_from: loaded weights + normalizers from {ckpt_path}")
+            print("Training starts fresh: curriculum at phase 0, rollout 0")
+            history_path = results_dir / "history.json"
+            if history_path.exists():
+                archive = results_dir / "history_previous.json"
+                history_path.replace(archive)
+                print(f"Previous history archived to {archive}")
 
     if is_main_rank():
         n_params = sum(p.numel() for p in actor_critic.parameters())
@@ -972,9 +1006,15 @@ def train_worker(
         print(f"Effective batch: {steps_per_collect * world_size:,} agent-steps/update")
         print(f"Curriculum: {' -> '.join(p.name for p in curriculum_config.phases)}")
         results_dir.mkdir(parents=True, exist_ok=True)
-        # Save resolved config for reproducibility
+        # Save resolved config for reproducibility, augmented with launch-time
+        # provenance so the file fully describes how this run started. The
+        # init_from path is recorded as absolute so it stays unambiguous if
+        # the results dir is later moved or inspected from elsewhere.
+        cfg_to_dump = dict(cfg)
+        if init_from is not None:
+            cfg_to_dump["_launch"] = {"init_from": str(Path(init_from).resolve())}
         with open(results_dir / "config_resolved.yaml", "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(cfg_to_dump, f, default_flow_style=False, sort_keys=False)
 
     # -- Launch batched env --------------------------------------------------
     cur_env_config = curriculum.make_env_config(env_config)
@@ -1142,6 +1182,22 @@ def train_worker(
                     flush=True,
                 )
 
+            # Periodic checkpoint (rank 0 only). Each save is independent so
+            # any intermediate policy can be loaded later for eval / replay /
+            # diffing. Disabled when checkpoint_interval == 0.
+            if checkpoint_interval > 0 and rollout % checkpoint_interval == 0 and is_main_rank():
+                ckpt_path = results_dir / f"checkpoint_rollout_{rollout:04d}.pt"
+                save_checkpoint(
+                    ckpt_path,
+                    actor_critic,
+                    updater,
+                    obs_normalizer,
+                    reward_normalizer,
+                    curriculum,
+                    total_agent_steps,
+                    total_episodes,
+                )
+
     finally:
         batched_env.close()
 
@@ -1257,6 +1313,10 @@ def train_worker(
 
 
 def main() -> None:
+    # Non-interactive backend -- no display needed for headless training.
+    # Done here (not at module load) so notebook imports of helpers from this
+    # module don't break interactive plotting.
+    matplotlib.use("Agg")
     parser = argparse.ArgumentParser(description="MAPPO training with automatic multi-GPU support")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument(
@@ -1276,10 +1336,21 @@ def main() -> None:
         "at rollout 0 with a fresh optimizer and fresh history. The old history "
         "file is moved to history_previous.json before training starts.",
     )
+    parser.add_argument(
+        "--init_from",
+        type=str,
+        default=None,
+        help="Path to a checkpoint to initialize weights and normalizer statistics "
+        "from. Optimizer, curriculum, and history start fresh. Cannot be combined "
+        "with --resume_training. Any existing history.json in the results dir is "
+        "archived to history_previous.json.",
+    )
     args = parser.parse_args()
 
     if args.start_from_zero and not args.resume_training:
         parser.error("--start_from_zero requires --resume_training")
+    if args.init_from is not None and args.resume_training:
+        parser.error("--init_from cannot be combined with --resume_training")
 
     cfg = load_config(args.config)
     config_stem = Path(args.config).stem
@@ -1292,6 +1363,7 @@ def main() -> None:
             results_dir,
             resume_training=args.resume_training,
             start_from_zero=args.start_from_zero,
+            init_from=args.init_from,
         )
         return
 
@@ -1319,6 +1391,7 @@ def main() -> None:
             results_dir,
             resume_training=args.resume_training,
             start_from_zero=args.start_from_zero,
+            init_from=args.init_from,
         )
 
 

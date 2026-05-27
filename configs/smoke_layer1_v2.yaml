@@ -27,6 +27,7 @@ steps_per_collect: 80000      # one full episode per env, ~128 completed episode
 n_rollouts: 5                 # ~5 PPO updates is enough to catch grad-flow issues
 log_interval: 1
 compile_step: true
+checkpoint_interval: 1        # save policy after every rollout (debug-grade granularity)
 
 
 # ---------------------------------------------------------------------------
