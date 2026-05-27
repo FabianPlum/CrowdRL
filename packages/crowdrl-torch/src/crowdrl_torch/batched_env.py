@@ -42,6 +42,11 @@ class BatchedTorchEnv:
     compile_step : bool
         If True, apply ``torch.compile(mode="reduce-overhead")`` to the
         step function for kernel fusion and CUDA graph support.
+    disable_auto_reset : bool
+        If True, finished envs are not auto-reset and ``step`` skips the
+        ``episode_over.nonzero().tolist()`` CPU sync. Intended for
+        evaluation, where each env runs exactly one episode and resets
+        would contaminate per-episode stats.
     """
 
     def __init__(
@@ -53,6 +58,7 @@ class BatchedTorchEnv:
         seed: int = 42,
         n_reset_workers: int = 8,
         compile_step: bool = False,
+        disable_auto_reset: bool = False,
     ):
         self.n_envs = n_envs
         self.config = config
@@ -60,6 +66,7 @@ class BatchedTorchEnv:
         self.device = torch.device(device)
         self.seed = seed
         self._seed_counter = seed
+        self.disable_auto_reset = disable_auto_reset
 
         self._step_fn = batched_step
         self._compiled = False
@@ -180,6 +187,11 @@ class BatchedTorchEnv:
         # Envs already idle (waiting for async reset) are NOT flagged.
         any_active = self.states.active_mask.any(dim=-1)  # (E,)
         self.episode_over = had_active & ~any_active
+
+        # Eval mode: skip auto-reset entirely. This avoids the per-step
+        # ``.tolist()`` sync barrier on ``self.episode_over``.
+        if self.disable_auto_reset:
+            return self.states, obs, rewards, terminated, truncated
 
         # Initiate async resets for finished envs
         for env_idx in self.episode_over.nonzero(as_tuple=False).flatten().tolist():

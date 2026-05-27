@@ -37,6 +37,43 @@ def _polygon_to_patch(polygon: Polygon, **kwargs) -> mpatches.Polygon:
     return mpatches.Polygon(coords, **kwargs)
 
 
+def plot_walls(
+    walls: NDArray[np.float64],
+    ax: "Axes | None" = None,
+    *,
+    wall_color: str = "#333333",
+    wall_linewidth: float = 2.0,
+    pad: float = 0.5,
+) -> tuple["Figure", "Axes"]:
+    """Plot a geometry from raw wall segments (no Shapely polygon required).
+
+    Used as a fallback for ``plot_geometry`` when the source of frames is
+    the GPU-batched env, which only stores wall segments rather than a
+    polygon. Axes are framed around the wall bounding box plus ``pad``.
+
+    Parameters
+    ----------
+    walls : (n_segments, 2, 2)
+        Wall segments as ``((x0, y0), (x1, y1))`` pairs.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    else:
+        fig = ax.figure
+
+    lc = LineCollection(walls, colors=wall_color, linewidths=wall_linewidth, zorder=1)
+    ax.add_collection(lc)
+
+    if len(walls) > 0:
+        flat = walls.reshape(-1, 2)
+        x_min, y_min = flat.min(axis=0)
+        x_max, y_max = flat.max(axis=0)
+        ax.set_xlim(x_min - pad, x_max + pad)
+        ax.set_ylim(y_min - pad, y_max + pad)
+        ax.set_aspect("equal")
+    return fig, ax
+
+
 def plot_geometry(
     polygon: Polygon,
     ax: Axes | None = None,
@@ -445,14 +482,21 @@ class EpisodeFrames:
     goal_positions: NDArray[np.float64]
     """(n_agents, 2) — constant across frames."""
 
-    polygon: Polygon
-    """Walkable polygon for this episode."""
-
     active_masks: NDArray[np.bool_]
     """(n_frames, n_agents)"""
 
     reached_goal: NDArray[np.bool_]
     """(n_agents,) — whether each agent reached its goal by episode end."""
+
+    polygon: Polygon | None = None
+    """Walkable polygon for this episode. May be None for batched-env-sourced
+    frames; in that case ``walls`` must be provided."""
+
+    walls: NDArray[np.float64] | None = None
+    """Optional wall segments, shape ``(n_segments, 2, 2)``. Used as a
+    polygon-free alternative for geometry rendering when ``polygon`` is None
+    (e.g. when frames come from the GPU-batched env which only stores
+    segment representations)."""
 
     dt: float = 0.01
     """Simulation timestep in seconds (used for timestamp display)."""
@@ -604,7 +648,14 @@ def render_episode_video(
     cmap = plt.get_cmap("tab20", max(n_agents, 1))
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    plot_geometry(frames.polygon, ax=ax)
+    if frames.polygon is not None:
+        plot_geometry(frames.polygon, ax=ax)
+    elif frames.walls is not None:
+        plot_walls(frames.walls, ax=ax)
+    else:
+        raise ValueError(
+            "EpisodeFrames must have either `polygon` or `walls` populated for video rendering."
+        )
 
     # Plot goal markers (static)
     for i in range(n_agents):
