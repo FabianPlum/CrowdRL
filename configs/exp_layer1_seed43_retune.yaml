@@ -1,0 +1,188 @@
+# =============================================================================
+# Experiment: Layer 1 v2 of agent_dynamics_refactor.
+# Derived from exp_memory_Aplus_nostuck_seed43.yaml (the best
+# memory-experiment baseline). Adds the Layer 1 envelope changes plus
+# the v2 corrections identified by notebook 09's reward-landscape
+# diagnostic.
+#
+# What Layer 1 v2 does:
+#   - Tighten per-step rate caps to the human walking envelope
+#     (~115/57/172 deg/s heading/torso/head, was 1500/1500/6000 deg/s).
+#   - Engage the velocity filter meaningfully (desired_velocity_weight
+#     0.05 = tau ~200ms, was 0.8 = essentially no filter).
+#   - Asymmetric desired_speed range: action[0] -> [-0.5, +2.0] m/s
+#     (linear remap). Negative values back the agent up. Forward cap
+#     matches the literature-grounded preferred_speed clip (2.0 m/s)
+#     so every agent's preferred speed is reachable.
+#   - Explicit max_velocity_magnitude = 3.0 m/s hard clamp (replaces
+#     the old max_speed_multiplier formulation).
+#   - preferred_speed is now exposed in the ego observation (raw m/s,
+#     index 5) so the policy can observe what it's being asked to
+#     track. obs_dim: 104 -> 105.
+#   - speed_deviation_weight = -0.005 (Layer 1 v1 used -0.1; notebook
+#     09 showed that made braking cost more than colliding, producing
+#     "ice skating" policies). 20x reduction.
+#   - jerk_penalty_weight = -1e-5 (was -1e-4; 10x reduction so it
+#     informs but does not dominate the brake decision). Picks up
+#     the new code default; not YAML-readable.
+#   - angular_accel_penalty_weight = -1e-2 (unchanged; picks up code
+#     default).
+#
+# Goal: produce a clean Layer 1 baseline that brakes near obstacles
+# without ice-skating, before committing to the Layer 2 structural
+# redesign (second-order action semantics, speed-yaw coupling).
+# Acceptance: visible deceleration on wall/agent approach, jerk
+# distribution lower than baseline, goal-completion within a few
+# percent of the A+ nostuck reference. See
+# plan/agent_dynamics_refactor.md and notebook 09 for the
+# diagnostic backing the v2 weights.
+# =============================================================================
+# obs_dim: 105 (A+ + preferred_speed). Run on either local 4090.
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Training schedule -- matches exp_memory_Aplus_nostuck_seed43 exactly
+# ---------------------------------------------------------------------------
+seed: 43
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 500
+log_interval: 5
+compile_step: true
+checkpoint_interval: 5        # save policy every 5 rollouts (~5 MB each, ~100 files = ~500 MB over a full run)
+
+
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 500
+
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [20, 100]
+      threshold: 0.0
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+
+geometry:
+  min_side: 8.0
+  max_side: 15.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 18.0]
+
+
+# ---------------------------------------------------------------------------
+# Observation -- A+ (persistent IDs + vel history), unchanged from baseline
+# ---------------------------------------------------------------------------
+observation:
+  use_navmesh: true
+
+  use_temporal_memory: true
+  temporal_memory_window: 50
+
+  use_neighbor_memory: true
+  neighbor_sensing_radius: 5.0
+  neighbor_vel_history_window: 5
+  use_neighbor_vel_history: true
+  use_neighbor_trajectory_features: false
+
+
+# ---------------------------------------------------------------------------
+# Action -- Layer 1 caps (biomechanical envelope at dt=0.01s)
+# ---------------------------------------------------------------------------
+action:
+  max_heading_change_deg: 10 # 1.146   # 115 deg/s (was 15.0 = 1500 deg/s)
+  max_torso_change_deg:   10 # 0.573   # 57 deg/s  (was 15.0)
+  max_head_change_deg:    10 # 1.719   # 172 deg/s (was implicit pi/3 = 6000 deg/s)
+
+
+# ---------------------------------------------------------------------------
+# Reward -- baseline A+ shaping with Layer 1 smoothness re-enabled
+# ---------------------------------------------------------------------------
+reward:
+  goal_bonus: 50.0
+  collision_penalty: -5.0
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 5          
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: -0.005  # Layer 1 v2: was -0.1 (20x down to escape ice-skating equilibrium)
+  use_smoothness: true
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5
+  agent_proximity_penalty_near: -0.05
+  agent_proximity_penalty_far: -0.0001
+  personal_space_radius: 1.0
+  action_rate_weight: 0 #-0.0001
+
+# Note: jerk_penalty_weight and angular_accel_penalty_weight are not
+# YAML-readable in train_mappo.build_env_config; they pick up the new
+# Layer 1 v2 code defaults (-1e-5 and -1e-2) from RewardConfig.
+
+
+# ---------------------------------------------------------------------------
+# Physics -- Layer 1 velocity blend
+# ---------------------------------------------------------------------------
+max_steps: 2000
+desired_velocity_weight: 0.2
+# desired_velocity_weight omitted on purpose: picks up Layer 1 default 0.05
+# (tau ~200 ms). Set explicitly here if you want to sweep.
+
+
+# ---------------------------------------------------------------------------
+# Episode -- inherit no-stuck-termination from A+ baseline
+# ---------------------------------------------------------------------------
+episode:
+  stuck_termination_enabled: false
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+
+
+network:
+  actor_hidden: [256, 256]
+  critic_hidden: [256, 256]
+
+
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+
+
+eval:
+  n_episodes: 10
+  agent_range: [8, 25]
+  render_video: true
+  video_scenario: 7
