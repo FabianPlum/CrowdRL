@@ -51,6 +51,7 @@ steps_per_collect: 1280000
 n_rollouts: 500
 log_interval: 5
 compile_step: true
+checkpoint_interval: 5        # save policy every 5 rollouts (~5 MB each, ~100 files = ~500 MB over a full run)
 
 
 curriculum:
@@ -117,20 +118,20 @@ observation:
 # Action -- Layer 1 caps (biomechanical envelope at dt=0.01s)
 # ---------------------------------------------------------------------------
 action:
-  max_heading_change_deg: 1.146   # 115 deg/s (was 15.0 = 1500 deg/s)
-  max_torso_change_deg:   0.573   # 57 deg/s  (was 15.0)
-  max_head_change_deg:    1.719   # 172 deg/s (was implicit pi/3 = 6000 deg/s)
+  max_heading_change_deg: 4 # 1.146   # 115 deg/s (was 15.0 = 1500 deg/s)
+  max_torso_change_deg:   2 # 0.573   # 57 deg/s  (was 15.0)
+  max_head_change_deg:    4 # 1.719   # 172 deg/s (was implicit pi/3 = 6000 deg/s)
 
 
 # ---------------------------------------------------------------------------
 # Reward -- baseline A+ shaping with Layer 1 smoothness re-enabled
 # ---------------------------------------------------------------------------
 reward:
-  goal_bonus: 20.0
+  goal_bonus: 50.0
   collision_penalty: -1.0
   timeout_penalty: -10.0
   existence_penalty: -0.01
-  progress_weight: 1.5            # carried over from A+ nostuck baseline
+  progress_weight: 5          
   inverse_distance_weight: 0.0
   speed_deviation_weight: -0.005  # Layer 1 v2: was -0.1 (20x down to escape ice-skating equilibrium)
   use_smoothness: true
@@ -139,7 +140,7 @@ reward:
   agent_proximity_penalty_near: -0.01
   agent_proximity_penalty_far: -0.0001
   personal_space_radius: 1.0
-  action_rate_weight: -0.01
+  action_rate_weight: -0.001
 
 # Note: jerk_penalty_weight and angular_accel_penalty_weight are not
 # YAML-readable in train_mappo.build_env_config; they pick up the new
