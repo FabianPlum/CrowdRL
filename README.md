@@ -196,7 +196,7 @@ uv run jupyter lab
 
 ## Current status
 
-**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v6.md) for details):
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v7.md) for details):
 
 | Milestone | Status |
 |-----------|--------|
