@@ -1,0 +1,14 @@
+## site.sh — HPC site configuration for sc_uv_crowdrl
+##
+## Copy this file to site.sh and fill in the paths for your allocation:
+##
+##   cp site.sh.template site.sh
+##   # then edit site.sh
+##
+## site.sh is listed in .gitignore and is never committed.
+## ---------------------------------------------------------------
+
+# Root directory on a high-quota shared filesystem (e.g. /p/project1/<your-project>).
+# uv binary, cache, downloaded Python interpreter, and CUDA runtime wheels all land here.
+# On JURECA/JUWELS this is typically your project allocation under /p/project1/.
+export UV_ROOT="/p/project1/<your-project-id>"
