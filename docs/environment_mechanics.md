@@ -138,7 +138,7 @@ raw actions (N, 4)             values in [-1, 1]
   1. interpret_actions_batch()     -> desired velocities + new orientations
        |
        v
-  2. Velocity blending             v = 0.8 * v_desired + 0.2 * v_old
+  2. Velocity blending             v = 0.05 * v_desired + 0.95 * v_old
        |
        v
   3. detect_collisions()           -> list of (i, j, overlap) tuples
@@ -186,27 +186,30 @@ The 4D action output in [-1, 1] is mapped by
 
 | Output | Maps to | Range | Physical meaning |
 |--------|---------|-------|------------------|
-| `a[0]` | Desired speed | 0 to 1.5 m/s | How fast the agent wants to walk |
-| `a[1]` | Heading change | +/-15 deg/step | Which direction the velocity points |
-| `a[2]` | Torso rotation | +/-15 deg/step | Rotates the collision ellipse |
-| `a[3]` | Head rotation | +/-60 deg/step | Steers where the 16 raycasts point |
+| `a[0]` | Desired speed | [-0.5, +2.0] m/s | How fast (and which way) the agent wants to walk |
+| `a[1]` | Heading change | +/-1.15 deg/step (115 deg/s) | Which direction the velocity points |
+| `a[2]` | Torso rotation | +/-0.57 deg/step (57 deg/s) | Rotates the collision ellipse |
+| `a[3]` | Head rotation | +/-1.72 deg/step (172 deg/s) | Steers where the 16 raycasts point |
 
-Speed is mapped linearly: `desired_speed = (a[0] + 1) / 2 * 1.5`, so an
-output of -1 means standing still and +1 means maximum walking speed.
+Speed is mapped linearly and asymmetrically: `desired_speed = -0.5 + (a[0] + 1) / 2 * 2.5`,
+so a[0]=-1 means backing up at 0.5 m/s, a[0]=0 means +0.75 m/s, and a[0]=+1
+means the 2.0 m/s forward cap.
 
 **What this constrains:**
 
-- **No instant direction reversal.** At +/-15 deg per step (1500 deg/s at
-  dt=0.01s), a 180-degree reversal takes at least 12 steps (0.12s). This is
-  already more agile than real humans (~120 deg/s peak), but it prevents
-  physically impossible teleportation-like turns.
+- **No instant direction reversal.** At +/-1.15 deg per step (115 deg/s at
+  dt=0.01s, the recalibrated heading cap), a 180-degree reversal takes ~157
+  steps (~1.6s). This now sits inside the human walking-yaw envelope (Hicheur
+  2007: 30-60 deg/s comfortable, ~120 deg/s aggressive) rather than far above
+  it, as the earlier 1500 deg/s cap did.
 
-- **Speed is bounded.** The network cannot request speeds above 1.5 m/s. The
-  maximum desired speed corresponds roughly to brisk walking. Combined with
-  velocity damping (A.2), the actual achieved speed is lower still.
+- **Speed is bounded and asymmetric.** The network can request forward speeds
+  up to 2.0 m/s (upper end of comfortable walking / lower end of slow running)
+  and backward motion down to -0.5 m/s. Combined with the velocity filter
+  (A.2), the actual achieved speed is lower still.
 
-- **Head and torso are independent.** The head can rotate up to 60 deg/step
-  with a hard clamp at +/-90 deg from the torso
+- **Head and torso are independent.** The head can rotate up to 1.72 deg/step
+  (172 deg/s) with a hard clamp at +/-90 deg from the torso
   ([action.py:114-116](../packages/crowdrl-core/src/crowdrl_core/action.py#L114)).
   This means an agent can look around a corner while walking straight -- or
   scan for gaps in a crowd while maintaining its walking direction.
@@ -224,19 +227,21 @@ blends it with the agent's current velocity
 ([crowd_env.py:215-218](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L215)):
 
 ```
-v_new = 0.8 * v_desired + 0.2 * v_current
+v_new = 0.05 * v_desired + 0.95 * v_current
 ```
 
 **What this constrains:**
 
 - **No instant velocity changes.** Even if the network outputs maximum speed in
-  a new direction, only 80% of that command takes effect immediately. The
-  remaining 20% carries the previous velocity forward. This acts as an
-  exponential low-pass filter on velocity.
+  a new direction, only 5% of that command takes effect immediately. The
+  remaining 95% carries the previous velocity forward. This acts as an
+  exponential low-pass filter on velocity (tau ~200 ms at dt=0.01s).
 
-- **Agents feel "heavy".** A standing agent that commands full speed ahead will
-  reach 80% of desired speed in one step, 96% in two steps, and 99.2% in three
-  steps. Conversely, stopping requires multiple steps of zero-speed commands.
+- **Agents feel "heavy".** A standing agent that commands full speed ahead
+  reaches ~5% of desired speed in one step, ~40% after 10 steps, ~63% after 20
+  steps (one time constant), and ~95% after ~60 steps. Conversely, stopping
+  requires many steps of zero-speed commands. The filter was effectively off
+  (weight 0.8, tau ~12 ms) before the Layer 1 recalibration.
 
 - **Collision recovery is gradual.** After being knocked sideways by a contact
   force, the agent cannot instantly resume its desired trajectory. It must
@@ -378,7 +383,7 @@ clamped
 ([crowd_env.py:246-251](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L246)):
 
 ```
-max_vel = 2.0 * 1.5 = 3.0 m/s
+max_vel = 3.0 m/s        # max_velocity_magnitude (above the 2.0 m/s forward cap)
 
 if ||v|| > max_vel:
     v *= max_vel / ||v||    (rescale direction, cap magnitude)
@@ -388,7 +393,7 @@ if ||v|| > max_vel:
 
 - **Contact forces cannot launch agents.** Without this clamp, a stiff spring
   (2000 m/s^2) on deep penetration could accelerate an agent to unrealistic speeds.
-  The clamp allows brief bursts above the 1.5 m/s desired ceiling (e.g. being
+  The clamp allows brief bursts above the 2.0 m/s forward ceiling (e.g. being
   pushed by a crowd) but caps the maximum at 3.0 m/s.
 
 - **Direction is preserved.** The clamping rescales the velocity vector without
@@ -542,7 +547,7 @@ meaningful depth regardless of agent size.
   hand-crafted model. Instead, CrowdRL provides this as a reward signal,
   giving the policy gradient information to learn spacing behaviour without
   prescribing the mechanism. The policy is free to discover its own avoidance
-  strategies. See Project Plan v6, Section 3.2.
+  strategies. See Project Plan v7, Section 3.2.
 - **Why a ramp and not a threshold?** The previous threshold-based form
   ("flat -0.3 if within 2x radius") has zero gradient outside the zone and
   a discontinuity at the boundary. The ramp gives the policy a continuous
@@ -635,12 +640,12 @@ These penalties discourage physically unrealistic or visually jarring movement.
 They are gated behind `use_smoothness = True` and require two steps of history
 (the first step after reset has no previous data).
 
-#### Jerk penalty: -1e-6 * ||jerk||
+#### Jerk penalty: -1e-5 * ||jerk||
 
 ```
 acceleration_t      = (velocity_t - velocity_{t-1}) / dt
 jerk_t              = (acceleration_t - acceleration_{t-1}) / dt
-reward             += -0.000001 * ||jerk_t||
+reward             += -0.00001 * ||jerk_t||
 ```
 
 - **Incentivises**: smooth acceleration profiles (gradual speed changes).
@@ -651,19 +656,19 @@ reward             += -0.000001 * ||jerk_t||
   "ease into" velocity changes rather than snapping to them.
 - **Why such a tiny weight?** Jerk scales as `1/dt^2`; with `dt=0.01` even a
   0.1 m/s velocity glitch produces jerk of order 1000 m/s^3. A weight of
-  `-1e-6` keeps the per-step magnitude comparable to the other smoothness
+  `-1e-5` keeps the per-step magnitude comparable to the other smoothness
   signals rather than letting a single discontinuity dominate the reward.
 - **Note**: requires **two** previous steps of history (velocity for
   acceleration, acceleration for jerk), so this penalty only activates from
   step 3 onward.
 
-#### Angular acceleration: -1e-4 * |angular_accel|
+#### Angular acceleration: -1e-2 * |angular_accel|
 
 ```
 heading_change_t    = heading_t - heading_{t-1}          (normalised to [-pi, pi])
 angular_vel_t       = heading_change_t / dt
 angular_accel_t     = |angular_vel_t - angular_vel_{t-1}|
-reward             += -0.0001 * angular_accel_t
+reward             += -0.01 * angular_accel_t
 ```
 
 - **Incentivises**: smooth turns (constant angular velocity rather than
@@ -675,12 +680,12 @@ reward             += -0.0001 * angular_accel_t
   overcorrects toward the goal. The angular acceleration penalty acts as a
   stabiliser, teaching the policy to commit to a heading and maintain it.
 
-#### Speed deviation: -0.001 * |speed - preferred_speed|
+#### Speed deviation: -0.005 * |speed - preferred_speed|
 
 ```
 speed        = ||velocity||
 preferred    = per-agent preferred speed (sampled at spawn, ~1.34 m/s)
-reward      += -0.001 * |speed - preferred|
+reward      += -0.005 * |speed - preferred|
 ```
 
 - **Incentivises**: walking at the agent's preferred speed (not too fast, not
@@ -698,22 +703,24 @@ reward      += -0.001 * |speed - preferred|
   dominate the reward budget in congested scenarios where agents *must*
   slow down to avoid collisions, creating a direct conflict between
   "maintain preferred speed" and "don't collide". The current weight
-  (-0.001) keeps the preference gentle enough that the collision and
+  (-0.005) keeps the preference gentle enough that the collision and
   proximity signals win when they need to.
 
-### B.5 Optional signals (disabled by default)
+### B.5 Action-rate and inverse-distance signals
 
-#### Action rate penalty (weight = 0.0, disabled)
+#### Action rate penalty (weight = -0.01, enabled in Layer 1)
 
 ```
 action_change  = ||actions_t - actions_{t-1}||
 reward        += weight * action_change
 ```
 
-When enabled with a negative weight (e.g. -0.05), this directly penalises
-large changes in the raw policy output between consecutive steps. It is more
-direct than the jerk penalty because it targets the network's output before
-it passes through the nonlinear action interpretation and velocity blending.
+Enabled by default (`action_rate_weight = -0.01`) since the Layer 1 reward
+rebalance. It directly penalises large changes in the raw policy output
+between consecutive steps -- more direct than the jerk penalty because it
+targets the network's output before the nonlinear action interpretation and
+velocity blending. Some experiment configs set it back to 0 to isolate other
+reward changes (e.g. the collision-suppression retune).
 
 #### Inverse distance to goal (weight = 0.0, disabled)
 
@@ -740,9 +747,9 @@ starts 10m from its goal:
 | Collision | -1.0/step | -10.0 | If stuck for 10 steps |
 | Wall proximity | -0.1/step | -1.0 | ~10 steps near walls |
 | Agent proximity (ramp) | ~-0.001 to -0.005/step | -0.5 to -2.5 | Worst-neighbour ramp, varies with density |
-| Speed deviation | ~-0.0003/step | -0.15 | |speed - 1.34| ~0.3 avg, weight -0.001 |
-| Angular accel | ~-1e-5/step | -0.005 | Varies widely |
-| Jerk | ~-1e-6/step | -0.0005 | Varies widely |
+| Speed deviation | ~-0.0015/step | -0.75 | |speed - 1.34| ~0.3 avg, weight -0.005 |
+| Angular accel | ~-1e-3/step | -0.5 | Varies widely (weight -1e-2) |
+| Jerk | ~-1e-5/step | -0.005 | Varies widely (weight -1e-5) |
 
 The **progress reward and goal bonus** dominate the positive side of the
 budget and together define the navigational objective. On the negative side
@@ -852,9 +859,9 @@ Negative desired_speed means motion opposite to heading (backing up).
 | `wall_proximity_threshold` | 1.5x radius | Yes |
 | `existence_penalty` | -0.01 | Yes |
 | `progress_weight` | +1.0 | Yes |
-| `jerk_penalty_weight` | -1e-4 | Yes (Tier 2; Layer 1: 100x up from -1e-6) |
+| `jerk_penalty_weight` | -1e-5 | Yes (Tier 2; Layer 1 v2: 10x down from Layer 1's -1e-4) |
 | `angular_accel_penalty_weight` | -1e-2 | Yes (Tier 2; Layer 1: 100x up from -1e-4) |
-| `speed_deviation_weight` | -1e-1 | Yes (Tier 2; Layer 1: 100x up from -1e-3) |
+| `speed_deviation_weight` | -5e-3 | Yes (Tier 2; Layer 1 v2: down from -1e-1 to escape ice-skating) |
 | `action_rate_weight` | -1e-2 | Yes (Layer 1: enabled, was 0.0) |
 | `inverse_distance_weight` | 0.0 | No |
 
