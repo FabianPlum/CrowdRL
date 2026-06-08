@@ -46,6 +46,22 @@ bash sc_uv_crowdrl/create_python_for_vscode.sh
 # Then point VSCode to: sc_uv_crowdrl/python
 ```
 
+## Test the installation
+
+Once setup is complete, smoke-test the environment on a compute node by submitting
+the bundled Slurm job from the repo root:
+
+```bash
+sbatch sc_uv_crowdrl/run_tests.sbatch
+```
+
+This requests a single GPU on the `dc-gpu-devel` partition, activates the env, and
+runs the test suite (`python -m pytest`). Job logs land in `<jobid>.out` and
+`<jobid>.err` in the directory you submit from.
+
+If your compute budget differs, edit the `#SBATCH --account=...` line in
+`run_tests.sbatch` to your own project before submitting.
+
 ## Daily use
 
 ```bash
