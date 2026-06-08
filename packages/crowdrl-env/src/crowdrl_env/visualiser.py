@@ -498,6 +498,12 @@ class EpisodeFrames:
     (e.g. when frames come from the GPU-batched env which only stores
     segment representations)."""
 
+    preferred_speeds: NDArray[np.float64] | None = None
+    """(n_agents,) -- per-agent preferred speed (m/s), constant across frames.
+    Optional; enables the speed-vs-preferred metrics in
+    ``crowdrl_env.eval_metrics``. May be None for frames sourced from a path
+    that does not track it."""
+
     dt: float = 0.01
     """Simulation timestep in seconds (used for timestamp display)."""
 
@@ -589,6 +595,9 @@ def collect_episode_frames(
         shoulder_widths=world.shoulder_widths.copy(),
         chest_depths=world.chest_depths.copy(),
         goal_positions=world.goal_positions.copy(),
+        preferred_speeds=(
+            world.preferred_speeds.copy() if world.preferred_speeds is not None else None
+        ),
         polygon=world.walkable_polygon,
         active_masks=np.stack(active_list),
         reached_goal=reached_goal,
