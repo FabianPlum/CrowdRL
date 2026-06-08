@@ -4,7 +4,7 @@ Learning Crowd Navigation Policies via
 
 Multi-Agent Reinforcement Learning on Synthetic Arenas
 
-Project Plan v6 — Draft for Internal Discussion
+Project Plan v7 — Draft for Internal Discussion
 
 Dr. Fabian Plum
 
@@ -12,7 +12,7 @@ IAS-7 — Zivile Sicherheitsforschung
 
 Forschungszentrum Jülich
 
-March 2026
+June 2026
 
 # 1. Executive Summary
 
@@ -108,9 +108,9 @@ Collision detection uses axis-aligned ellipses (not discs) to capture shoulder w
 
 The observation vector comprises three components: ego state, social sensing, and environment sensing.
 
-**Ego state (7D)**
+**Ego state (8D)**
 
-Relative goal position (2D), own velocity (2D), own torso orientation angle relative to heading (1D), own head orientation angle relative to torso (1D, clamped to ±90°), and current heading direction (1D). The torso and head angles are separated because they are independently actuated: the head can rotate up to 90° left or right of the torso’s forward-facing direction before shoulder rotation is required. This distinction matters because the raycast FOV follows the head, not the torso—an agent can scan its surroundings without reorienting its body. All values are in the agent’s local egocentric reference frame.
+Relative goal direction (2D, unit vector), own velocity (2D), scalar speed (1D), preferred speed (1D, raw m/s), own torso orientation angle (1D, relative to heading; always 0 in the egocentric frame), and own head orientation angle relative to torso (1D, clamped to ±90°). Preferred speed is exposed as a raw feature so the policy can observe the per-agent speed target it is regularised against — it was previously invisible to the network (added in the agent-dynamics refactor; see the progress log). The torso and head angles are separated because they are independently actuated: the head can rotate up to 90° left or right of the torso’s forward-facing direction before shoulder rotation is required. The raycast FOV follows the head, not the torso — an agent can scan its surroundings without reorienting its body. All values are in the agent’s local egocentric reference frame.
 
 **Social sensing (K × 7D)**
 
@@ -124,7 +124,14 @@ The key design parameters are: (a) N, the number of rays, which controls angular
 
 Optionally, each ray can return a 2-channel signal rather than a scalar: (distance, hit-type), where hit-type encodes whether the intersection was with a wall (0), an obstacle (0.5), or another agent (1). This allows the policy to distinguish between static geometry and moving neighbours at the cost of doubling the environment-sensing dimensionality.
 
-**Total observation dimensionality.** With K=8 neighbours and N=16 single-channel rays: 7 (ego) + 56 (social) + 16 (raycast) = 79D. With 2-channel rays: 7 + 56 + 32 = 95D. Optionally, the navigation mesh router (see Module A) provides a next-waypoint direction (2D) and a path deviation scalar (1D), bringing the “signposted” agent total to 82D or 98D respectively. All variants are well within the range where MLP policies train reliably.
+**Optional temporal and neighbour-memory features.** Beyond the instantaneous ego/social/ray channels, the observation builder can append several history-derived feature blocks, each independently toggleable and therefore an ablation axis in its own right:
+
+- **Navmesh signals (3D):** next-waypoint direction (2D) + path-deviation scalar (1D) from the A\* router (see Module A).
+- **Temporal memory (6D):** six scalars summarising the agent’s own trajectory history — displacement from spawn, cumulative path length, path efficiency (displacement ÷ path), elapsed episode fraction, and windowed displacement and goal-progress over the last W steps (default W=50). These let the policy sense whether it is making purposeful progress or is stuck/looping, which an instantaneous observation cannot express.
+- **Neighbour velocity history (K × 2D):** for each of the K tracked neighbours, the change in that neighbour’s velocity over the last W_n steps (default 5), rotated into the ego frame — an acceleration proxy signalling whether a neighbour is speeding up or braking. Requires a persistent neighbour-ID tracker so a given neighbour keeps its slot across steps.
+- **Neighbour trajectory features (K × 3D):** for each tracked neighbour, three scalars computed on that neighbour’s *own* temporal-memory state (path efficiency, windowed displacement, windowed goal-progress), letting the policy distinguish “we are all stuck together” from “I am the only one stuck.”
+
+**Total observation dimensionality.** The base vector — ego 8D + social (K=8 × 7 = 56D) + N=16 single-channel rays — is 80D; with 2-channel rays it is 96D. The optional blocks add +3 (navmesh), +6 (temporal memory), +16 (neighbour velocity history at K=8), and +24 (neighbour trajectory at K=8), so a fully-instrumented agent reaches 80 + 3 + 6 + 16 + 24 = 129D. The current Layer 1 v2 training configuration enables navmesh + temporal memory + neighbour velocity history, giving obs_dim = 105D. All variants are well within the range where MLP policies train reliably.
 
 **Action space**
 
@@ -231,7 +238,7 @@ The following table summarises the critical architectural choices and their rati
 | Decision | Recommended Choice | Rationale |
 |----------|-------------------|-----------|
 | Training environment | Lightweight 2D physics (not UE5) | UE5 in the training loop is 100–1000× slower. Vector observations don’t benefit from rendering. Architect for a module swap to egocentric vision later. |
-| Observation space | Egocentric vector: ego state (7D) + K=8 neighbours (56D) + N=16 head-anchored raycasts (16D) = 79D | Three-component design: ego state, social sensing (K nearest neighbours), and environment sensing (FOV-restricted raycasts for wall/obstacle distances). Raycasts prevent geometry-blindness. FOV restriction couples perception to torso orientation, making the orientation action meaningful. N and FOV are tuneable for ablation. |
+| Observation space | Egocentric vector: ego state (8D) + K=8 neighbours (56D) + N=16 head-anchored raycasts (16D) = 80D base; optional navmesh (+3), temporal-memory (+6), neighbour-velocity-history (+16) and neighbour-trajectory (+24) blocks extend it to 105D (current Layer 1 v2) up to 129D | Three-component design: ego state, social sensing (K nearest neighbours), and environment sensing (FOV-restricted raycasts for wall/obstacle distances). Raycasts prevent geometry-blindness. FOV restriction couples perception to torso orientation, making the orientation action meaningful. N and FOV are tuneable for ablation. |
 | Action space | 4D continuous: speed, heading, torso angle, head angle (relative to torso, ±90°) | Head and torso are independently actuated, matching human anatomy (head rotates ±90° relative to torso before shoulders must follow). Decoupling separates information-gathering (head turn) from physical reorientation (shoulder turn). Ablation: collapse to 3D (fused head-torso) or 2D (speed + heading only). |
 | RL algorithm | PPO with parameter sharing (MAPPO) | Proven stable for cooperative/competitive multi-agent continuous control. Shared parameters scale to large agent counts. |
 | Agent count (training) | 20–100 per episode, randomised | Enough for crowd phenomena. >200 agents creates training instability without curriculum learning. |
@@ -986,4 +993,144 @@ emergent-phenomena analysis.
 **Deployment:**
 - [ ] crowdrl-jupedsim package (ONNX runtime adapter)
 - [ ] Integration tests (obs parity between training and deployment)
+
+## 2026-05-26 -- Agent-dynamics refactor: Layer 1 biomechanical recalibration + Layer 1 v2
+
+Work on branch `agent_dynamics_refactor` (design of record:
+`plan/agent_dynamics_refactor.md`). This entry consolidates ~6 weeks of
+training iteration into the plan and motivates the version bump to v7 -- the
+observation space in Section 3.3 grew (see "Observation-space expansion"
+below). A standalone end-of-day snapshot lives in
+`docs/2026-05-26_layer1_v2_handover.md`.
+
+### Diagnosis: kinematic targets were unconstrained ("ice-skating")
+
+The pre-refactor action interpreter treated the policy output as a near-instant
+kinematic target. Per-step rate caps were pi/12 for heading and torso
+(1500 deg/s) and pi/3 for head (6000 deg/s), and the velocity filter
+`desired_velocity_weight` was effectively off (0.8 = tau ~12 ms at dt=0.01s).
+Agents could pivot and reverse velocity almost instantaneously -- the
+"ice-skating" regime: gliding, omnidirectional, visibly non-human, with no
+incentive to brake before obstacles. `examples/09_reward_landscape.ipynb`
+confirmed the pathology on paper: under the old weights a "plow through"
+trajectory scored *higher* than "brake before the wall".
+
+### Layer 1 -- biomechanical recalibration (now the dataclass defaults)
+
+The action space is unchanged in form (4D), but its *limits* were re-grounded
+in the human walking envelope and are now the `ActionConfig` / `CrowdEnvConfig`
+defaults:
+
+| Quantity | Was | Now (default) | Basis |
+|----------|-----|---------------|-------|
+| Heading rate cap | pi/12 (1500 deg/s) | 0.020 rad/step = 115 deg/s | Hicheur 2007 walking yaw |
+| Torso rate cap | pi/12 (1500 deg/s) | 0.010 rad/step = 57 deg/s | hip rotation limit |
+| Head rate cap | pi/3 (6000 deg/s) | 0.030 rad/step = 172 deg/s | head scans fastest |
+| Desired speed | 0..1.5 m/s symmetric | [-0.5, +2.0] m/s asymmetric | forward >> backward gait |
+| Velocity filter `desired_velocity_weight` | 0.8 (no filter) | 0.05 (tau ~200 ms) | first-order inertia |
+| `preferred_speed` in ego obs | absent | exposed (raw m/s) | policy can see its speed target |
+
+Smoothness reward weights were rebalanced so they regularise without dominating
+task reward; the current defaults are `jerk` -1e-5, `angular_accel` -1e-2,
+`speed_deviation` -0.005, and `action_rate` -0.01 (now enabled), with
+`progress_weight` raised to 1.0 so potential-based shaping is comparable to the
+goal bonus over an episode.
+
+### Observation-space expansion (the v7 obs delta)
+
+Three optional, independently-toggleable feature blocks were added to the
+single shared observation builder (design: `plan/neighbor_memory_extension.md`,
+`plan/agent_memory_research.md`):
+
+- **Temporal memory (+6D):** the agent's own trajectory summary (displacement
+  from spawn, cumulative path, path efficiency, elapsed fraction, windowed
+  displacement and goal-progress). Lets the policy sense "am I progressing or
+  stuck/looping" -- which an instantaneous obs cannot express.
+- **Neighbour velocity history (+K*2 = 16D):** per tracked neighbour, its
+  velocity change over the last W_n steps (acceleration proxy). Needs a
+  persistent neighbour-ID tracker so a neighbour keeps its slot across steps.
+- **Neighbour trajectory features (+K*3 = 24D):** per tracked neighbour, its
+  own path-efficiency / windowed-progress scalars -- "is everyone stuck, or
+  just me." Implemented but not enabled in the current run.
+
+Base obs is now 80D (ego 8 + social 56 + rays 16). The Layer 1 v2 run enables
+navmesh + temporal memory + neighbour velocity history = **105D**; full
+instrumentation is 129D. See Section 3.3.
+
+### Layer 1 v2 -- empirical escape from ice-skating (and an open assumption)
+
+The recalibrated caps alone were too tight for PPO's early-curriculum
+exploration budget: the policy could not discover avoidance fast enough and the
+curriculum stalled. Three changes together broke the equilibrium (commits
+`63db6e7`, `843c993`, `367b85f`):
+
+1. Reward retune validated against notebook 09 -- the brake trajectory now
+   scores +12 over plow-through (was -1.3): `speed_deviation` -0.1 -> -0.005,
+   `jerk` -1e-4 -> -1e-5.
+2. `preferred_speed` exposed in the ego observation (obs 104 -> 105).
+3. **Action caps loosened back above the biomechanical envelope** -- ~4/2/4
+   deg/step in `exp_layer1_seed43.yaml` and 10/10/10 in
+   `exp_layer1_seed43_retune.yaml`, versus the 1.15/0.57/1.72 deg/step
+   defaults.
+
+With (3) the curriculum cleared all six phases by ~rollout 40 and stabilised at
+0.80-0.86 goal rate in the terminal `full` phase. **Caveat / open assumption:**
+the loosened caps sit *above* the comfortable-walking band. This is an
+empirical fix awaiting a literature justification, and is exactly the
+assumption the next iteration aims to remove (see "Direction" below).
+
+### Remaining failure mode + collision-suppression retune
+
+Training videos at ~rollout 150 show **collision-dominated success**: with
+`goal_bonus +50` against `collision_penalty -1/step`, plowing through a
+neighbour (a ~10-step, -10 contact) is cheaper than yielding. The retune config
+`exp_layer1_seed43_retune.yaml` targets this -- `collision_penalty` -1 -> -5,
+`agent_proximity_penalty_near` -0.01 -> -0.05, `desired_velocity_weight`
+0.05 -> 0.2 (so the agent can brake within one avoidance window). It was
+warm-started (`--init_from`) from the v2 run's rollout 180 and reached rollout
+100 of a planned 500 before pausing; **it has not yet been evaluated.**
+
+### Tooling added on the branch
+
+- Per-rollout checkpointing (`checkpoint_interval`) and `--init_from`
+  warm-start (loads weights + normalizers, resets curriculum/optimizer/history),
+  recorded under `_launch.init_from` in each run's `config_resolved.yaml`.
+- Polygon-free GPU-batched eval rendering
+  (`BatchedTorchEnv(disable_auto_reset=True)` + `render_episode_video`).
+
+### Milestone status (updated)
+
+- **M3 (MARL training):** pipeline COMPLETE and clears the full curriculum, but
+  the M3 *quality bar* -- collision-free goal-reaching -- is NOT yet met
+  (collision-dominated success). Infrastructurally done, behaviourally in
+  progress.
+- **M4 (Emergent phenomena):** BLOCKED on the above. Lane formation /
+  shoulder-turning cannot be cleanly documented while agents interpenetrate.
+  The agent-dynamics refactor is the campaign to unblock M4.
+- **Layer 2** (second-order action semantics -- accelerations + explicit
+  yaw-rate state; `plan/agent_dynamics_refactor.md` Section 4): DESIGNED, NOT
+  STARTED. Deferrable if the retune yields clean counterflow; otherwise it is
+  the path to physically-grounded turning.
+- **M5-M9** (Tier 3 reward, ablation, benchmark, zero-shot, JuPedSim): NOT
+  STARTED.
+
+### Direction for the next iteration
+
+Priority: **return the action model to its biomechanical envelope and reduce
+the number of standing assumptions**, rather than buying goal-rate with
+ever-looser caps.
+
+- [ ] Re-establish biomechanically-grounded action caps (115/57/172 deg/s) as
+      the trained envelope; if PPO cannot discover avoidance inside it, fix
+      that through curriculum / exploration / reward shaping -- not by raising
+      the caps above human capability.
+- [ ] Justify or retire each added assumption: the loosened caps, and the
+      temporal / neighbour-memory observation blocks (ablate -- does each block
+      earn its dimensionality?).
+- [ ] Evaluate the retune rollout-100 checkpoint before launching further runs.
+- [ ] Decide Layer 2 (second-order action semantics) vs. continued Layer 1
+      tuning based on whether head-on counterflow resolves cleanly.
+
+**Medium-term / Deployment:** unchanged from the 2026-04-11 entry (Tiers 4-5,
+IAS-7 importer, Tier 3 reward; crowdrl-jupedsim adapter + obs-parity tests).
 
