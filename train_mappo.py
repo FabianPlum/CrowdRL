@@ -149,6 +149,10 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             max_heading_change=np.radians(act.get("max_heading_change_deg", 1.146)),
             max_torso_change=np.radians(act.get("max_torso_change_deg", 0.573)),
             max_head_change=np.radians(act.get("max_head_change_deg", 1.719)),
+            dt=cfg.get("dt", 0.01),
+            speed_turn_coupling=act.get("speed_turn_coupling", False),
+            turn_lat_accel=act.get("turn_lat_accel", 2.0),
+            turn_pivot_rate=np.radians(act.get("turn_pivot_rate_deg", 120.0)),
         ),
         reward=RewardConfig(
             goal_bonus=rew.get("goal_bonus", 20.0),
@@ -197,6 +201,7 @@ def build_ppo_config(cfg: dict) -> PPOConfig:
         gae_lambda=p.get("gae_lambda", 0.95),
         target_kl=p.get("target_kl", 0.02),
         lr_schedule=p.get("lr_schedule", "cosine"),
+        entropy_coef=p.get("entropy_coef", 0.01),
     )
 
 
