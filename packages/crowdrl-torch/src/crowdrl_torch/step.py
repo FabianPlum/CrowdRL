@@ -53,6 +53,7 @@ def batched_step(
         state.torso_orientations,
         state.head_orientations,
         config,
+        current_speeds=state.velocities.norm(dim=-1),
     )
 
     # --- 2. Velocity blending (damped) ---
