@@ -312,6 +312,7 @@ class CrowdEnv(gym.Env):
             self._world.torso_orientations,
             self._world.head_orientations,
             cfg.action,
+            current_speeds=np.linalg.norm(self._world.velocities, axis=1),
         )
 
         # --- 2. Apply velocity update (damped blending) — vectorized ---
