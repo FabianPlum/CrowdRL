@@ -134,6 +134,14 @@ class EnvConfig(NamedTuple):
     max_head_change: float = 0.030  # ~172 deg/s at dt=0.01s (Layer 1; was pi/3)
     head_limit: float = 1.5707963267948966  # pi/2
 
+    # Speed-turn coupling (lateral-acceleration cap). When enabled, per-step
+    # heading + torso change are clamped to omega_max(v) = min(turn_pivot_rate,
+    # turn_lat_accel / v) * dt, so agents must slow down to turn sharply
+    # ("slow before the turn"). Default off preserves the flat-cap behaviour.
+    speed_turn_coupling: bool = False
+    turn_lat_accel: float = 2.0  # m/s^2 comfortable centripetal accel
+    turn_pivot_rate: float = 2.0943951023931953  # rad/s (~120 deg/s) v->0 cap
+
     # Physics
     dt: float = 0.01
     desired_velocity_weight: float = (
@@ -227,6 +235,9 @@ class EnvConfig(NamedTuple):
             max_torso_change=cfg.action.max_torso_change,
             max_head_change=cfg.action.max_head_change,
             head_limit=cfg.action.head_limit,
+            speed_turn_coupling=cfg.action.speed_turn_coupling,
+            turn_lat_accel=cfg.action.turn_lat_accel,
+            turn_pivot_rate=cfg.action.turn_pivot_rate,
             dt=cfg.dt,
             desired_velocity_weight=cfg.desired_velocity_weight,
             contact_stiffness=cfg.contact_stiffness,
