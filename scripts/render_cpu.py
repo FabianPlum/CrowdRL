@@ -17,6 +17,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import sys
+from pathlib import Path
+
+# scripts/ (this file's dir) is on sys.path, but the repo-root train_mappo
+# module is not -- add the repo root so `import train_mappo` resolves.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
