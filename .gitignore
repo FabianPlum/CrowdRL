@@ -44,6 +44,7 @@ htmlcov/
 
 # Example outputs (generated GIFs, videos, etc.)
 examples/outputs/
+ezgif-*.gif
 
 # Logs
 *.log
