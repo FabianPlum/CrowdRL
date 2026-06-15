@@ -1,7 +1,11 @@
 # =============================================================================
 # CrowdRL MAPPO -- Wall-contact penalty, lower entropy_coef (smoothness OFF)
 # =============================================================================
-# IDENTICAL to exp_wall_contact_smoothoff.yaml except entropy_coef 0.02 -> 0.003.
+# Derived from exp_wall_contact_smoothoff.yaml with three changes -- the entropy
+# fix plus easing the two penalties that looked too extreme:
+#   entropy_coef             0.02         ->  0.003          (stop runaway entropy)
+#   wall_collision_penalty  -1.0          -> -0.5            (contact already learned)
+#   agent_proximity nr/far  -0.05/-0.002  -> -0.025/-0.001   (the big per-step cost)
 #
 # Why: that run showed runaway entropy. Once basic avoidance was learned the
 # return variance collapsed (value_loss ~0.06 -> advantages ~0), the task
@@ -14,8 +18,8 @@
 # over-corrected. Dropping it ~7x (below the 0.01 default) lets the task
 # gradient dominate so the policy sharpens into coherent goal-reaching motion.
 #
-# Single-variable change. Both GPUs (DDP, auto via torchrun -- launch WITHOUT
-# CUDA_VISIBLE_DEVICES). Output -> results_exp_wall_contact_lowent_smoothoff/
+# Both GPUs (DDP, auto via torchrun -- launch WITHOUT CUDA_VISIBLE_DEVICES).
+# Output -> results_exp_wall_contact_lowent_smoothoff/
 # =============================================================================
 
 seed: 42
@@ -89,9 +93,9 @@ reward:
   use_smoothness: false           # smoothness OFF
   wall_proximity_penalty: -0.1    # soft proximity band (unchanged)
   wall_proximity_threshold: 1.5
-  wall_collision_penalty: -1.0    # hard penalty per step in wall contact
-  agent_proximity_penalty_near: -0.05    # MODERATE: was -0.01 (5x)
-  agent_proximity_penalty_far: -0.002    # MODERATE: was -0.0001 (20x -- anticipation)
+  wall_collision_penalty: -0.5    # hard penalty per step in wall contact
+  agent_proximity_penalty_near: -0.025    # MODERATE: was -0.01 (5x)
+  agent_proximity_penalty_far: -0.001    # MODERATE: was -0.0001 (20x -- anticipation)
   personal_space_radius: 1.0      # unchanged (narrow zone; avoid dense-crowd swamp)
   action_rate_weight: -0.01
 
