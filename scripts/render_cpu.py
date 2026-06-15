@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
+import time
 from pathlib import Path
 
 # scripts/ (this file's dir) is on sys.path, but the repo-root train_mappo
@@ -71,12 +72,24 @@ def main() -> None:
     env = CrowdEnv(config=render_config, seed=args.seed)
 
     print(f"[render_cpu] device=cpu  ckpt={args.checkpoint}  agents={tuple(args.agents)}")
+    t_sim0 = time.perf_counter()
     frames = collect_episode_frames(
         env, actor_critic, obs_normalizer, device, max_steps=args.max_steps
     )
-    frames.title = f"Tier 3B -- {args.label} (ckpt r500)"
+    t_sim = time.perf_counter() - t_sim0
+    # Tag the title with the checkpoint's actual rollout (parsed from the
+    # filename, e.g. checkpoint_rollout_0100 -> r100), not a hardcoded value.
+    parts = Path(args.checkpoint).stem.split("_")
+    ckpt_tag = f"r{int(parts[-1])}" if parts[-1].isdigit() else Path(args.checkpoint).stem
+    frames.title = f"Tier 3B -- {args.label} (ckpt {ckpt_tag})"
+    t_enc0 = time.perf_counter()
     out = render_episode_video(frames, args.out, fps=50, trail_length=1000)
+    t_enc = time.perf_counter() - t_enc0
     print(f"[render_cpu] WROTE {out}")
+    print(
+        f"[render_cpu] timing: sim {t_sim:.1f}s + encode {t_enc:.1f}s = "
+        f"{t_sim + t_enc:.1f}s total  ({frames.n_frames} frames, {frames.n_agents} agents)"
+    )
 
 
 if __name__ == "__main__":
