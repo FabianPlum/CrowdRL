@@ -37,6 +37,8 @@ n_rollouts: 4000            # ~24h at observed SPS (~97k early phase)
 log_interval: 5
 compile_step: true
 checkpoint_interval: 100    # save checkpoint_rollout_<N>.pt every 100 -- keep the peak
+render_during_training: true  # CPU-render a Tier-3B example episode from each checkpoint
+render_interval: 0            # 0 -> render every checkpoint (== checkpoint_interval)
 
 curriculum:
   metric_window: 100
