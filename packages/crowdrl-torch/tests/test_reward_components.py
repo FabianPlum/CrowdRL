@@ -157,3 +157,39 @@ def test_inactive_agents_have_zero_components():
     comps = comps[0].numpy()
     npt.assert_array_equal(comps[~active_mask], np.zeros((2, len(REWARD_COMPONENT_NAMES))))
     npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)
+
+
+def test_wall_collision_channel():
+    """wall_collision_mask routes the hard wall-contact penalty to its channel."""
+    n = 4
+    positions = np.array([[2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0]], dtype=np.float32)
+    velocities = np.zeros((n, 2), dtype=np.float32)
+    goal_positions = positions + 2.0
+    active_mask = np.ones(n, dtype=np.bool_)
+    collision_mask = np.zeros(n, dtype=np.bool_)
+    prev_goal_distances = np.linalg.norm(goal_positions - positions, axis=1).astype(np.float32)
+    # Agents 0 and 2 are in wall contact this step; agent 3 is inactive.
+    wall_collision_mask = np.array([True, False, True, True], dtype=np.bool_)
+    active_mask[3] = False
+
+    config = EnvConfig(max_agents=n, wall_collision_penalty=-2.0)
+
+    def t(x):
+        return torch.tensor(x).unsqueeze(0)
+
+    rewards, _reached, _dists, comps = compute_rewards(
+        t(positions),
+        t(velocities),
+        t(goal_positions),
+        t(active_mask),
+        t(collision_mask),
+        t(prev_goal_distances),
+        config,
+        wall_collision_mask=t(wall_collision_mask),
+    )
+    comps = comps[0].numpy()
+    wc = _idx("wall_collision")
+    # -2.0 for active contacting agents (0, 2); 0 for non-contacting (1) and
+    # inactive (3, masked out even though its contact bit is set).
+    npt.assert_allclose(comps[:, wc], np.array([-2.0, 0.0, -2.0, 0.0]), atol=1e-5)
+    npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)

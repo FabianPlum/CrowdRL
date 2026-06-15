@@ -457,7 +457,7 @@ def compute_contact_forces(
 # ---------------------------------------------------------------------------
 
 
-def enforce_wall_boundaries(world: WorldState) -> None:
+def enforce_wall_boundaries(world: WorldState) -> NDArray[np.bool_]:
     """Project agents to stay inside the walkable polygon with body clearance.
 
     Uses vectorized numpy geometry for the fast path (distance to nearest
@@ -465,19 +465,25 @@ def enforce_wall_boundaries(world: WorldState) -> None:
 
     Call **after** physics integration every step.
     Modifies ``world.positions`` and ``world.velocities`` in place.
+
+    Returns a ``(n_agents,)`` bool mask: True for agents the boundary had to
+    correct this step (penetrating / pushed back) -- the hard wall-contact
+    signal used by the reward, analogous to the agent collision mask.
     """
+    n = world.n_agents
+    wall_collision = np.zeros(n, dtype=np.bool_)
+
     polygon = world.walkable_polygon
     if polygon is None:
-        return
+        return wall_collision
 
-    n = world.n_agents
     if world.active_mask is not None:
         active_idx = np.where(world.active_mask)[0]
     else:
         active_idx = np.arange(n)
 
     if len(active_idx) == 0:
-        return
+        return wall_collision
 
     # Quick vectorized pre-filter: agents far from all wall segments in a
     # simple (convex, no-holes) polygon are certainly safe.  When the polygon
@@ -527,6 +533,9 @@ def enforce_wall_boundaries(world: WorldState) -> None:
         if inside and boundary_dist >= radius:
             continue
 
+        # Penetrating or within one body-radius of the wall: a contact event.
+        wall_collision[i] = True
+
         # Find nearest point on boundary
         nearest_pt = nearest_points(boundary, p)[0]
         nearest_pos = np.array([nearest_pt.x, nearest_pt.y], dtype=np.float64)
@@ -553,6 +562,8 @@ def enforce_wall_boundaries(world: WorldState) -> None:
         vel_into_wall = np.dot(world.velocities[i], -inward)
         if vel_into_wall > 0:
             world.velocities[i] += vel_into_wall * inward
+
+    return wall_collision
 
 
 # ---------------------------------------------------------------------------

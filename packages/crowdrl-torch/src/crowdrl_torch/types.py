@@ -167,6 +167,7 @@ class EnvConfig(NamedTuple):
     progress_weight: float = 1.0
     wall_proximity_penalty: float = -0.1
     wall_proximity_threshold: float = 1.5
+    wall_collision_penalty: float = -1.0  # per-step penalty for wall contact (0 = off)
     agent_proximity_penalty_near: float = -0.005
     agent_proximity_penalty_far: float = -0.0001
     personal_space_radius: float = 1.0
@@ -250,6 +251,7 @@ class EnvConfig(NamedTuple):
             progress_weight=cfg.reward.progress_weight,
             wall_proximity_penalty=cfg.reward.wall_proximity_penalty,
             wall_proximity_threshold=cfg.reward.wall_proximity_threshold,
+            wall_collision_penalty=cfg.reward.wall_collision_penalty,
             agent_proximity_penalty_near=cfg.reward.agent_proximity_penalty_near,
             agent_proximity_penalty_far=cfg.reward.agent_proximity_penalty_far,
             personal_space_radius=cfg.reward.personal_space_radius,

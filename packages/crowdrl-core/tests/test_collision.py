@@ -197,6 +197,21 @@ class TestEnforceWallBoundaries:
         radius = max(world.shoulder_widths[0], world.chest_depths[0])
         assert world.positions[0, 0] >= radius - 1e-6
 
+    def test_returns_wall_contact_mask(self):
+        # Agent 0 penetrates the x=0 wall (contact); agent 1 sits in the
+        # interior with clearance (no contact). The returned mask is the hard
+        # wall-contact reward signal.
+        world = make_world_state(
+            n_agents=2,
+            positions=np.array([[0.05, 5.0], [5.0, 5.0]]),
+            goal_positions=np.array([[8.0, 5.0], [8.0, 5.0]]),
+        )
+        mask = enforce_wall_boundaries(world)
+        assert mask.shape == (2,)
+        assert mask.dtype == np.bool_
+        assert mask[0]  # penetrating / within one radius of the wall
+        assert not mask[1]  # interior, clear of walls
+
     def test_agent_outside_polygon_snapped_back_inside(self):
         # Agent at x=-0.5 (outside polygon boundary at x=0)
         world = make_world_state(

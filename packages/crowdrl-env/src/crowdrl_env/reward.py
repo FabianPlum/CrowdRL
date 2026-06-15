@@ -34,12 +34,19 @@ class RewardConfig:
     goal_radius: float = 0.5
     """Distance threshold (metres) for goal reached."""
 
-    # Wall collision penalty
+    # Wall penalties: a soft proximity band plus a hard contact penalty.
     wall_proximity_penalty: float = -0.1
     """Penalty for agents too close to walls (smooth, distance-based)."""
 
     wall_proximity_threshold: float = 1.5
     """Wall proximity threshold as a multiple of agent radius."""
+
+    wall_collision_penalty: float = -1.0
+    """Penalty per step while in CONTACT with a wall, i.e. the boundary
+    enforcement had to push the agent back / cancel its into-wall velocity.
+    Distinct from the proximity band: proximity is fine, contact is not.
+    Deters using walls as a free brake (instant deceleration at no cost).
+    Mirrors the agent ``collision_penalty``. Default -1.0; set 0.0 to disable."""
 
     # Agent proximity penalty (graded linear ramp, learned collision avoidance)
     # The penalty per step is linearly interpolated on the center-to-center
@@ -168,6 +175,7 @@ def compute_rewards(
     dt: float,
     *,
     wall_distances: NDArray[np.float64] | None = None,
+    wall_collision_mask: NDArray[np.bool_] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
     actions: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
@@ -186,6 +194,8 @@ def compute_rewards(
     config : RewardConfig
     dt : float — timestep duration
     wall_distances : (n_agents,) optional — min distance to nearest wall per agent
+    wall_collision_mask : (n_agents,) bool optional — True where the boundary
+        enforcement corrected the agent this step (hard wall-contact signal)
     agent_radii : (n_agents,) optional — agent body radii (used for the
         graded agent-proximity penalty: contact distance = r_i + r_j)
     actions : (n_agents, action_dim) optional — raw policy output this step
@@ -220,6 +230,12 @@ def compute_rewards(
         threshold = agent_radii * config.wall_proximity_threshold
         wall_proximity = (wall_distances < threshold) & active_mask
         rewards[wall_proximity] += config.wall_proximity_penalty
+
+    # Wall contact penalty (hard, per step while the boundary pushed the agent
+    # back). Distinct from the proximity band; mirrors the agent collision
+    # penalty -- deters using walls as a free brake.
+    if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
+        rewards[wall_collision_mask & active_mask] += config.wall_collision_penalty
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
     # Penalty interpolates between ``near`` (at contact, r_i + r_j) and

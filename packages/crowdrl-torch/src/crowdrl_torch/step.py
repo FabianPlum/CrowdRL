@@ -117,7 +117,7 @@ def batched_step(
     )
 
     # --- 6. Wall boundary enforcement ---
-    new_positions, new_velocities = enforce_wall_boundaries(
+    new_positions, new_velocities, wall_collision_mask = enforce_wall_boundaries(
         new_positions,
         new_velocities,
         state.shoulder_widths,
@@ -146,6 +146,7 @@ def batched_step(
         state.prev_goal_distances,
         config,
         wall_distances=wall_distances,
+        wall_collision_mask=wall_collision_mask,
         agent_radii=agent_radii,
         actions=actions,
         prev_actions=state.prev_actions,

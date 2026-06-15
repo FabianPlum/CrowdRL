@@ -360,8 +360,8 @@ class CrowdEnv(gym.Env):
             self._world.velocities[self._active_mask] * cfg.dt
         )
 
-        # Wall boundary enforcement
-        enforce_wall_boundaries(self._world)
+        # Wall boundary enforcement (returns the hard wall-contact mask)
+        wall_collision_mask = enforce_wall_boundaries(self._world)
 
         # --- 5. Compute rewards ---
         # Distances for proximity penalties (agent-agent pair distances are
@@ -382,6 +382,7 @@ class CrowdEnv(gym.Env):
             config=cfg.reward,
             dt=cfg.dt,
             wall_distances=wall_distances,
+            wall_collision_mask=wall_collision_mask,
             agent_radii=agent_radii,
             actions=actions,
         )

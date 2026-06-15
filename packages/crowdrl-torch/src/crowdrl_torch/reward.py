@@ -24,6 +24,7 @@ REWARD_COMPONENT_NAMES: tuple[str, ...] = (
     "goal",
     "collision_agent",
     "wall_proximity",
+    "wall_collision",
     "agent_proximity",
     "action_rate",
     "existence",
@@ -44,6 +45,7 @@ def compute_rewards(
     config: EnvConfig,
     *,
     wall_distances: Tensor | None = None,
+    wall_collision_mask: Tensor | None = None,
     agent_radii: Tensor | None = None,
     actions: Tensor | None = None,
     prev_actions: Tensor | None = None,
@@ -66,6 +68,8 @@ def compute_rewards(
     prev_goal_distances : (E, N)
     config : EnvConfig
     wall_distances : (E, N) optional -- min distance to nearest wall per agent
+    wall_collision_mask : (E, N) bool optional -- True where the boundary
+        enforcement corrected the agent this step (hard wall-contact signal)
     agent_radii : (E, N) optional -- agent body radii (used for the graded
         agent-proximity penalty: per-pair contact distance = r_i + r_j)
     actions : (E, N, 4) optional -- raw policy output this step
@@ -128,6 +132,18 @@ def compute_rewards(
             zero,
         )
         rewards = rewards + comp_wall
+
+    # Wall contact penalty (hard, per-step while the boundary pushes the agent
+    # back). Distinct from the proximity band -- deters using walls as a free
+    # brake. Mirrors the agent collision penalty.
+    comp_wall_collision = zero
+    if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
+        comp_wall_collision = torch.where(
+            wall_collision_mask & active_mask,
+            torch.full_like(rewards, config.wall_collision_penalty),
+            zero,
+        )
+        rewards = rewards + comp_wall_collision
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
     # Penalty interpolates between ``near`` (at contact, r_i + r_j) and
@@ -244,6 +260,7 @@ def compute_rewards(
             comp_goal,
             comp_collision,
             comp_wall,
+            comp_wall_collision,
             comp_agent_prox,
             comp_action_rate,
             comp_existence,
