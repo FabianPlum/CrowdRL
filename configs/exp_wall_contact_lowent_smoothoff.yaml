@@ -1,0 +1,125 @@
+# =============================================================================
+# CrowdRL MAPPO -- Wall-contact penalty, lower entropy_coef (smoothness OFF)
+# =============================================================================
+# IDENTICAL to exp_wall_contact_smoothoff.yaml except entropy_coef 0.02 -> 0.003.
+#
+# Why: that run showed runaway entropy. Once basic avoidance was learned the
+# return variance collapsed (value_loss ~0.06 -> advantages ~0), the task
+# gradient vanished, and entropy_coef=0.02 inflated the policy action std
+# without bound (entropy 3 -> 16.7, climbing ~linearly). Huge std -> near-random
+# tanh-saturated actions that average to ~zero net motion -> agents "stuck in
+# place"; GoalRate tracked entropy inversely (peak 0.76 @ r25 -> ~0.41). The
+# crashing penalties were NOT the problem (coll_ag/wall_c already tiny, ~-3 to
+# -6); entropy_coef=0.02 -- raised earlier to fight the OPPOSITE (collapse) --
+# over-corrected. Dropping it ~7x (below the 0.01 default) lets the task
+# gradient dominate so the policy sharpens into coherent goal-reaching motion.
+#
+# Single-variable change. Both GPUs (DDP, auto via torchrun -- launch WITHOUT
+# CUDA_VISIBLE_DEVICES). Output -> results_exp_wall_contact_lowent_smoothoff/
+# =============================================================================
+
+seed: 42
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 4000            # ~24h at observed SPS (~97k early phase)
+log_interval: 5
+compile_step: true
+checkpoint_interval: 100    # save checkpoint_rollout_<N>.pt every 100 -- keep the peak
+render_during_training: true  # CPU-render a Tier-3B example episode from each checkpoint
+render_interval: 0            # 0 -> render every checkpoint (== checkpoint_interval)
+
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 500
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [40, 100]
+      threshold: 0.0
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+geometry:
+  min_side: 8.0
+  max_side: 15.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 18.0]
+
+observation:
+  use_navmesh: true
+  use_temporal_memory: true
+  temporal_memory_window: 50
+
+# --- Speed-turn coupling: turning sharply requires slowing down (unchanged) ---
+action:
+  max_heading_change_deg: 1.2     # 120 deg/s at dt=0.01 (== pivot cap)
+  max_torso_change_deg: 1.2
+  speed_turn_coupling: true
+  turn_lat_accel: 2.0             # m/s^2 comfortable centripetal acceleration
+  turn_pivot_rate_deg: 120.0      # deg/s max in-place yaw (v->0)
+
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -3.0         # MODERATE: was -1.0 (3x -- deter bulldozing)
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 1.5
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: false           # smoothness OFF
+  wall_proximity_penalty: -0.1    # soft proximity band (unchanged)
+  wall_proximity_threshold: 1.5
+  wall_collision_penalty: -1.0    # hard penalty per step in wall contact
+  agent_proximity_penalty_near: -0.05    # MODERATE: was -0.01 (5x)
+  agent_proximity_penalty_far: -0.002    # MODERATE: was -0.0001 (20x -- anticipation)
+  personal_space_radius: 1.0      # unchanged (narrow zone; avoid dense-crowd swamp)
+  action_rate_weight: -0.01
+
+max_steps: 2000
+desired_velocity_weight: 0.8
+
+episode:
+  stuck_termination_enabled: true
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+
+network:
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+  entropy_coef: 0.003        # was 0.02 -- cut ~7x to stop runaway entropy inflation
+
+eval:
+  n_episodes: 10
+  agent_range: [8, 25]
+  render_video: true
+  video_scenario: 7
