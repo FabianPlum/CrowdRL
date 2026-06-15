@@ -18,7 +18,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from train_mappo import _load_history_and_infer_rollout  # noqa: E402
+from train_mappo import (  # noqa: E402
+    _load_history_and_infer_rollout,
+    _render_command,
+    _resolve_render_interval,
+)
 
 
 # A minimal stand-in for CurriculumPhase -- the helper only reads `.name`.
@@ -222,3 +226,50 @@ class TestCliArgumentValidation:
         # results_dir does not exist, so no checkpoint -> FileNotFoundError
         with pytest.raises(FileNotFoundError, match="no checkpoint found"):
             train_worker(cfg, results_dir, resume_training=True)
+
+
+class TestResolveRenderInterval:
+    """Effective training-time render interval (must align with checkpoints)."""
+
+    def test_disabled_by_default(self):
+        assert _resolve_render_interval(False, 0, 100) == 0
+
+    def test_disabled_even_if_interval_set(self):
+        assert _resolve_render_interval(False, 100, 100) == 0
+
+    def test_defaults_to_checkpoint_interval(self):
+        assert _resolve_render_interval(True, 0, 100) == 100
+
+    def test_custom_multiple_kept(self):
+        assert _resolve_render_interval(True, 500, 100) == 500
+
+    def test_non_multiple_snaps_to_checkpoint(self):
+        assert _resolve_render_interval(True, 150, 100) == 100
+
+    def test_no_checkpoints_disables(self):
+        # Renders load the on-disk checkpoint; with checkpointing off there is
+        # nothing to render from.
+        assert _resolve_render_interval(True, 100, 0) == 0
+
+
+class TestRenderCommand:
+    """The CPU-render subprocess argv is well-formed."""
+
+    def test_command_shape(self, tmp_path: Path):
+        cmd = _render_command(
+            tmp_path / "config_resolved.yaml",
+            tmp_path / "checkpoint_rollout_0200.pt",
+            tmp_path / "viz_r0200_tier3B.mp4",
+            "exp_label",
+        )
+        assert cmd[0] == sys.executable
+        assert cmd[1].replace("\\", "/").endswith("scripts/render_cpu.py")
+        # Flags present and paired with the right values.
+        for flag, val in (
+            ("--config", str(tmp_path / "config_resolved.yaml")),
+            ("--checkpoint", str(tmp_path / "checkpoint_rollout_0200.pt")),
+            ("--out", str(tmp_path / "viz_r0200_tier3B.mp4")),
+            ("--label", "exp_label"),
+        ):
+            assert flag in cmd
+            assert cmd[cmd.index(flag) + 1] == val

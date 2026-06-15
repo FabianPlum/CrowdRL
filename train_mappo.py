@@ -871,6 +871,86 @@ def _load_history_and_infer_rollout(
 
 
 # ============================================================================
+# Training-time CPU video renders (optional)
+# ============================================================================
+
+
+def _resolve_render_interval(
+    render_during_training: bool,
+    render_interval: int,
+    checkpoint_interval: int,
+) -> int:
+    """Return the effective render interval in rollouts, or 0 if disabled.
+
+    Renders piggyback on checkpoint writes (the subprocess loads the
+    just-written ``checkpoint_rollout_<N>.pt``), so the interval must be a
+    positive multiple of ``checkpoint_interval``. Defaults to / snaps to
+    ``checkpoint_interval`` when unset or misaligned; returns 0 when rendering
+    is off or checkpoints are disabled.
+    """
+    if not render_during_training or checkpoint_interval <= 0:
+        return 0
+    if render_interval <= 0 or render_interval % checkpoint_interval != 0:
+        return checkpoint_interval
+    return render_interval
+
+
+def _render_command(
+    config_path: Path,
+    checkpoint_path: Path,
+    out_path: Path,
+    label: str,
+) -> list[str]:
+    """Build the argv for a CPU render subprocess (``scripts/render_cpu.py``).
+
+    Pure (no side effects) so the wiring is unit-testable without spawning.
+    Uses ``sys.executable`` so the render runs in the same interpreter/venv.
+    """
+    render_script = Path(__file__).resolve().parent / "scripts" / "render_cpu.py"
+    return [
+        sys.executable,
+        str(render_script),
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--out",
+        str(out_path),
+        "--label",
+        label,
+    ]
+
+
+def _spawn_training_render(
+    active: list[tuple[subprocess.Popen, object]],
+    config_path: Path,
+    checkpoint_path: Path,
+    out_path: Path,
+    label: str,
+) -> list[tuple[subprocess.Popen, object]]:
+    """Fire-and-forget a CPU render of ``checkpoint_path``; never blocks training.
+
+    First reaps any finished renders from ``active`` (closing their log files),
+    then spawns a new ``scripts/render_cpu.py`` subprocess writing ``out_path``.
+    The render runs entirely on CPU so it does not touch the GPUs. Returns the
+    updated list of (process, logfile) for still-running renders.
+    """
+    still = [(p, lf) for (p, lf) in active if p.poll() is None]
+    for p, lf in active:
+        if p.poll() is not None:
+            lf.close()
+    logf = open(out_path.with_suffix(".log"), "w")
+    proc = subprocess.Popen(
+        _render_command(config_path, checkpoint_path, out_path, label),
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    still.append((proc, logf))
+    return still
+
+
+# ============================================================================
 # Training worker (one per GPU rank)
 # ============================================================================
 
@@ -924,6 +1004,19 @@ def train_worker(
     # 0 = only save the final checkpoint (legacy behaviour).
     # >0 = also save ``checkpoint_rollout_<N>.pt`` every N rollouts so we can
     # diff/replay/eval intermediate policy states for debugging.
+
+    # Optional training-time CPU video renders. When enabled, each periodic
+    # checkpoint write also fires a non-blocking ``scripts/render_cpu.py``
+    # subprocess (CPU-only, never touches the GPUs) that renders a Tier-3B
+    # example episode from that checkpoint. ``render_interval`` defaults to /
+    # snaps to a multiple of ``checkpoint_interval`` since the render loads the
+    # on-disk checkpoint. Disabled by default.
+    render_during_training = cfg.get("render_during_training", False)
+    render_interval_cfg = cfg.get("render_interval", 0)
+    render_interval = _resolve_render_interval(
+        render_during_training, render_interval_cfg, checkpoint_interval
+    )
+    render_label = results_dir.name.removeprefix("results_")
 
     # -- Validate max_agents covers curriculum --------------------------------
     max_phase_agents = max(p.n_agents_range[1] for p in curriculum_config.phases)
@@ -1054,6 +1147,24 @@ def train_worker(
         print(f"Envs per rank: {n_envs}, steps/collect: {steps_per_collect:,}")
         print(f"Effective batch: {steps_per_collect * world_size:,} agent-steps/update")
         print(f"Curriculum: {' -> '.join(p.name for p in curriculum_config.phases)}")
+        if render_during_training and checkpoint_interval <= 0:
+            print(
+                "Warning: render_during_training needs checkpoint_interval > 0; renders disabled."
+            )
+        elif (
+            render_during_training
+            and render_interval_cfg > 0
+            and render_interval_cfg != render_interval
+        ):
+            print(
+                f"Warning: render_interval ({render_interval_cfg}) must be a multiple of "
+                f"checkpoint_interval ({checkpoint_interval}); using {render_interval}."
+            )
+        if render_interval > 0:
+            print(
+                f"Training-time CPU renders: every {render_interval} rollouts "
+                f"-> {results_dir.name}/viz_r<N>_tier3B.mp4"
+            )
         results_dir.mkdir(parents=True, exist_ok=True)
         # Save resolved config for reproducibility, augmented with launch-time
         # provenance so the file fully describes how this run started. The
@@ -1117,6 +1228,9 @@ def train_worker(
     # current session's work, not the sum of all previous runs.
     session_agent_steps = 0
     start_time = time.time()
+
+    # Still-running training-time render subprocesses, as (Popen, logfile) tuples.
+    render_procs: list[tuple[subprocess.Popen, object]] = []
 
     if is_main_rank():
         sps_header = "SPS (local)" if world_size > 1 else "SPS"
@@ -1280,9 +1394,38 @@ def train_worker(
                     total_agent_steps,
                     total_episodes,
                 )
+                if render_interval > 0 and rollout % render_interval == 0:
+                    viz_out = results_dir / f"viz_r{rollout:04d}_tier3B.mp4"
+                    # Never let a render-spawn failure crash a long training run:
+                    # the render is a best-effort side artifact, not core training.
+                    try:
+                        render_procs = _spawn_training_render(
+                            render_procs,
+                            results_dir / "config_resolved.yaml",
+                            ckpt_path,
+                            viz_out,
+                            render_label,
+                        )
+                        print(
+                            f"  Spawned CPU render of {ckpt_path.name} -> {viz_out.name} "
+                            f"(log: {viz_out.with_suffix('.log').name})",
+                            flush=True,
+                        )
+                    except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                        print(
+                            f"  Warning: render spawn failed ({type(e).__name__}: {e}); "
+                            "continuing training.",
+                            flush=True,
+                        )
 
     finally:
         batched_env.close()
+
+    # Reap finished training-time renders (close their logs); leave any still
+    # running -- they are short and finish on their own during post-training.
+    for _p, _lf in render_procs:
+        if _p.poll() is not None:
+            _lf.close()
 
     elapsed = time.time() - start_time
     if is_main_rank():
