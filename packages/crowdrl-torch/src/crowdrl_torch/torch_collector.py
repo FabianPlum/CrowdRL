@@ -23,6 +23,7 @@ from crowdrl_train.normalizer import RewardNormalizer
 
 from crowdrl_torch.batched_env import BatchedTorchEnv
 from crowdrl_torch.normalizer import TorchRunningNormalizer
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
 
 
 class TorchRolloutCollector:
@@ -69,6 +70,10 @@ class TorchRolloutCollector:
         self._ep_terminated: np.ndarray | None = None
         self._ep_lengths: np.ndarray | None = None
         self._n_agents_t: np.ndarray | None = None
+        # Per-episode reward decomposition accumulator (E, N, C), persisted
+        # across collect() calls alongside ep_rewards so the breakdown of an
+        # episode that spans rollouts is not lost.
+        self._ep_components: np.ndarray | None = None
 
     def collect(self, n_agent_steps: int) -> list[dict]:
         """Collect at least ``n_agent_steps`` across all envs.
@@ -95,14 +100,17 @@ class TorchRolloutCollector:
             self._ep_terminated = np.zeros((E, N), dtype=np.bool_)
             self._ep_lengths = np.zeros(E, dtype=np.int32)
             self._n_agents_t = self.env.states.n_agents.cpu().numpy().astype(np.int32)
+            self._ep_components = np.zeros((E, N, len(REWARD_COMPONENT_NAMES)), dtype=np.float64)
 
         obs_t = self._obs_t
         ep_rewards = self._ep_rewards
         ep_terminated = self._ep_terminated
         ep_lengths = self._ep_lengths
         n_agents_t = self._n_agents_t
+        ep_components = self._ep_components
         assert ep_rewards is not None and ep_terminated is not None
         assert ep_lengths is not None and n_agents_t is not None
+        assert ep_components is not None
 
         # --- Per-step padded storage (fresh each collect) ---
         step_obs: list[np.ndarray] = []
@@ -150,8 +158,8 @@ class TorchRolloutCollector:
 
             # --- Step all envs on device ---
             actions_gpu = actions_t.reshape(E, N, A)
-            self.env.states, obs_t, rewards_t, terminated_t, truncated_t = self.env.step(
-                actions_gpu
+            self.env.states, obs_t, rewards_t, terminated_t, truncated_t, reward_components_t = (
+                self.env.step(actions_gpu)
             )
 
             # --- Single bulk transfer to CPU ---
@@ -160,6 +168,7 @@ class TorchRolloutCollector:
             log_probs_np = log_probs_t.cpu().numpy().reshape(E, N)
             values_np = values_t.cpu().numpy().reshape(E, N)
             rewards_np = rewards_t.cpu().numpy()  # (E, N)
+            reward_components_np = reward_components_t.cpu().numpy()  # (E, N, C)
             terminated_np = terminated_t.cpu().numpy()
             truncated_np = truncated_t.cpu().numpy()
             dones_np = terminated_np | truncated_np
@@ -182,6 +191,10 @@ class TorchRolloutCollector:
 
             # --- Vectorized episode tracking ---
             ep_rewards += rewards_np * active_np
+            # Reward decomposition uses the RAW (pre-normalization) components so
+            # the breakdown reflects the reward design directly; their sum is the
+            # raw episode return (distinct from the scaled mean_reward above).
+            ep_components += reward_components_np * active_np[:, :, None]
             ep_terminated |= terminated_np
             ep_lengths += np.any(real_active, axis=1).astype(np.int32)
             steps_collected += int(real_active.sum())
@@ -213,6 +226,8 @@ class TorchRolloutCollector:
                     # Record episode stats
                     n_reached = int(ep_terminated[i, :n_ag].sum())
                     total_rew = float(ep_rewards[i, :n_ag].sum())
+                    # Per-agent raw reward decomposition (sums to the raw return).
+                    comp_sums = ep_components[i, :n_ag].sum(axis=0)  # (C,)
                     ep_dict = {
                         "n_agents": n_ag,
                         "episode_length": int(ep_lengths[i]),
@@ -220,6 +235,10 @@ class TorchRolloutCollector:
                         "n_reached_goal": n_reached,
                         "mean_reward": total_rew / n_ag,
                         "total_reward": total_rew,
+                        "reward_components": {
+                            name: float(comp_sums[c] / n_ag)
+                            for c, name in enumerate(REWARD_COMPONENT_NAMES)
+                        },
                     }
                     if env_tiers is not None:
                         ep_dict["geometry_tier"] = env_tiers[i]
@@ -231,6 +250,7 @@ class TorchRolloutCollector:
 
                     # Reset per-env episode tracking
                     ep_rewards[i] = 0.0
+                    ep_components[i] = 0.0
                     ep_terminated[i] = False
                     ep_lengths[i] = 0
 

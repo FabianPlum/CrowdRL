@@ -21,6 +21,7 @@ from crowdrl_core.world_state import WorldState
 from crowdrl_torch.action import interpret_actions as torch_interpret_actions
 from crowdrl_torch.collision import detect_collisions_pairwise as torch_detect_collisions
 from crowdrl_torch.observation import build_observations as torch_build_observations
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
 from crowdrl_torch.reward import compute_rewards as torch_compute_rewards
 from crowdrl_torch.sensing import cast_rays as torch_cast_rays
 from crowdrl_torch.sensing import knn_social as torch_knn_social
@@ -675,7 +676,7 @@ class TestRewardEquivalence:
         config = EnvConfig(max_agents=n)
 
         # PyTorch (E=1)
-        torch_rewards, torch_reached, torch_dists = torch_compute_rewards(
+        torch_rewards, torch_reached, torch_dists, torch_comps = torch_compute_rewards(
             torch.tensor(positions).unsqueeze(0),
             torch.tensor(velocities).unsqueeze(0),
             torch.tensor(goal_positions).unsqueeze(0),
@@ -695,6 +696,11 @@ class TestRewardEquivalence:
         # Reached goal agents should have positive reward
         if reached.any():
             assert rewards[reached].max() >= config.goal_bonus - 1.0
+
+        # Per-component breakdown is exhaustive: channels sum to total reward.
+        comps = torch_comps[0].numpy()
+        assert comps.shape == (n, len(REWARD_COMPONENT_NAMES))
+        npt.assert_allclose(comps.sum(axis=-1), rewards, atol=1e-4, rtol=1e-4)
 
 
 class TestTemporalMemoryEquivalence:

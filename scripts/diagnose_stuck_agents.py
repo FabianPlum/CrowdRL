@@ -179,7 +179,7 @@ def run_batched_episodes(
                 )
             actions_gpu = actions.reshape(E, N, action_dim)
 
-            states, obs, rewards, terminated, _trunc = batched_env.step(actions_gpu)
+            states, obs, rewards, terminated, _trunc, _components = batched_env.step(actions_gpu)
 
             positions_np = states.positions.cpu().numpy()  # (E, N, 2)
             velocities_np = states.velocities.cpu().numpy()  # (E, N, 2)

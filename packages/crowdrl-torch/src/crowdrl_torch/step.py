@@ -16,7 +16,7 @@ from torch import Tensor
 from crowdrl_torch.action import interpret_actions
 from crowdrl_torch.collision import compute_contact_forces, detect_collisions_pairwise
 from crowdrl_torch.observation import build_observations
-from crowdrl_torch.reward import compute_rewards
+from crowdrl_torch.reward import TIMEOUT_COMPONENT_IDX, compute_rewards
 from crowdrl_torch.sensing import match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
@@ -42,6 +42,9 @@ def batched_step(
     rewards : (E, N)
     terminated : (E, N) bool — agent reached goal
     truncated : (E, N) bool — episode time limit
+    reward_components : (E, N, C) — per-component reward breakdown, channels
+        ordered by ``crowdrl_torch.reward.REWARD_COMPONENT_NAMES``; sums to
+        ``rewards``. For collapse instrumentation only — not used by the env.
     """
     E, N = state.positions.shape[:2]
     step_count = state.step_count + 1  # (E,)
@@ -134,7 +137,7 @@ def batched_step(
     )
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
 
-    rewards, reached_goal, new_goal_distances = compute_rewards(
+    rewards, reached_goal, new_goal_distances, reward_components = compute_rewards(
         new_positions,
         new_velocities,
         state.goal_positions,
@@ -153,6 +156,11 @@ def batched_step(
         prev_headings=state.prev_headings,
         prev_heading_changes=state.prev_heading_changes,
     )
+
+    # Accumulator for the timeout/stuck penalties applied below, folded into
+    # the ``timeout`` channel of reward_components before returning so the
+    # per-component breakdown stays exhaustive.
+    timeout_component = torch.zeros_like(rewards)
 
     # --- 8. Update active mask ---
     newly_done = reached_goal & state.active_mask
@@ -202,7 +210,13 @@ def batched_step(
         )
 
         # Apply timeout penalty to stuck agents and mark them truncated.
-        rewards = torch.where(stuck_mask, rewards + config.timeout_penalty, rewards)
+        # ``where(m, r + p, r) == r + where(m, p, 0)`` keeps rewards identical
+        # while letting us tally the penalty in the timeout component.
+        stuck_pen = torch.where(
+            stuck_mask, torch.full_like(rewards, config.timeout_penalty), torch.zeros_like(rewards)
+        )
+        rewards = rewards + stuck_pen
+        timeout_component = timeout_component + stuck_pen
         truncated = torch.where(stuck_mask, torch.ones_like(truncated), truncated)
         new_active_mask = new_active_mask & ~stuck_mask
         new_velocities = torch.where(
@@ -215,7 +229,13 @@ def batched_step(
     # Check for timeout: (E,) -> broadcast to (E, N)
     is_timeout = (step_count >= config.max_steps).unsqueeze(1)  # (E, 1)
     truncated = torch.where(is_timeout & new_active_mask, torch.ones_like(truncated), truncated)
-    rewards = torch.where(is_timeout & new_active_mask, rewards + config.timeout_penalty, rewards)
+    timeout_pen = torch.where(
+        is_timeout & new_active_mask,
+        torch.full_like(rewards, config.timeout_penalty),
+        torch.zeros_like(rewards),
+    )
+    rewards = rewards + timeout_pen
+    timeout_component = timeout_component + timeout_pen
     new_active_mask = torch.where(
         is_timeout.expand_as(new_active_mask),
         torch.zeros_like(new_active_mask),
@@ -385,6 +405,19 @@ def batched_step(
         neighbor_vel_history=new_neighbor_vel_history,
     )
 
+    # Fold the episode-end timeout/stuck penalties into the timeout channel so
+    # ``reward_components`` sums to ``rewards`` (the channel left zero by
+    # compute_rewards). ``cat`` avoids an in-place index write inside the
+    # compiled region. timeout is the last channel, so the slice is [:-1].
+    idx = TIMEOUT_COMPONENT_IDX
+    reward_components = torch.cat(
+        [
+            reward_components[..., :idx],
+            (reward_components[..., idx] + timeout_component).unsqueeze(-1),
+        ],
+        dim=-1,
+    )
+
     # --- 13. Build observations ---
     observations = build_observations(
         new_positions,
@@ -414,4 +447,4 @@ def batched_step(
         neighbor_vel_history=new_state.neighbor_vel_history,
     )
 
-    return new_state, observations, rewards, terminated, truncated
+    return new_state, observations, rewards, terminated, truncated, reward_components

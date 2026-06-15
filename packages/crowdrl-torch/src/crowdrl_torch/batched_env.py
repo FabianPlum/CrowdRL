@@ -154,7 +154,14 @@ class BatchedTorchEnv:
 
     def step(
         self, actions: torch.Tensor
-    ) -> tuple[TorchWorldState, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        TorchWorldState,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Step all environments.
 
         Parameters
@@ -163,7 +170,11 @@ class BatchedTorchEnv:
 
         Returns
         -------
-        states, observations, rewards, terminated, truncated
+        states, observations, rewards, terminated, truncated, reward_components
+
+        ``reward_components`` is (E, N, C), the per-component reward breakdown
+        (channels ordered by ``crowdrl_torch.reward.REWARD_COMPONENT_NAMES``),
+        used by the collector for per-episode collapse instrumentation.
 
         Notes
         -----
@@ -177,7 +188,7 @@ class BatchedTorchEnv:
 
         if self._compiled:
             torch.compiler.cudagraph_mark_step_begin()
-        self.states, obs, rewards, terminated, truncated = self._step_fn(
+        self.states, obs, rewards, terminated, truncated, reward_components = self._step_fn(
             self.states, actions, self.config
         )
         if self._compiled:
@@ -191,7 +202,7 @@ class BatchedTorchEnv:
         # Eval mode: skip auto-reset entirely. This avoids the per-step
         # ``.tolist()`` sync barrier on ``self.episode_over``.
         if self.disable_auto_reset:
-            return self.states, obs, rewards, terminated, truncated
+            return self.states, obs, rewards, terminated, truncated, reward_components
 
         # Initiate async resets for finished envs
         for env_idx in self.episode_over.nonzero(as_tuple=False).flatten().tolist():
@@ -251,7 +262,7 @@ class BatchedTorchEnv:
             )
             obs[r] = fresh_obs
 
-        return self.states, obs, rewards, terminated, truncated
+        return self.states, obs, rewards, terminated, truncated, reward_components
 
     def get_episode_over_mask(self) -> torch.Tensor:
         """Return (E,) bool mask of envs with no active agents."""
@@ -281,7 +292,7 @@ class BatchedTorchEnv:
         try:
             for _ in range(n_steps):
                 torch.compiler.cudagraph_mark_step_begin()
-                self.states, _, _, _, _ = self._step_fn(self.states, actions, self.config)
+                self.states, _, _, _, _, _ = self._step_fn(self.states, actions, self.config)
                 self.states = self.states.clone()
             return True
         except Exception as e:

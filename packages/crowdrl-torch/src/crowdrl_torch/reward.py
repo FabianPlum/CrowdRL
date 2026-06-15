@@ -14,6 +14,25 @@ from torch import Tensor
 
 from crowdrl_torch.types import EnvConfig
 
+# Per-component reward breakdown channels, in stacking order. The components
+# tensor returned by ``compute_rewards`` has shape (E, N, len(...)) and its
+# channels sum exactly to the total per-agent reward (timeout is filled in by
+# ``batched_step``, which is where the episode-end penalties are applied).
+# Single source of truth: collector and training loop import this to label the
+# per-episode reward decomposition used for collapse instrumentation.
+REWARD_COMPONENT_NAMES: tuple[str, ...] = (
+    "goal",
+    "collision_agent",
+    "wall_proximity",
+    "agent_proximity",
+    "action_rate",
+    "existence",
+    "progress",
+    "smoothness",
+    "timeout",
+)
+TIMEOUT_COMPONENT_IDX = REWARD_COMPONENT_NAMES.index("timeout")
+
 
 def compute_rewards(
     positions: Tensor,
@@ -34,7 +53,7 @@ def compute_rewards(
     prev_accelerations: Tensor | None = None,
     prev_headings: Tensor | None = None,
     prev_heading_changes: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Compute per-agent rewards for one timestep.
 
     Parameters
@@ -63,25 +82,39 @@ def compute_rewards(
     rewards : (E, N)
     reached_goal : (E, N) bool
     new_goal_distances : (E, N) -- for next step's progress reward
+    components : (E, N, C) -- per-component reward breakdown, channels ordered
+        by ``REWARD_COMPONENT_NAMES``. Channels sum to ``rewards`` (the
+        ``timeout`` channel is left zero here and filled by ``batched_step``).
+
+    Notes
+    -----
+    Each component is accumulated into both ``rewards`` and its own channel via
+    ``rewards = rewards + comp_k`` where ``comp_k = where(mask_k, X_k, 0)``. This
+    is bit-identical to the prior ``where(mask_k, rewards + X_k, rewards)`` form
+    (adding a masked-to-zero delta), so the total reward is unchanged.
     """
     # Goal distances
     goal_diffs = goal_positions - positions
     goal_distances = (goal_diffs**2).sum(dim=-1).sqrt()  # (E, N)
 
     rewards = torch.zeros_like(goal_distances)
+    zero = torch.zeros_like(goal_distances)
 
     # Goal reaching
     reached_goal = (goal_distances < config.goal_radius) & active_mask
-    rewards = torch.where(reached_goal, rewards + config.goal_bonus, rewards)
+    comp_goal = torch.where(reached_goal, torch.full_like(rewards, config.goal_bonus), zero)
+    rewards = rewards + comp_goal
 
     # Collision penalty
-    rewards = torch.where(
+    comp_collision = torch.where(
         collision_mask & active_mask,
-        rewards + config.collision_penalty,
-        rewards,
+        torch.full_like(rewards, config.collision_penalty),
+        zero,
     )
+    rewards = rewards + comp_collision
 
     # Wall proximity penalty (smooth, distance-based)
+    comp_wall = zero
     if (
         config.wall_proximity_penalty != 0.0
         and wall_distances is not None
@@ -89,16 +122,18 @@ def compute_rewards(
     ):
         threshold = agent_radii * config.wall_proximity_threshold
         wall_proximity = (wall_distances < threshold) & active_mask
-        rewards = torch.where(
+        comp_wall = torch.where(
             wall_proximity,
-            rewards + config.wall_proximity_penalty,
-            rewards,
+            torch.full_like(rewards, config.wall_proximity_penalty),
+            zero,
         )
+        rewards = rewards + comp_wall
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
     # Penalty interpolates between ``near`` (at contact, r_i + r_j) and
     # ``far`` (at personal_space_radius). Each agent pays the penalty of its
     # most-penalised neighbour inside the zone.
+    comp_agent_prox = zero
     if (
         config.agent_proximity_penalty_near != 0.0 or config.agent_proximity_penalty_far != 0.0
     ) and agent_radii is not None:
@@ -127,34 +162,37 @@ def compute_rewards(
 
         # Per-agent: most-negative penalty from any neighbour.
         proximity = pair_penalty.min(dim=2).values  # (E, N)
-        rewards = torch.where(
-            active_mask,
-            rewards + proximity,
-            rewards,
-        )
+        comp_agent_prox = torch.where(active_mask, proximity, zero)
+        rewards = rewards + comp_agent_prox
 
     # Action rate penalty (change in raw policy output between steps)
+    comp_action_rate = zero
     if config.action_rate_weight != 0.0 and actions is not None and prev_actions is not None:
         action_change = ((actions - prev_actions) ** 2).sum(dim=-1).sqrt()  # (E, N)
-        rewards = torch.where(
+        comp_action_rate = torch.where(
             active_mask,
-            rewards + config.action_rate_weight * action_change,
-            rewards,
+            config.action_rate_weight * action_change,
+            zero,
         )
+        rewards = rewards + comp_action_rate
 
     # Existence penalty: every step alive costs you
+    comp_existence = zero
     if config.existence_penalty != 0.0:
-        rewards = torch.where(
+        comp_existence = torch.where(
             active_mask,
-            rewards + config.existence_penalty,
-            rewards,
+            torch.full_like(rewards, config.existence_penalty),
+            zero,
         )
+        rewards = rewards + comp_existence
 
     # Progress reward (potential-based shaping)
     progress = prev_goal_distances - goal_distances
-    rewards = torch.where(active_mask, rewards + config.progress_weight * progress, rewards)
+    comp_progress = torch.where(active_mask, config.progress_weight * progress, zero)
+    rewards = rewards + comp_progress
 
-    # --- Tier 2: Smoothness ---
+    # --- Tier 2: Smoothness (jerk + angular accel + speed deviation, one channel) ---
+    comp_smoothness = zero
     if config.use_smoothness and prev_velocities is not None:
         dt = config.dt
         accelerations = (velocities - prev_velocities) / dt  # (E, N, 2)
@@ -163,11 +201,9 @@ def compute_rewards(
         if config.jerk_penalty_weight != 0.0 and prev_accelerations is not None:
             jerk = (accelerations - prev_accelerations) / dt  # (E, N, 2)
             jerk_mag = (jerk**2).sum(dim=-1).sqrt()  # (E, N)
-            rewards = torch.where(
-                active_mask,
-                rewards + config.jerk_penalty_weight * jerk_mag,
-                rewards,
-            )
+            term = torch.where(active_mask, config.jerk_penalty_weight * jerk_mag, zero)
+            comp_smoothness = comp_smoothness + term
+            rewards = rewards + term
 
         # Angular acceleration penalty
         if (
@@ -182,23 +218,40 @@ def compute_rewards(
             angular_vel = heading_change / dt
             prev_angular_vel = prev_heading_changes / dt
             angular_accel = (angular_vel - prev_angular_vel).abs()
-            rewards = torch.where(
-                active_mask,
-                rewards + config.angular_accel_penalty_weight * angular_accel,
-                rewards,
+            term = torch.where(
+                active_mask, config.angular_accel_penalty_weight * angular_accel, zero
             )
+            comp_smoothness = comp_smoothness + term
+            rewards = rewards + term
 
         # Preferred speed deviation
         if config.speed_deviation_weight != 0.0 and preferred_speeds is not None:
             speeds = (velocities**2).sum(dim=-1).sqrt()  # (E, N)
             speed_dev = (speeds - preferred_speeds).abs()
-            rewards = torch.where(
-                active_mask,
-                rewards + config.speed_deviation_weight * speed_dev,
-                rewards,
-            )
+            term = torch.where(active_mask, config.speed_deviation_weight * speed_dev, zero)
+            comp_smoothness = comp_smoothness + term
+            rewards = rewards + term
 
-    # Zero rewards for inactive agents
-    rewards = torch.where(active_mask, rewards, torch.zeros_like(rewards))
+    # Zero rewards for inactive agents (no-op for the sum: every component is
+    # already zero where inactive, but kept for parity with the prior code).
+    rewards = torch.where(active_mask, rewards, zero)
 
-    return rewards, reached_goal, goal_distances
+    # Per-component breakdown. ``timeout`` is the last channel and stays zero
+    # here; batched_step adds the episode-end timeout/stuck penalty into it.
+    comp_timeout = zero
+    components = torch.stack(
+        [
+            comp_goal,
+            comp_collision,
+            comp_wall,
+            comp_agent_prox,
+            comp_action_rate,
+            comp_existence,
+            comp_progress,
+            comp_smoothness,
+            comp_timeout,
+        ],
+        dim=-1,
+    )
+
+    return rewards, reached_goal, goal_distances, components

@@ -60,6 +60,7 @@ from crowdrl_torch.distributed import (
     seed_everything,
     sync_reward_normalizer,
 )
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
 from crowdrl_torch.types import EnvConfig
 
 # Note: matplotlib backend is switched to "Agg" inside main(), not at module
@@ -335,6 +336,49 @@ def save_training_plots(
     print(f"  Training curves -> {results_dir / 'training_curves.png'}")
 
 
+def save_reward_component_plot(history: dict, results_dir: Path) -> None:
+    """Save the per-component reward decomposition over training (collapse aid).
+
+    One smoothed line per reward component (raw, per agent per episode) plus the
+    raw total. Reveals which reward mode drives a collapse -- e.g. existence or
+    timeout dominating progress -- which the std-scaled mean-reward curve hides.
+    Silently skips runs whose history predates the decomposition.
+    """
+    comp_keys = [f"reward_comp_{name}" for name in REWARD_COMPONENT_NAMES]
+    if not any(history.get(k) for k in comp_keys):
+        return
+
+    def smooth(values, window=100):
+        values = np.asarray(values, dtype=np.float64)
+        if len(values) < window or window < 2:
+            return values
+        kernel = np.ones(window) / window
+        return np.convolve(values, kernel, mode="valid")
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    cmap = plt.get_cmap("tab10")
+    total = None
+    for i, name in enumerate(REWARD_COMPONENT_NAMES):
+        series = history.get(f"reward_comp_{name}", [])
+        if not series:
+            continue
+        arr = np.asarray(series, dtype=np.float64)
+        total = arr if total is None else total + arr
+        ax.plot(smooth(arr), color=cmap(i % 10), linewidth=0.9, label=name)
+    if total is not None:
+        ax.plot(smooth(total), color="black", linewidth=1.4, label="TOTAL (raw return)")
+    ax.axhline(0.0, color="gray", linewidth=0.6, alpha=0.6)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Raw reward per agent")
+    ax.set_title("Reward decomposition (rolling 100, raw per-agent contribution)")
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(results_dir / "reward_components.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Reward components -> {results_dir / 'reward_components.png'}")
+
+
 def save_phase_summary(
     history: dict,
     phases: tuple,
@@ -436,7 +480,7 @@ def _collect_eval_episodes_batched(
             )
         actions_gpu = actions.reshape(n_envs, N, action_dim)
 
-        states, obs, rewards, terminated, _truncated = batched_env.step(actions_gpu)
+        states, obs, rewards, terminated, _truncated, _components = batched_env.step(actions_gpu)
 
         rewards_np = rewards.cpu().numpy()
         terminated_np = terminated.cpu().numpy()
@@ -1161,6 +1205,10 @@ def train_worker(
                 history["n_agents"].append(ep["n_agents"])
                 history["phase_idx"].append(curriculum.current_phase_idx)
                 history["geometry_tier"].append(ep.get("geometry_tier", "unknown"))
+                # Per-episode raw reward decomposition (one series per component).
+                comps = ep.get("reward_components", {})
+                for name in REWARD_COMPONENT_NAMES:
+                    history[f"reward_comp_{name}"].append(comps.get(name, 0.0))
 
             if update_metrics:
                 history["policy_loss"].append(update_metrics.get("policy_loss", 0))
@@ -1186,6 +1234,36 @@ def train_worker(
                     f"{local_sps:>11.0f}{global_col}",
                     flush=True,
                 )
+
+                # Collapse instrumentation, two extra lines per log interval:
+                #   (1) raw per-agent reward decomposition (windowed mean). Sums
+                #       to the raw return -- distinct from the scaled Reward above.
+                #   (2) PPO diagnostics (entropy/value-loss/KL) for this rollout.
+                short = {
+                    "goal": "goal",
+                    "progress": "prog",
+                    "existence": "exist",
+                    "collision_agent": "coll_ag",
+                    "agent_proximity": "prox_ag",
+                    "wall_proximity": "wall",
+                    "smoothness": "smooth",
+                    "action_rate": "act",
+                    "timeout": "tout",
+                }
+                comp_means = {
+                    name: float(np.mean(history[f"reward_comp_{name}"][-window:]))
+                    for name in REWARD_COMPONENT_NAMES
+                }
+                raw_total = sum(comp_means.values())
+                decomp = "  ".join(f"{short[name]} {comp_means[name]:+.2f}" for name in short)
+                print(f"        rwd/agent(raw): {decomp}  =  tot {raw_total:+.2f}", flush=True)
+                if update_metrics:
+                    print(
+                        f"        ppo: entropy {update_metrics.get('entropy', 0.0):.3f}  "
+                        f"value_loss {update_metrics.get('value_loss', 0.0):.3f}  "
+                        f"approx_kl {update_metrics.get('approx_kl', 0.0):.4f}",
+                        flush=True,
+                    )
 
             # Periodic checkpoint (rank 0 only). Each save is independent so
             # any intermediate policy can be loaded later for eval / replay /
@@ -1238,6 +1316,9 @@ def train_worker(
 
         # Training curves
         save_training_plots(history, phase_transitions, curriculum_config.phases, results_dir)
+
+        # Reward decomposition (collapse instrumentation)
+        save_reward_component_plot(history, results_dir)
 
         # Phase summary
         save_phase_summary(history, curriculum_config.phases, results_dir)
