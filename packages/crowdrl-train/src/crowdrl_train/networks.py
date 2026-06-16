@@ -20,6 +20,15 @@ from torch.distributions import Normal
 
 from crowdrl_train.config import NetworkConfig
 
+# Hard bounds on the policy log-std, applied every forward pass. The upper
+# bound caps the action std at exp(0.0) = 1.0, preventing the entropy/log_std
+# runaway that drove a prior collapse (std drifting past ~1.2 -> increasingly
+# random, tanh-saturated actions -> mass collisions). The lower bound keeps a
+# floor of exp(-5) ~ 0.007 so exploration can't collapse to zero. Clamping (vs.
+# a tighter init) preserves early exploration while bounding the failure mode.
+_LOG_STD_MIN = -5.0
+_LOG_STD_MAX = 0.0
+
 
 def _ortho_init(weight: torch.Tensor, gain: float = 1.0) -> None:
     """Orthogonal initialization via numpy QR decomposition.
@@ -103,7 +112,9 @@ class Actor(nn.Module):
         """
         features = self.feature_net(obs)
         mean = self.action_mean(features)
-        std = self.log_std.exp().expand_as(mean)
+        # Clamp log_std to [_LOG_STD_MIN, _LOG_STD_MAX] every forward pass so the
+        # learnable std can neither run away (collapse trigger) nor collapse to 0.
+        std = self.log_std.clamp(_LOG_STD_MIN, _LOG_STD_MAX).exp().expand_as(mean)
         return Normal(mean, std)
 
     def get_action(
