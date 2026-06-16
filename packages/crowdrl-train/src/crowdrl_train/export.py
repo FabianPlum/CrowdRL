@@ -1,12 +1,13 @@
 """ONNX export pipeline for trained policies.
 
-Exports the actor network (deterministic: action means only) with frozen
+Exports the actor network (deterministic: tanh(mean)) with frozen
 observation normalization baked in. This is the single artefact that crosses
 from crowdrl-train to crowdrl-jupedsim.
 
 The exported model:
 - Input: (batch, obs_dim) float32 — raw (unnormalized) observations
-- Output: (batch, action_dim) float32 — deterministic action means in [-1, 1]
+- Output: (batch, action_dim) float32 — deterministic tanh-squashed action,
+  ``tanh(mean)`` in (-1, 1) (matches the training-time deterministic action)
 - Dynamic batch axis: accepts any number of agents
 """
 
@@ -65,7 +66,10 @@ class PolicyForExport(nn.Module):
             self._has_normalizer = False
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """Raw observations → deterministic action means.
+        """Raw observations → deterministic tanh-squashed action.
+
+        Mirrors the training-time deterministic action ``tanh(mean)`` so the
+        deployed (JuPedSim) policy is identical to the trained one.
 
         Parameters
         ----------
@@ -73,7 +77,7 @@ class PolicyForExport(nn.Module):
 
         Returns
         -------
-        (batch, action_dim) float32 — clipped to [-1, 1]
+        (batch, action_dim) float32 — tanh-squashed into (-1, 1)
         """
         if self._has_normalizer:
             obs = torch.clamp(
@@ -83,7 +87,7 @@ class PolicyForExport(nn.Module):
             )
         features = self.actor_feature_net(obs)
         action_mean = self.actor_mean(features)
-        return action_mean.clamp(-1.0, 1.0)
+        return torch.tanh(action_mean)
 
 
 def export_onnx(

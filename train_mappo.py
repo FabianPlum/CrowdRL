@@ -1336,6 +1336,7 @@ def train_worker(
                 history["value_loss"].append(update_metrics.get("value_loss", 0))
                 history["entropy"].append(update_metrics.get("entropy", 0))
                 history["approx_kl"].append(update_metrics.get("approx_kl", 0))
+                history["action_std"].append(update_metrics.get("action_std_mean", 0))
 
             # Logging (rank 0)
             if rollout % log_interval == 0 and episode_stats_list and is_main_rank():
@@ -1382,6 +1383,7 @@ def train_worker(
                 if update_metrics:
                     print(
                         f"        ppo: entropy {update_metrics.get('entropy', 0.0):.3f}  "
+                        f"action_std {update_metrics.get('action_std_mean', 0.0):.3f}  "
                         f"value_loss {update_metrics.get('value_loss', 0.0):.3f}  "
                         f"approx_kl {update_metrics.get('approx_kl', 0.0):.4f}",
                         flush=True,

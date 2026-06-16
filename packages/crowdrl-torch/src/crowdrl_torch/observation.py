@@ -124,7 +124,7 @@ def compute_navmesh_signals(
     goal_positions: Tensor,
     config: EnvConfig,
 ) -> Tensor:
-    """Compute blended waypoint direction + path deviation from pre-computed waypoints.
+    """Compute single next-waypoint direction + path deviation from pre-computed waypoints.
 
     All operations are pure tensor ops — no CPU round-trip.
 

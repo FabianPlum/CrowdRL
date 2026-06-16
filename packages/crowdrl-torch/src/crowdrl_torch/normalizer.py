@@ -69,6 +69,17 @@ class TorchRunningNormalizer:
             batch = batch.unsqueeze(0)
         batch = batch.reshape(-1, *self.shape)
 
+        # Drop any non-finite samples. A single NaN/Inf observation must never
+        # permanently poison the running mean/var -- that would NaN every future
+        # normalized observation and silently, unrecoverably kill the run. A
+        # transient physics glitch should degrade gracefully, not be fatal.
+        reduce_dims = tuple(range(1, batch.ndim))
+        finite_rows = torch.isfinite(batch).all(dim=reduce_dims)
+        if not bool(finite_rows.all()):
+            batch = batch[finite_rows]
+        if batch.shape[0] == 0:
+            return
+
         batch_mean = batch.mean(dim=0)
         batch_var = batch.var(dim=0, correction=0)
         batch_count = batch.shape[0]

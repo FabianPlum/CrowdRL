@@ -128,9 +128,12 @@ class EnvConfig(NamedTuple):
     use_goal_direction: bool = (
         True  # expose global-goal bearing in ego block; False = navmesh waypoint only
     )
-    max_waypoints: int = (
-        1024  # derived from ObsConfig.navmesh_max_waypoints in from_crowd_env_config
-    )
+    # Derived from ObsConfig.navmesh_max_waypoints in from_crowd_env_config. The
+    # waypoints tensor is (E, N, max_waypoints, 2); at 64 envs x 100 agents the
+    # default 1024 is ~50 MiB (+ ~25 MiB for path lengths). Far above any real 2D
+    # pedestrian route -- the episode factory regenerates rather than truncate a
+    # longer path, so the stored path's final waypoint is always the goal.
+    max_waypoints: int = 1024
     waypoint_crossing_threshold: float = 0.5
 
     # Action (asymmetric: humans walk forward faster than backward).
@@ -152,9 +155,12 @@ class EnvConfig(NamedTuple):
 
     # Physics
     dt: float = 0.01
-    desired_velocity_weight: float = (
-        0.05  # tau ~200ms at dt=0.01s (Layer 1; was 0.8 = essentially no filter)
-    )
+    # Fraction of the policy's DESIRED velocity blended into the actual velocity
+    # each step:  v <- w * v_desired + (1 - w) * v_prev.  Mind the (counter-
+    # intuitive) direction: LOW w = strong low-pass / HIGH inertia (sluggish, and
+    # the "ice-skating" mechanism if too low); w -> 1 = responsive, almost no
+    # filter. At dt=0.01s, w=0.05 ~ tau 200 ms. Most configs pin this to 0.8.
+    desired_velocity_weight: float = 0.05
     contact_stiffness: float = 30000.0
     contact_damping: float = 500.0
     wall_strength: float = 400.0

@@ -26,6 +26,52 @@ from crowdrl_torch.types import EnvConfig, TorchWorldState
 from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
 
 
+def advance_waypoint_cursor(
+    positions: Tensor,
+    waypoints: Tensor,
+    n_waypoints: Tensor,
+    waypoint_cursor: Tensor,
+    active_mask: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Advance each agent's monotonic waypoint cursor, robust to being off-route.
+
+    Advance a -> a+1 when the agent either
+      (a) is within ``waypoint_crossing_threshold`` of the current waypoint, or
+      (b) is closer to the NEXT waypoint than to the current one -- i.e. it has
+          passed the corner even if it cut wide and never entered the threshold
+          disk.
+
+    (b) fixes the failure mode of the old proximity-only rule: in a crowd, contact
+    forces push agents off the precomputed route, so an agent could round a corner
+    >0.5 m from the inset waypoint and never advance. A stuck cursor then made the
+    path-distance metric measure to a waypoint behind the agent -> negative
+    progress reward and false stuck-termination. The cursor stays monotonic (never
+    moves backward) and holds at the final waypoint (the goal).
+    """
+    E, N = positions.shape[:2]
+    cursor = waypoint_cursor.long()
+    max_idx = (n_waypoints.long() - 1).clamp(min=0)
+    cursor_a = cursor.clamp(min=0, max=config.max_waypoints - 1).clamp(max=max_idx)
+    cursor_b = (cursor_a + 1).clamp(max=max_idx)
+
+    idx_a = cursor_a.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
+    idx_b = cursor_b.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
+    wp_a = waypoints.gather(2, idx_a).squeeze(2)
+    wp_b = waypoints.gather(2, idx_b).squeeze(2)
+
+    d_a = ((positions - wp_a) ** 2).sum(dim=-1).sqrt()
+    d_b = ((positions - wp_b) ** 2).sum(dim=-1).sqrt()
+
+    has_next = cursor_b > cursor_a  # False at the final waypoint (goal)
+    reached = d_a < config.waypoint_crossing_threshold
+    passed = has_next & (d_b < d_a)  # closer to the next waypoint => past the corner
+    advance = (reached | passed) & active_mask
+
+    new_cursor = torch.where(advance, cursor + 1, cursor)
+    return new_cursor.clamp(max=max_idx).to(waypoint_cursor.dtype)
+
+
 def batched_step(
     state: TorchWorldState,
     actions: Tensor,
@@ -63,7 +109,11 @@ def batched_step(
         current_speeds=state.velocities.norm(dim=-1),
     )
 
-    # --- 2. Velocity blending (damped) ---
+    # --- 2. Velocity blending (damped first-order velocity lag) ---
+    # NOTE: this blends the full velocity VECTOR toward the desired one, so the
+    # actual motion direction lags the commanded heading (the agent can briefly
+    # slide sideways relative to where it faces). At low desired_velocity_weight
+    # that lag is the "ice-skating" mechanism; configs pin the weight to 0.8.
     mask_2d = state.active_mask.unsqueeze(-1)
     new_velocities = torch.where(
         mask_2d,
@@ -112,6 +162,14 @@ def batched_step(
         speeds > max_vel, max_vel / torch.clamp(speeds, min=1e-10), torch.ones_like(speeds)
     )
     new_velocities = new_velocities * scale
+
+    # Finite-state invariant. A degenerate pileup (many jammed/near-coincident
+    # agents, especially with stuck-termination off) can drive contact/wall
+    # forces non-finite, and the magnitude clamp above can even turn an inf speed
+    # into inf * 0 = NaN. Zero any non-finite velocity so agent state -- and thus
+    # the observations built from it -- stays finite. A single NaN obs would
+    # otherwise poison the running obs-normalizer and kill the run unrecoverably.
+    new_velocities = torch.nan_to_num(new_velocities, nan=0.0, posinf=0.0, neginf=0.0)
 
     # --- 5. Position update ---
     new_positions = torch.where(
@@ -247,7 +305,11 @@ def batched_step(
         )
 
     # --- 10. Termination / truncation (episode timeout) ---
-    terminated = reached_goal
+    # Report termination only at the step an agent actually reaches its goal
+    # (newly_done), not on every subsequent frozen-at-goal step. The collector's
+    # GAE bootstrap keys off this flag; a stale per-step terminated would also be
+    # a footgun for any future consumer.
+    terminated = newly_done
 
     # Check for timeout: (E,) -> broadcast to (E, N)
     is_timeout = (step_count >= config.max_steps).unsqueeze(1)  # (E, 1)
@@ -265,25 +327,16 @@ def batched_step(
         new_active_mask,
     )
 
-    # --- 10. Advance waypoint cursor ---
-    # An agent's cursor advances when it gets close enough to the current waypoint.
-    # This is a monotonic index — once passed, a waypoint is never reconsidered.
+    # --- 10. Advance waypoint cursor (robust to being pushed off-route) ---
     if config.use_navmesh:
-        wp_cursor = state.waypoint_cursor.long()
-        wp_max_idx = (state.n_waypoints.long() - 1).clamp(min=0)
-        cur_idx = wp_cursor.clamp(min=0, max=config.max_waypoints - 1).clamp(max=wp_max_idx)
-
-        # Gather current waypoint position: (E, N, 2)
-        gather_idx = cur_idx.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
-        cur_wp = state.waypoints.gather(2, gather_idx).squeeze(2)
-
-        # Distance to current waypoint
-        dist_to_wp = ((new_positions - cur_wp) ** 2).sum(dim=-1).sqrt()
-
-        # Advance cursor where agent is within crossing threshold
-        advance = (dist_to_wp < config.waypoint_crossing_threshold) & new_active_mask
-        new_wp_cursor = torch.where(advance, wp_cursor + 1, wp_cursor)
-        new_wp_cursor = new_wp_cursor.clamp(max=wp_max_idx).to(state.waypoint_cursor.dtype)
+        new_wp_cursor = advance_waypoint_cursor(
+            new_positions,
+            state.waypoints,
+            state.n_waypoints,
+            state.waypoint_cursor,
+            new_active_mask,
+            config,
+        )
     else:
         new_wp_cursor = state.waypoint_cursor
 

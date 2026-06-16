@@ -223,6 +223,11 @@ class MAPPOUpdater:
             if isinstance(ev, torch.Tensor):
                 ev = ev.item()
 
+        # Mean per-dim action std actually in effect (post-clamp). Watching this
+        # directly is the cleanest signal for the std-runaway failure mode
+        # (entropy is a proxy; this is the quantity itself).
+        action_std_mean = float(self.actor_critic.actor.current_std().mean().item())
+
         n = max(n_updates, 1)
         return {
             "policy_loss": total_policy_loss / n,
@@ -231,6 +236,7 @@ class MAPPOUpdater:
             "approx_kl": total_approx_kl / n,
             "clip_fraction": total_clip_frac / n,
             "explained_variance": ev,
+            "action_std_mean": action_std_mean,
             "n_epochs_actual": n_updates / max(cfg.n_minibatches, 1),
             "n_grad_skips": float(n_grad_skips),
         }

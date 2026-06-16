@@ -43,7 +43,13 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--label", default="")
     ap.add_argument("--agents", type=int, nargs=2, default=[20, 40])
-    ap.add_argument("--max-steps", type=int, default=1200)
+    ap.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Render episode length in steps. Default: the config's max_steps, so the "
+        "render matches the run (slow-but-correct agents are shown finishing, not cut off).",
+    )
     ap.add_argument("--seed", type=int, default=123)
     args = ap.parse_args()
 
@@ -53,6 +59,10 @@ def main() -> None:
     cfg = load_config(args.config)
     env_config = build_env_config(cfg)
     net_config = build_net_config(cfg, env_config)
+    # Default the render length to the run's own max_steps so the video shows the
+    # full episode (slow agents finishing), not a fixed-length cutoff. The CPU sim
+    # cost scales with this, so override with --max-steps for a quicker clip.
+    render_max_steps = args.max_steps if args.max_steps is not None else env_config.max_steps
 
     actor_critic = ActorCritic(net_config).to(device)
     obs_normalizer = TorchRunningNormalizer(shape=(env_config.obs.obs_dim,), device=device)
@@ -71,10 +81,13 @@ def main() -> None:
     )
     env = CrowdEnv(config=render_config, seed=args.seed)
 
-    print(f"[render_cpu] device=cpu  ckpt={args.checkpoint}  agents={tuple(args.agents)}")
+    print(
+        f"[render_cpu] device=cpu  ckpt={args.checkpoint}  "
+        f"agents={tuple(args.agents)}  max_steps={render_max_steps}"
+    )
     t_sim0 = time.perf_counter()
     frames = collect_episode_frames(
-        env, actor_critic, obs_normalizer, device, max_steps=args.max_steps
+        env, actor_critic, obs_normalizer, device, max_steps=render_max_steps
     )
     t_sim = time.perf_counter() - t_sim0
     # Tag the title with the checkpoint's actual rollout (parsed from the
