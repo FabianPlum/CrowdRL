@@ -16,7 +16,11 @@ from torch import Tensor
 from crowdrl_torch.action import interpret_actions
 from crowdrl_torch.collision import compute_contact_forces, detect_collisions_pairwise
 from crowdrl_torch.observation import build_observations
-from crowdrl_torch.reward import TIMEOUT_COMPONENT_IDX, compute_rewards
+from crowdrl_torch.reward import (
+    TIMEOUT_COMPONENT_IDX,
+    compute_rewards,
+    path_distance_metric,
+)
 from crowdrl_torch.sensing import match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
@@ -137,14 +141,30 @@ def batched_step(
     )
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
 
+    # Path-distance metric (remaining navmesh path, straight-line goal fallback).
+    # Drives both the progress reward and the stuck check so progress is measured
+    # ALONG THE ROUTE, not the bee-line to the goal. Uses the pre-advance cursor
+    # (the cursor is advanced later this step); a waypoint crossing only ever
+    # decreases this, so it never produces spurious negative progress.
+    new_nav_distances = path_distance_metric(
+        new_positions,
+        state.goal_positions,
+        state.waypoints,
+        state.waypoint_cursor,
+        state.n_waypoints,
+        state.waypoint_path_lengths,
+        config.use_navmesh,
+    )
+
     rewards, reached_goal, new_goal_distances, reward_components = compute_rewards(
         new_positions,
         new_velocities,
         state.goal_positions,
         state.active_mask,
         collision_mask,
-        state.prev_goal_distances,
+        state.prev_nav_distances,
         config,
+        current_distances=new_nav_distances,
         wall_distances=wall_distances,
         wall_collision_mask=wall_collision_mask,
         agent_radii=agent_radii,
@@ -181,7 +201,7 @@ def batched_step(
     truncated = torch.zeros(E, N, dtype=torch.bool, device=state.positions.device)
     stuck_mask = torch.zeros_like(new_active_mask)
     new_stuck_window_step = state.stuck_window_step
-    new_stuck_window_start_dist = state.stuck_window_start_dist
+    new_stuck_window_start_nav = state.stuck_window_start_nav
     if config.stuck_termination_enabled:
         # Increment the window step for agents that were active coming into
         # this step AND are still active after the goal-reach update.
@@ -191,23 +211,25 @@ def batched_step(
             state.stuck_window_step + 1,
             state.stuck_window_step,
         )
-        # At end of window: compute progress = start_dist - current_dist.
+        # At end of window: progress = start_nav - current_nav, measured along
+        # the navmesh path (not straight-line goal distance), so an agent that
+        # correctly follows a route bending away from the goal is not flagged.
         # If progress < threshold, agent is stuck. Otherwise reset window.
         window_full = new_stuck_window_step >= config.stuck_window_steps
-        progress = state.stuck_window_start_dist - new_goal_distances
+        progress = state.stuck_window_start_nav - new_nav_distances
         stuck_mask = window_full & inc_mask & (progress < config.stuck_progress_threshold)
         # For non-stuck window-full agents, restart the window: zero the
-        # counter and capture the current distance as the new start.
+        # counter and capture the current path distance as the new start.
         reset_mask = window_full & inc_mask & ~stuck_mask
         new_stuck_window_step = torch.where(
             window_full & inc_mask,
             torch.zeros_like(new_stuck_window_step),
             new_stuck_window_step,
         )
-        new_stuck_window_start_dist = torch.where(
+        new_stuck_window_start_nav = torch.where(
             reset_mask,
-            new_goal_distances,
-            state.stuck_window_start_dist,
+            new_nav_distances,
+            state.stuck_window_start_nav,
         )
 
         # Apply timeout penalty to stuck agents and mark them truncated.
@@ -384,7 +406,7 @@ def batched_step(
         wall_segments=state.wall_segments,
         n_segments=state.n_segments,
         prev_velocities=new_velocities,
-        prev_goal_distances=new_goal_distances,
+        prev_nav_distances=new_nav_distances,
         prev_accelerations=new_prev_accelerations,
         prev_headings=new_torso_orientations,
         prev_heading_changes=new_prev_heading_changes,
@@ -396,7 +418,7 @@ def batched_step(
         n_agents=state.n_agents,
         step_count=step_count,
         stuck_window_step=new_stuck_window_step,
-        stuck_window_start_dist=new_stuck_window_start_dist,
+        stuck_window_start_nav=new_stuck_window_start_nav,
         spawn_positions=state.spawn_positions,
         initial_goal_distances=state.initial_goal_distances,
         cumulative_path_length=new_cumulative_path_length,

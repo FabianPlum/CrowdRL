@@ -60,8 +60,24 @@ class ObsConfig:
     use_navmesh: bool = False
     """Whether to include navmesh signals (next-waypoint direction + path deviation)."""
 
-    navmesh_max_waypoints: int = 16
-    """Maximum number of pre-computed waypoints per agent for GPU waypoint lookup."""
+    navmesh_max_waypoints: int = 1024
+    """Maximum funnel waypoints stored per agent for the GPU waypoint lookup
+    (the static per-episode path). This is the single source of truth for the
+    cap -- ``EnvConfig.max_waypoints`` is derived from it in
+    ``EnvConfig.from_crowd_env_config``. The default (1024) is far above any
+    realistic 2D pedestrian route (~75 MiB at 64 envs x 100 agents). The torch
+    episode factory regenerates the geometry rather than truncate a path that
+    would exceed it, so a stored path's final waypoint is always the goal.
+    Tunable per training run via the ``observation.navmesh_max_waypoints`` YAML
+    key. Unused by the numpy env, which recomputes the full path every step."""
+
+    use_goal_direction: bool = True
+    """Whether to expose the global-goal bearing (the 2D ``goal_dir`` in the ego
+    block). When False, those two dims are held at zero so the policy must
+    navigate using the navmesh next-waypoint direction alone -- matching the
+    JuPedSim deployment mode where only the local waypoint is exposed, not the
+    global goal. ``obs_dim`` is unchanged (the slots are kept, just zeroed) so
+    network width and checkpoints stay comparable across the ablation."""
 
     use_temporal_memory: bool = False
     """Whether to include 6 scalar temporal-memory features derived from the
@@ -306,6 +322,11 @@ def build_observation(
     else:
         goal_dir_ego = np.zeros(2, dtype=np.float64)
 
+    # Ablation: hide the global-goal bearing so the policy navigates using the
+    # navmesh next-waypoint direction alone (JuPedSim deployment mode).
+    if not config.use_goal_direction:
+        goal_dir_ego = np.zeros(2, dtype=np.float64)
+
     # Velocity in ego frame
     vel_ego = rot @ ego_vel
 
@@ -499,6 +520,11 @@ def build_observations_batch(
 
     goal_dir_ego_x = cos_h * goal_unit[:, 0] - sin_h * goal_unit[:, 1]
     goal_dir_ego_y = sin_h * goal_unit[:, 0] + cos_h * goal_unit[:, 1]
+
+    # Ablation: hide the global-goal bearing (see ObsConfig.use_goal_direction).
+    if not config.use_goal_direction:
+        goal_dir_ego_x = np.zeros(M, dtype=np.float64)
+        goal_dir_ego_y = np.zeros(M, dtype=np.float64)
 
     # Velocity in ego frame
     vel_ego_x = cos_h * ego_vel[:, 0] - sin_h * ego_vel[:, 1]

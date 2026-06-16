@@ -35,15 +35,75 @@ REWARD_COMPONENT_NAMES: tuple[str, ...] = (
 TIMEOUT_COMPONENT_IDX = REWARD_COMPONENT_NAMES.index("timeout")
 
 
+def compute_remaining_path(
+    positions: Tensor,
+    waypoints: Tensor,
+    waypoint_cursor: Tensor,
+    n_waypoints: Tensor,
+    waypoint_path_lengths: Tensor,
+) -> Tensor:
+    """Remaining navmesh path length from each agent to its goal.
+
+    ``dist(position, current_waypoint) + cumulative_remaining_from_that_waypoint``
+    -- the same quantity the navmesh obs signal uses for ``path_deviation``
+    (see ``crowdrl_torch.observation.compute_navmesh_signals``). Factored out so
+    the progress reward and the stuck-termination check measure progress ALONG
+    THE ROUTE rather than straight-line distance to the global goal: the two
+    diverge whenever the path bends away from the goal, and grading on the
+    bee-line both under-rewards and prematurely kills correct path-following.
+
+    Returns 0 for agents with no waypoints; callers fall back to straight-line
+    goal distance there (see :func:`path_distance_metric`).
+    """
+    max_wp = waypoints.shape[2]
+    cursor = waypoint_cursor.long()
+    n_wp = n_waypoints.long()
+    max_idx = (n_wp - 1).clamp(min=0)
+    cursor_a = cursor.clamp(min=0, max=max_wp - 1).clamp(max=max_idx)
+
+    idx = cursor_a.unsqueeze(-1).unsqueeze(-1).expand(cursor_a.shape[0], cursor_a.shape[1], 1, 2)
+    wp_a = waypoints.gather(2, idx).squeeze(2)  # (E, N, 2)
+    d_a = ((wp_a - positions) ** 2).sum(dim=-1).sqrt()  # (E, N)
+
+    remaining_from_wp = waypoint_path_lengths.gather(2, cursor_a.unsqueeze(-1)).squeeze(-1)
+    return d_a + remaining_from_wp
+
+
+def path_distance_metric(
+    positions: Tensor,
+    goal_positions: Tensor,
+    waypoints: Tensor | None,
+    waypoint_cursor: Tensor | None,
+    n_waypoints: Tensor | None,
+    waypoint_path_lengths: Tensor | None,
+    use_navmesh: bool,
+) -> Tensor:
+    """Distance-to-goal metric for the progress reward and stuck check.
+
+    Returns the remaining navmesh **path** length where a path is available,
+    else straight-line distance to the global goal. The fallback covers
+    ``use_navmesh=False`` and any agent with no computed waypoints; on Tier-0
+    open fields the single waypoint IS the goal, so the two coincide.
+    """
+    goal_dist = ((goal_positions - positions) ** 2).sum(dim=-1).sqrt()
+    if not use_navmesh or waypoints is None or n_waypoints is None:
+        return goal_dist
+    remaining = compute_remaining_path(
+        positions, waypoints, waypoint_cursor, n_waypoints, waypoint_path_lengths
+    )
+    return torch.where(n_waypoints > 0, remaining, goal_dist)
+
+
 def compute_rewards(
     positions: Tensor,
     velocities: Tensor,
     goal_positions: Tensor,
     active_mask: Tensor,
     collision_mask: Tensor,
-    prev_goal_distances: Tensor,
+    prev_distances: Tensor,
     config: EnvConfig,
     *,
+    current_distances: Tensor | None = None,
     wall_distances: Tensor | None = None,
     wall_collision_mask: Tensor | None = None,
     agent_radii: Tensor | None = None,
@@ -65,8 +125,13 @@ def compute_rewards(
     goal_positions : (E, N, 2)
     active_mask : (E, N) bool
     collision_mask : (E, N) bool
-    prev_goal_distances : (E, N)
+    prev_distances : (E, N) -- previous-step distance metric for the progress
+        reward. In production this is the navmesh remaining-PATH distance; with
+        no ``current_distances`` passed it pairs with straight-line goal distance.
     config : EnvConfig
+    current_distances : (E, N) optional -- current-step distance metric. When
+        given, progress = ``prev_distances - current_distances`` (path-aware);
+        otherwise it falls back to straight-line goal distance.
     wall_distances : (E, N) optional -- min distance to nearest wall per agent
     wall_collision_mask : (E, N) bool optional -- True where the boundary
         enforcement corrected the agent this step (hard wall-contact signal)
@@ -202,8 +267,12 @@ def compute_rewards(
         )
         rewards = rewards + comp_existence
 
-    # Progress reward (potential-based shaping)
-    progress = prev_goal_distances - goal_distances
+    # Progress reward (potential-based shaping). Uses ``current_distances`` (the
+    # navmesh remaining-PATH metric, passed by batched_step) when available so
+    # progress is measured along the route, not the straight-line bee-line to the
+    # goal; falls back to straight-line goal distance otherwise.
+    curr = current_distances if current_distances is not None else goal_distances
+    progress = prev_distances - curr
     comp_progress = torch.where(active_mask, config.progress_weight * progress, zero)
     rewards = rewards + comp_progress
 

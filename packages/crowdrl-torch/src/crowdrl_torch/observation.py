@@ -150,37 +150,23 @@ def compute_navmesh_signals(
     cursor = waypoint_cursor.long()  # (E, N)
     n_wp = n_waypoints.long()  # (E, N)
 
-    # Clamp cursor to valid range
+    # Point the policy at the SINGLE current waypoint (the next turning point it
+    # must reach) -- no distance-weighted look-ahead blend. "Next waypoint is all
+    # there is", matching the numpy obs builder (next_waypoint_direction) and
+    # JuPedSim. A blend of the current + next waypoint was a train/deploy
+    # divergence: training saw a blended bearing the deployed single-waypoint
+    # signal never produces.
     max_idx = (n_wp - 1).clamp(min=0)  # (E, N)
     cursor_a = cursor.clamp(min=0, max=MAX_WP - 1).clamp(max=max_idx)
-    cursor_b = (cursor_a + 1).clamp(max=max_idx)  # next waypoint (or same if last)
 
-    # Gather waypoints at cursor_a and cursor_b: (E, N, 2)
     idx_a = cursor_a.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)  # (E, N, 1, 2)
-    idx_b = cursor_b.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)  # (E, N, 1, 2)
     wp_a = waypoints.gather(2, idx_a).squeeze(2)  # (E, N, 2)
-    wp_b = waypoints.gather(2, idx_b).squeeze(2)  # (E, N, 2)
 
-    # Distances to each waypoint
-    diff_a = wp_a - positions  # (E, N, 2)
-    diff_b = wp_b - positions  # (E, N, 2)
-    d_a = (diff_a**2).sum(dim=-1).sqrt()  # (E, N)
-    d_b = (diff_b**2).sum(dim=-1).sqrt()  # (E, N)
-
-    # Blending: closer waypoint gets LESS influence.
-    # When only one waypoint remains (cursor_a == cursor_b), both point to the
-    # same location and the blend doesn't matter — weight is effectively 1.0.
+    # Unit direction from agent to the current waypoint (world frame)
     eps = 1e-8
-    total = d_a + d_b + eps
-    weight_a = d_a / total  # small when close to wp_a → low influence
-    weight_b = d_b / total
-
-    blended = weight_a.unsqueeze(-1) * wp_a + weight_b.unsqueeze(-1) * wp_b  # (E, N, 2)
-
-    # Direction from agent to blended target (world frame)
-    direction = blended - positions  # (E, N, 2)
-    dir_norm = (direction**2).sum(dim=-1).sqrt().clamp(min=eps)  # (E, N)
-    direction = direction / dir_norm.unsqueeze(-1)  # unit vector
+    diff_a = wp_a - positions  # (E, N, 2)
+    d_a = (diff_a**2).sum(dim=-1).sqrt()  # (E, N)
+    direction = diff_a / d_a.clamp(min=eps).unsqueeze(-1)  # unit vector
 
     # Rotate to ego frame
     dir_ego_x = cos_h * direction[..., 0] - sin_h * direction[..., 1]
@@ -404,6 +390,12 @@ def build_observations(
 
     goal_dir_x = cos_h * goal_unit[..., 0] - sin_h * goal_unit[..., 1]
     goal_dir_y = sin_h * goal_unit[..., 0] + cos_h * goal_unit[..., 1]
+
+    # Ablation: hide the global-goal bearing so the policy navigates using the
+    # navmesh next-waypoint direction alone (see ObsConfig.use_goal_direction).
+    if not config.use_goal_direction:
+        goal_dir_x = torch.zeros_like(goal_dir_x)
+        goal_dir_y = torch.zeros_like(goal_dir_y)
 
     # Velocity in ego frame
     vel_ego_x = cos_h * velocities[..., 0] - sin_h * velocities[..., 1]

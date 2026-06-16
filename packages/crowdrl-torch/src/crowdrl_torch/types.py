@@ -48,7 +48,7 @@ class TorchWorldState:
 
     # Reward temporal state
     prev_velocities: Tensor  # (E, N, 2)
-    prev_goal_distances: Tensor  # (E, N)
+    prev_nav_distances: Tensor  # (E, N) -- previous-step path-distance metric (progress reward)
     prev_accelerations: Tensor  # (E, N, 2)
     prev_headings: Tensor  # (E, N)
     prev_heading_changes: Tensor  # (E, N)
@@ -68,11 +68,14 @@ class TorchWorldState:
 
     # Stuck-agent tracking (rolling progress window).
     # ``stuck_window_step`` counts how many simulation steps have passed
-    # since the last stuck-check for each agent; ``stuck_window_start_dist``
-    # is that agent's goal distance when the current window started. Used
-    # by step.py when ``config.stuck_termination_enabled`` is True.
+    # since the last stuck-check for each agent; ``stuck_window_start_nav``
+    # is that agent's path-distance metric (navmesh remaining path, or
+    # straight-line goal distance as fallback) when the current window
+    # started. Progress is measured along the route, not the bee-line, so
+    # an agent following a detour is not falsely flagged as stuck. Used by
+    # step.py when ``config.stuck_termination_enabled`` is True.
     stuck_window_step: Tensor  # (E, N) int32
-    stuck_window_start_dist: Tensor  # (E, N) float32
+    stuck_window_start_nav: Tensor  # (E, N) float32
 
     # Temporal memory state (per-agent trajectory history).
     # Populated at reset and updated every step. The obs builder reads these
@@ -122,7 +125,12 @@ class EnvConfig(NamedTuple):
     k_neighbours: int = 8
     obs_dim: int = 80  # 8 + 8*7 + 16  (ego now includes preferred_speed)
     use_navmesh: bool = False
-    max_waypoints: int = 16
+    use_goal_direction: bool = (
+        True  # expose global-goal bearing in ego block; False = navmesh waypoint only
+    )
+    max_waypoints: int = (
+        1024  # derived from ObsConfig.navmesh_max_waypoints in from_crowd_env_config
+    )
     waypoint_crossing_threshold: float = 0.5
 
     # Action (asymmetric: humans walk forward faster than backward).
@@ -263,6 +271,8 @@ class EnvConfig(NamedTuple):
             speed_deviation_weight=cfg.reward.speed_deviation_weight,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
+            use_goal_direction=cfg.obs.use_goal_direction,
+            max_waypoints=cfg.obs.navmesh_max_waypoints,
             stuck_termination_enabled=cfg.stuck_termination_enabled,
             stuck_window_steps=cfg.stuck_window_steps,
             stuck_progress_threshold=cfg.stuck_progress_threshold,
@@ -280,7 +290,7 @@ def make_initial_state(
     n_envs: int = 1,
     max_agents: int = 64,
     max_segments: int = 128,
-    max_waypoints: int = 16,
+    max_waypoints: int = 1024,
     memory_window: int = 50,
     k_neighbours: int = 8,
     neighbor_vel_history_window: int = 5,
@@ -321,7 +331,7 @@ def make_initial_state(
         ),
         n_segments=torch.zeros(n_envs, dtype=torch.int32, device=device),
         prev_velocities=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),
-        prev_goal_distances=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
+        prev_nav_distances=torch.zeros((n_envs, max_agents), dtype=torch.float32, device=device),
         prev_accelerations=torch.zeros(
             (n_envs, max_agents, 2), dtype=torch.float32, device=device
         ),
@@ -339,7 +349,7 @@ def make_initial_state(
         n_agents=torch.zeros(n_envs, dtype=torch.int32, device=device),
         step_count=torch.zeros(n_envs, dtype=torch.int32, device=device),
         stuck_window_step=torch.zeros((n_envs, max_agents), dtype=torch.int32, device=device),
-        stuck_window_start_dist=torch.zeros(
+        stuck_window_start_nav=torch.zeros(
             (n_envs, max_agents), dtype=torch.float32, device=device
         ),
         spawn_positions=torch.zeros((n_envs, max_agents, 2), dtype=torch.float32, device=device),

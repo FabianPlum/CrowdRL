@@ -27,6 +27,7 @@ from crowdrl_core.collision import (
     enforce_wall_boundaries,
 )
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
+from crowdrl_core.navmesh import first_waypoint_headings, remaining_path_lengths
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
@@ -178,7 +179,7 @@ class CrowdEnv(gym.Env):
         # implementation in crowdrl_torch.step; see CrowdEnvConfig for the
         # three knobs that control it.
         self._stuck_window_step: NDArray[np.int32] | None = None
-        self._stuck_window_start_dist: NDArray[np.float64] | None = None
+        self._stuck_window_start_nav: NDArray[np.float64] | None = None
 
     @property
     def n_agents(self) -> int:
@@ -211,13 +212,18 @@ class CrowdEnv(gym.Env):
         self._world.active_mask = self._active_mask
         self._step_count = 0
 
-        # Initialise reward state
+        # Initialise reward state. The progress reward and stuck check use the
+        # path-distance metric (navmesh remaining path, straight-line fallback)
+        # so progress is measured along the route, not the bee-line to the goal.
+        # ``goal_distances`` (straight-line) is still used below for the temporal-
+        # memory features, which are intentionally goal-relative.
         goal_distances = np.linalg.norm(world.goal_positions - world.positions, axis=1)
-        self._reward_state.reset(self._n_agents, goal_distances)
+        nav_distances = self._path_distance_metric()
+        self._reward_state.reset(self._n_agents, nav_distances)
 
-        # Initialise stuck-agent tracking (start dist = initial goal dist)
+        # Initialise stuck-agent tracking (start = initial path distance)
         self._stuck_window_step = np.zeros(self._n_agents, dtype=np.int32)
-        self._stuck_window_start_dist = goal_distances.copy()
+        self._stuck_window_start_nav = nav_distances.copy()
 
         # Initialise temporal-memory state on the WorldState so the obs builder
         # can read it. Ring buffers are pre-filled with the spawn position /
@@ -267,6 +273,25 @@ class CrowdEnv(gym.Env):
         }
 
         return obs, info
+
+    def _path_distance_metric(self) -> NDArray[np.float64]:
+        """Per-agent distance metric for the progress reward and stuck check.
+
+        Returns the remaining navmesh path length (straight-line goal-distance
+        fallback per agent) so both signals measure progress ALONG THE ROUTE,
+        not the straight-line bee-line to the goal. Falls back to straight-line
+        goal distance entirely when navmesh signals are disabled. Mirrors the
+        torch ``path_distance_metric``.
+        """
+        if not self.config.obs.use_navmesh or self._world.navmesh is None:
+            return np.linalg.norm(self._world.goal_positions - self._world.positions, axis=1)
+        radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
+        return remaining_path_lengths(
+            self._world.navmesh,
+            self._world.positions,
+            self._world.goal_positions,
+            radii,
+        )
 
     def step(
         self,
@@ -370,6 +395,11 @@ class CrowdEnv(gym.Env):
         wall_distances = compute_min_wall_distances(self._world)
         agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
 
+        # Path-distance metric (remaining navmesh path, straight-line fallback),
+        # shared by the progress reward and the stuck check below so both measure
+        # route progress rather than the bee-line to the goal.
+        nav_distances = self._path_distance_metric()
+
         rewards, reached_goal = compute_rewards(
             positions=self._world.positions,
             velocities=self._world.velocities,
@@ -381,6 +411,7 @@ class CrowdEnv(gym.Env):
             state=self._reward_state,
             config=cfg.reward,
             dt=cfg.dt,
+            current_distances=nav_distances,
             wall_distances=wall_distances,
             wall_collision_mask=wall_collision_mask,
             agent_radii=agent_radii,
@@ -400,16 +431,17 @@ class CrowdEnv(gym.Env):
         if (
             cfg.stuck_termination_enabled
             and self._stuck_window_step is not None
-            and self._stuck_window_start_dist is not None
+            and self._stuck_window_start_nav is not None
         ):
-            new_goal_distances = np.linalg.norm(
-                self._world.goal_positions - self._world.positions, axis=1
-            )
+            # Progress measured along the navmesh path (reusing nav_distances
+            # from the reward computation above), not the straight-line goal
+            # distance -- so an agent following a route that bends away from the
+            # goal is not falsely flagged as stuck.
             inc_mask = self._active_mask.copy()
             self._stuck_window_step[inc_mask] += 1
 
             window_full = self._stuck_window_step >= cfg.stuck_window_steps
-            progress = self._stuck_window_start_dist - new_goal_distances
+            progress = self._stuck_window_start_nav - nav_distances
             stuck_mask = window_full & inc_mask & (progress < cfg.stuck_progress_threshold)
             reset_mask = window_full & inc_mask & ~stuck_mask
 
@@ -421,7 +453,7 @@ class CrowdEnv(gym.Env):
 
             # Reset window for non-stuck window-full agents
             self._stuck_window_step[window_full & inc_mask] = 0
-            self._stuck_window_start_dist[reset_mask] = new_goal_distances[reset_mask]
+            self._stuck_window_start_nav[reset_mask] = nav_distances[reset_mask]
 
         # --- 7. Termination / truncation ---
         terminated = reached_goal.copy()
@@ -610,6 +642,17 @@ class CrowdEnv(gym.Env):
 
             if len(positions) == 0:
                 continue
+
+            # Orient agents toward their first navmesh waypoint rather than the
+            # global goal (which may sit behind a wall relative to that waypoint).
+            # Falls back to the goal bearing per-agent when no path exists. When
+            # the navmesh is disabled we keep the spawner's global-goal bearing.
+            if cfg.obs.use_navmesh:
+                radii = np.maximum(shoulder_widths, chest_depths)
+                torso_orientations = first_waypoint_headings(
+                    navmesh, positions, goal_positions, radii
+                )
+                head_orientations = torso_orientations.copy()
 
             world = WorldState(
                 positions=positions,

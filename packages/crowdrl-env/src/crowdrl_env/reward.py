@@ -146,19 +146,27 @@ class RewardState:
     prev_heading_changes: NDArray[np.float64] | None = None
     """(n_agents,) — heading changes from the previous step (for angular accel)."""
 
-    prev_goal_distances: NDArray[np.float64] | None = None
-    """(n_agents,) — distances to goal from the previous step (for progress)."""
+    prev_nav_distances: NDArray[np.float64] | None = None
+    """(n_agents,) — path-distance metric (navmesh remaining path, or straight-
+    line goal distance as fallback) from the previous step, for the progress
+    reward. Measures progress along the route, not the bee-line to the goal."""
 
     prev_actions: NDArray[np.float64] | None = None
     """(n_agents, action_dim) — raw actions from the previous step (for action rate)."""
 
-    def reset(self, n_agents: int, goal_distances: NDArray[np.float64]) -> None:
-        """Reset reward state for a new episode."""
+    def reset(self, n_agents: int, distances: NDArray[np.float64]) -> None:
+        """Reset reward state for a new episode.
+
+        ``distances`` is the initial path-distance metric (see
+        ``prev_nav_distances``); the caller passes the navmesh remaining-path
+        distance (straight-line fallback) so the first progress delta is
+        route-aware.
+        """
         self.prev_velocities = None
         self.prev_accelerations = None
         self.prev_headings = None
         self.prev_heading_changes = None
-        self.prev_goal_distances = goal_distances.copy()
+        self.prev_nav_distances = distances.copy()
         self.prev_actions = None
 
 
@@ -174,6 +182,7 @@ def compute_rewards(
     config: RewardConfig,
     dt: float,
     *,
+    current_distances: NDArray[np.float64] | None = None,
     wall_distances: NDArray[np.float64] | None = None,
     wall_collision_mask: NDArray[np.bool_] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
@@ -280,9 +289,13 @@ def compute_rewards(
     if config.existence_penalty != 0.0:
         rewards[active_mask] += config.existence_penalty
 
-    # Progress reward (potential-based shaping): r = prev_dist - curr_dist
-    if state.prev_goal_distances is not None:
-        progress = state.prev_goal_distances - goal_distances
+    # Progress reward (potential-based shaping): r = prev_dist - curr_dist.
+    # Uses ``current_distances`` (navmesh remaining-PATH metric) when provided so
+    # progress is measured along the route, not the straight-line bee-line to the
+    # goal; falls back to straight-line goal distance otherwise.
+    if state.prev_nav_distances is not None:
+        curr = current_distances if current_distances is not None else goal_distances
+        progress = state.prev_nav_distances - curr
         rewards[active_mask] += config.progress_weight * progress[active_mask]
 
     # Inverse distance to goal: 1 / (d + 1) — closer is better
@@ -330,7 +343,9 @@ def compute_rewards(
     # Update state for next step
     state.prev_velocities = velocities.copy()
     state.prev_headings = headings.copy()
-    state.prev_goal_distances = goal_distances.copy()
+    state.prev_nav_distances = (
+        current_distances if current_distances is not None else goal_distances
+    ).copy()
     if actions is not None:
         state.prev_actions = actions.copy()
 

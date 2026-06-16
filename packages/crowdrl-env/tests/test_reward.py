@@ -466,5 +466,5 @@ class TestRewardState:
         state.reset(5, np.ones(5) * 10.0)
         assert state.prev_velocities is None
         assert state.prev_accelerations is None
-        assert state.prev_goal_distances is not None
-        assert len(state.prev_goal_distances) == 5
+        assert state.prev_nav_distances is not None
+        assert len(state.prev_nav_distances) == 5

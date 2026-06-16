@@ -133,6 +133,8 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
         ),
         obs=ObsConfig(
             use_navmesh=obs.get("use_navmesh", True),
+            navmesh_max_waypoints=obs.get("navmesh_max_waypoints", 1024),
+            use_goal_direction=obs.get("use_goal_direction", True),
             use_temporal_memory=obs.get("use_temporal_memory", False),
             temporal_memory_window=obs.get("temporal_memory_window", 50),
             temporal_memory_max_steps=cfg.get("max_steps", 2000),
@@ -204,6 +206,10 @@ def build_ppo_config(cfg: dict) -> PPOConfig:
         target_kl=p.get("target_kl", 0.02),
         lr_schedule=p.get("lr_schedule", "cosine"),
         entropy_coef=p.get("entropy_coef", 0.01),
+        max_grad_norm=p.get("max_grad_norm", 10.0),
+        use_huber_loss=p.get("use_huber_loss", False),
+        huber_delta=p.get("huber_delta", 10.0),
+        use_value_clip=p.get("use_value_clip", False),
     )
 
 

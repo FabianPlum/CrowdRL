@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
-from crowdrl_core.navmesh import shortest_path
+from crowdrl_core.navmesh import first_waypoint_headings, shortest_path
 from crowdrl_env.crowd_env import CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, generate_geometry
 from crowdrl_env.solvability import verify_solvability
@@ -140,13 +140,23 @@ def make_episode_factory(
             wp_path_lengths = np.zeros((n_agents, max_wp), dtype=np.float64)
 
             if env_config.obs.use_navmesh and navmesh is not None:
+                path_over_cap = False
                 for i in range(n_agents):
                     radius = float(max(shoulder_widths[i], chest_depths[i]))
                     path = shortest_path(navmesh, positions[i], goal_positions[i], radius)
                     if path is not None and len(path) >= 2:
                         # Drop start position, keep intermediate + goal
                         wps = path[1:]
-                        n_wp = min(len(wps), max_wp)
+                        if len(wps) > max_wp:
+                            # This agent's shortest path needs more waypoints than
+                            # we can store. Truncating would strand it short of its
+                            # goal, so discard the geometry and regenerate instead
+                            # (same attempt budget as every other regen trigger).
+                            # With max_wp=1024 this is a safety net that should
+                            # never fire for 2D pedestrian geometry.
+                            path_over_cap = True
+                            break
+                        n_wp = len(wps)
                         for k in range(n_wp):
                             wp_array[i, k] = wps[k]
                         wp_counts[i] = n_wp
@@ -159,6 +169,20 @@ def make_episode_factory(
                             else:
                                 seg = float(np.linalg.norm(wps[k + 1] - wps[k]))
                                 wp_path_lengths[i, k] = wp_path_lengths[i, k + 1] + seg
+
+                if path_over_cap:
+                    continue
+
+                # Orient agents toward their first navmesh waypoint rather than
+                # the global goal (which may sit behind a wall relative to that
+                # waypoint). Falls back to the goal bearing per-agent when no
+                # path exists. Single-sourced with the numpy env via
+                # first_waypoint_headings so spawn orientation matches in both.
+                radii = np.maximum(shoulder_widths, chest_depths)
+                torso_orientations = first_waypoint_headings(
+                    navmesh, positions, goal_positions, radii
+                )
+                head_orientations = torso_orientations.copy()
 
             return {
                 "positions": positions,

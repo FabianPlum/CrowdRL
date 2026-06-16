@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from crowdrl_torch.geometry_repr import prepare_reset_data
 from crowdrl_torch.observation import build_observations
+from crowdrl_torch.reward import path_distance_metric
 from crowdrl_torch.step import batched_step
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 
@@ -398,6 +399,21 @@ class BatchedTorchEnv:
         def stack_field(key: str) -> torch.Tensor:
             return torch.stack([t[key] for t in all_tensors])
 
+        # Initial path-distance metric (remaining navmesh path at cursor 0, with
+        # straight-line goal-distance fallback) seeds both the progress baseline
+        # and the stuck-window start, so the first window measures route progress
+        # rather than the bee-line to the goal.
+        cursor0 = torch.zeros((self.n_envs, max_agents), dtype=torch.int32, device=dev)
+        nav0 = path_distance_metric(
+            stack_field("positions"),
+            stack_field("goal_positions"),
+            stack_field("waypoints"),
+            cursor0,
+            stack_field("n_waypoints"),
+            stack_field("waypoint_path_lengths"),
+            self.config.use_navmesh,
+        )
+
         return TorchWorldState(
             positions=stack_field("positions"),
             velocities=stack_field("velocities"),
@@ -417,7 +433,7 @@ class BatchedTorchEnv:
             prev_velocities=torch.zeros(
                 (self.n_envs, max_agents, 2), dtype=torch.float32, device=dev
             ),
-            prev_goal_distances=stack_field("goal_distances"),
+            prev_nav_distances=nav0,
             prev_accelerations=torch.zeros(
                 (self.n_envs, max_agents, 2), dtype=torch.float32, device=dev
             ),
@@ -437,7 +453,7 @@ class BatchedTorchEnv:
             stuck_window_step=torch.zeros(
                 (self.n_envs, max_agents), dtype=torch.int32, device=dev
             ),
-            stuck_window_start_dist=stack_field("goal_distances"),
+            stuck_window_start_nav=nav0,
             spawn_positions=stack_field("spawn_positions"),
             initial_goal_distances=stack_field("initial_goal_distances"),
             cumulative_path_length=torch.zeros(
@@ -476,6 +492,20 @@ class BatchedTorchEnv:
                 self.env_tiers[env_idx] = tier_name
                 tensors = self._data_to_tensors(data)
 
+                # Initial path-distance metric for this env (cursor 0), used to
+                # seed the progress baseline and stuck-window start. Add/strip a
+                # leading env dim so path_distance_metric's (E, N) ops apply.
+                cursor0 = torch.zeros_like(tensors["n_waypoints"])
+                nav0_env = path_distance_metric(
+                    tensors["positions"].unsqueeze(0),
+                    tensors["goal_positions"].unsqueeze(0),
+                    tensors["waypoints"].unsqueeze(0),
+                    cursor0.unsqueeze(0),
+                    tensors["n_waypoints"].unsqueeze(0),
+                    tensors["waypoint_path_lengths"].unsqueeze(0),
+                    self.config.use_navmesh,
+                ).squeeze(0)
+
                 # Direct slice assignment — simpler than JAX's tree.map
                 self.states.positions[env_idx] = tensors["positions"]
                 self.states.velocities[env_idx] = tensors["velocities"]
@@ -491,7 +521,7 @@ class BatchedTorchEnv:
                 self.states.wall_segments[env_idx] = tensors["wall_segments"]
                 self.states.n_segments[env_idx] = tensors["n_segments"]
                 self.states.prev_velocities[env_idx] = 0.0
-                self.states.prev_goal_distances[env_idx] = tensors["goal_distances"]
+                self.states.prev_nav_distances[env_idx] = nav0_env
                 self.states.prev_accelerations[env_idx] = 0.0
                 self.states.prev_headings[env_idx] = tensors["torso_orientations"]
                 self.states.prev_heading_changes[env_idx] = 0.0
@@ -503,7 +533,7 @@ class BatchedTorchEnv:
                 self.states.n_agents[env_idx] = tensors["n_agents"]
                 self.states.step_count[env_idx] = 0
                 self.states.stuck_window_step[env_idx] = 0
-                self.states.stuck_window_start_dist[env_idx] = tensors["goal_distances"]
+                self.states.stuck_window_start_nav[env_idx] = nav0_env
                 self.states.spawn_positions[env_idx] = tensors["spawn_positions"]
                 self.states.initial_goal_distances[env_idx] = tensors["initial_goal_distances"]
                 self.states.cumulative_path_length[env_idx] = 0.0
