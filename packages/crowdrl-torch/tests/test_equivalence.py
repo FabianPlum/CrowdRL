@@ -654,6 +654,38 @@ class TestObservationEquivalence:
         n = world.n_agents
         npt.assert_allclose(torch_obs[0, :n].numpy(), np_obs, atol=ATOL, rtol=RTOL)
 
+    def test_build_observations_nan_robust(self):
+        """build_observations must NEVER emit a NaN obs, even if an input is
+        non-finite. The per-feature clamps guard div-by-ZERO, not NaN
+        propagation (NaN.clamp() == NaN), so the builder nan_to_num's its output
+        -- the r355 obs-NaN that poisoned the policy/critic and killed training.
+        Checked for BOTH numpy and torch builders."""
+        world = _make_test_world(n_agents=8)
+        world.velocities[0] = [np.nan, np.inf]  # non-finite inputs that flow into the obs
+        world.positions[1] = [np.inf, np.nan]
+        obs_config = ObsConfig(k_neighbours=8, raycast=RaycastConfig(n_rays=16))
+
+        np_obs = build_observations_batch(world, obs_config)
+        assert np.isfinite(np_obs).all(), "numpy obs builder emitted non-finite values"
+
+        config = EnvConfig(max_agents=8, max_segments=128, k_neighbours=8, n_rays=16)
+        td = _world_to_torch(world, config)
+        torch_obs = torch_build_observations(
+            td["positions"],
+            td["velocities"],
+            td["torso_orientations"],
+            torch.tensor(world.head_orientations, dtype=torch.float32).unsqueeze(0),
+            td["shoulder_widths"],
+            td["chest_depths"],
+            td["goal_positions"],
+            td["active_mask"],
+            td["n_agents"],
+            td["wall_segments"],
+            td["n_segments"],
+            config,
+        )
+        assert torch.isfinite(torch_obs).all(), "torch obs builder emitted non-finite values"
+
 
 class TestRewardEquivalence:
     """Test reward computation matches."""

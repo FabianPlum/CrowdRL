@@ -530,4 +530,12 @@ def build_observations(
     # Zero out inactive agents
     obs = torch.where(active_mask.unsqueeze(-1), obs, torch.zeros_like(obs))
 
+    # Numerical safety: keep the obs finite. The per-feature clamps above guard
+    # division-by-ZERO, but a NaN/Inf in any INPUT (a degenerate navmesh waypoint,
+    # a history-buffer entry) propagates straight through -- NaN.clamp() == NaN.
+    # A single NaN obs poisons the policy + critic forward -> NaN actions/value ->
+    # corrupted training -> run death (the r355 collapse). Mirrors the velocity
+    # nan_to_num in step.py, but at the obs the policy actually consumes.
+    obs = torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
     return obs

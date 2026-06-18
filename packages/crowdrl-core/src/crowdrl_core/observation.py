@@ -718,6 +718,12 @@ def build_observations_batch(
         obs[active_idx, offset : offset + K * 3] = flat
         offset += K * 3
 
+    # Numerical safety (parity with crowdrl_torch.observation): keep the obs
+    # finite. The per-feature clamps guard division-by-zero, but a NaN/Inf input
+    # propagates through (clip/maximum of NaN is NaN); a single NaN obs would
+    # poison the policy. Sanitize at the builder output so train == deploy.
+    obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
     return obs
 
 
