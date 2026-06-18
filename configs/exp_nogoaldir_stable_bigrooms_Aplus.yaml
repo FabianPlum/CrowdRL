@@ -1,0 +1,139 @@
+# =============================================================================
+# CrowdRL MAPPO -- A+ neighbor-memory ablation, trained FROM SCRATCH
+# =============================================================================
+# Branch off exp_nogoaldir_stable_bigrooms_sharpturn.yaml. That run validated the
+# tanh action-squash fix (H0): action_std stays flat (~0.33), no log_std runaway /
+# abrupt collapse, and the warm-started policy cleared the curriculum quickly.
+#
+# This experiment turns ON neighbor memory (variant A+ from
+# plan/neighbor_memory_extension.md). Ego temporal memory was already on (variant
+# A, +6D); A+ adds the neighbor velocity-history block (+16D, obs ~104D): for each
+# of the K persistent neighbor slots, the change in that neighbor's velocity over
+# the last W_n steps, rotated into the ego frame -- a second-order (acceleration)
+# cue so agents can pre-empt neighbours speeding up / slowing down.
+#
+# Per the plan's 2026-04-12 A+ experiment, A+ beat the no-memory baseline on reward
+# (+1.23 overall, +3.5 on T2/T3B). Its one regression -- goal-rate -- was traced to
+# a stuck-termination interaction; stuck_termination_enabled is already false here,
+# so this is exactly the plan's "recommended next step".
+#
+# Memory changes obs_dim (88 -> 104), so this CANNOT warm-start the tanh/sharpturn
+# checkpoints (different input layer). Launch FROM SCRATCH (no --init_from):
+#   uv run python train_mappo.py --config configs/exp_nogoaldir_stable_bigrooms_Aplus.yaml
+# Both GPUs (DDP, auto via torchrun -- launch WITHOUT CUDA_VISIBLE_DEVICES).
+# Output -> results_exp_nogoaldir_stable_bigrooms_Aplus/
+# Reward weighting unchanged from sharpturn (existence -0.02 retained).
+# =============================================================================
+
+seed: 42
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 4000            # ~24h at observed SPS (~97k early phase)
+log_interval: 5
+compile_step: true
+checkpoint_interval: 50     # save checkpoint_rollout_<N>.pt every 50 -- keep the peak
+render_during_training: true  # CPU-render a Tier-3B example episode from each checkpoint
+render_interval: 0            # 0 -> render every checkpoint (== checkpoint_interval)
+
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 500
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [10, 100]
+      threshold: 0.0
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+geometry:
+  min_side: 12.0            # was 8.0 -- larger rooms (lower density in Tier-3 phases)
+  max_side: 22.0            # was 15.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 18.0]
+
+observation:
+  use_navmesh: true
+  use_goal_direction: false   # CUT the global-goal bearing -- navmesh waypoint is the only destination cue
+  use_temporal_memory: true   # variant A: ego self-memory (+6D)
+  temporal_memory_window: 50
+  use_neighbor_memory: true       # A+: persistent neighbor-ID matcher (prerequisite, +0D)
+  use_neighbor_vel_history: true  # A+: neighbor velocity-history block (+K*2 = +16D -> obs ~104D)
+  # neighbor_sensing_radius (5.0 m) and neighbor_vel_history_window (5 steps) use defaults
+
+# --- Speed-turn coupling: turning sharply requires slowing down (unchanged) ---
+action:
+  max_heading_change_deg: 1.2    # 120 deg/s at dt=0.01 (== pivot cap)
+  max_torso_change_deg: 1.2
+  speed_turn_coupling: true
+  turn_lat_accel: 2.0             # m/s^2 comfortable centripetal acceleration
+  turn_pivot_rate_deg: 120.0      # deg/s max in-place yaw (v->0)
+
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -2.0         # MODERATE: was -1.0 (3x -- deter bulldozing)
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 2
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: false           # smoothness OFF
+  wall_proximity_penalty: -0.1    # soft proximity band (unchanged)
+  wall_proximity_threshold: 1.5
+  wall_collision_penalty: -0.5    # hard penalty per step in wall contact
+  agent_proximity_penalty_near: -0.025    # MODERATE: was -0.01 (5x)
+  agent_proximity_penalty_far: -0.001    # MODERATE: was -0.0001 (20x -- anticipation)
+  personal_space_radius: 1.0      # unchanged (narrow zone; avoid dense-crowd swamp)
+  action_rate_weight: -0.001   # was -0.01 (50% softer -- allow sharper turns / faster braking)
+
+max_steps: 4000
+desired_velocity_weight: 0.8
+
+episode:
+  stuck_termination_enabled: false   # was true -- let agents pause/wait without being killed
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+
+network:
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+  entropy_coef: 0.001        # B: was 0.003 -- lower so the (log_std-clamped) policy can sharpen
+  max_grad_norm: 1.0         # A: was 10.0 -- tighter step bound on freak batches
+  use_huber_loss: true       # A: bounds the value gradient that exploded at r1000
+  huber_delta: 10.0
+
+eval:
+  n_episodes: 10
+  agent_range: [8, 25]
+  render_video: true
+  video_scenario: 7
