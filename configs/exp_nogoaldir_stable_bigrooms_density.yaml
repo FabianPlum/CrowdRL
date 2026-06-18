@@ -90,11 +90,11 @@ observation:
   temporal_memory_window: 50
 
 action:
-  max_heading_change_deg: 1.2
-  max_torso_change_deg: 1.2
+  max_heading_change_deg: 4.8      # raw per-step ceiling (240 deg/s); the coupling
+  max_torso_change_deg: 4.8        # envelope below is what actually sets the rate
   speed_turn_coupling: true
   turn_lat_accel: 2.0
-  turn_pivot_rate_deg: 120.0
+  turn_pivot_rate_deg: 240.0       # was 120 -- 2x in-place yaw (this is the real turn-rate knob)
 
 reward:
   goal_bonus: 20.0
@@ -121,7 +121,7 @@ reward:
   proximity_speed_floor: 0.0
   proximity_speed_scale: 0.5
 
-max_steps: 2000
+max_steps: 3000
 desired_velocity_weight: 0.8
 
 episode:
