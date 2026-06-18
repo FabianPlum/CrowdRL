@@ -22,6 +22,7 @@ from train_mappo import (  # noqa: E402
     _load_history_and_infer_rollout,
     _render_command,
     _resolve_render_interval,
+    _scorecard_command,
 )
 
 
@@ -270,6 +271,28 @@ class TestRenderCommand:
             ("--checkpoint", str(tmp_path / "checkpoint_rollout_0200.pt")),
             ("--out", str(tmp_path / "viz_r0200_tier3B.mp4")),
             ("--label", "exp_label"),
+        ):
+            assert flag in cmd
+            assert cmd[cmd.index(flag) + 1] == val
+
+
+class TestScorecardCommand:
+    """The CPU-scorecard subprocess argv is well-formed."""
+
+    def test_command_shape(self, tmp_path: Path):
+        cmd = _scorecard_command(
+            tmp_path / "config_resolved.yaml",
+            tmp_path / "checkpoint_rollout_0200.pt",
+            tmp_path / "scorecard_r0200.json",
+            1500,
+        )
+        assert cmd[0] == sys.executable
+        assert cmd[1].replace("\\", "/").endswith("scripts/eval_scorecard.py")
+        for flag, val in (
+            ("--config", str(tmp_path / "config_resolved.yaml")),
+            ("--checkpoint", str(tmp_path / "checkpoint_rollout_0200.pt")),
+            ("--json", str(tmp_path / "scorecard_r0200.json")),
+            ("--max-steps", "1500"),
         ):
             assert flag in cmd
             assert cmd[cmd.index(flag) + 1] == val

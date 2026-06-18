@@ -50,6 +50,7 @@ class ScenarioSpec:
 # setting so one unlucky layout does not dominate. Keep this list STABLE --
 # changing it breaks comparability with previously recorded scorecards.
 DEFAULT_SCENARIOS: list[ScenarioSpec] = [
+    # --- Moderate density (<=30 agents): the "clean capability" regime. ---
     ScenarioSpec("open_t0", GeometryTier.TIER_0, 20, 0),
     ScenarioSpec("open_t0", GeometryTier.TIER_0, 20, 1),
     ScenarioSpec("corridor_t1", GeometryTier.TIER_1, 20, 0),
@@ -60,6 +61,16 @@ DEFAULT_SCENARIOS: list[ScenarioSpec] = [
     ScenarioSpec("rooms_t3a", GeometryTier.TIER_3A, 30, 1),
     ScenarioSpec("composed_t3b", GeometryTier.TIER_3B, 30, 0),
     ScenarioSpec("composed_t3b", GeometryTier.TIER_3B, 30, 1),
+    # --- High-density tail (60-100 agents): matches what the training full
+    # phase is actually dominated by (agents up to 100, 80% weight on
+    # rooms/composed). The moderate scenarios above flatter the policy; these
+    # probe the regime where freezing/congestion actually bites, so the
+    # scorecard tracks the same difficulty the training GoalRate sees. ---
+    ScenarioSpec("corridor_hi", GeometryTier.TIER_1, 40, 0),
+    ScenarioSpec("rooms_hi", GeometryTier.TIER_3A, 60, 0),
+    ScenarioSpec("rooms_hi", GeometryTier.TIER_3A, 100, 0),
+    ScenarioSpec("composed_hi", GeometryTier.TIER_3B, 60, 0),
+    ScenarioSpec("composed_hi", GeometryTier.TIER_3B, 100, 0),
 ]
 
 

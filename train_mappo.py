@@ -963,6 +963,62 @@ def _spawn_training_render(
     return still
 
 
+def _scorecard_command(
+    config_path: Path,
+    checkpoint_path: Path,
+    json_out: Path,
+    max_steps: int,
+) -> list[str]:
+    """Build the argv for a CPU scorecard subprocess (``scripts/eval_scorecard.py``).
+
+    Pure (no side effects) so the wiring is unit-testable without spawning.
+    """
+    scorecard_script = Path(__file__).resolve().parent / "scripts" / "eval_scorecard.py"
+    return [
+        sys.executable,
+        str(scorecard_script),
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--json",
+        str(json_out),
+        "--max-steps",
+        str(max_steps),
+    ]
+
+
+def _spawn_training_scorecard(
+    active: list[tuple[subprocess.Popen, object]],
+    config_path: Path,
+    checkpoint_path: Path,
+    json_out: Path,
+    max_steps: int,
+) -> list[tuple[subprocess.Popen, object]]:
+    """Fire-and-forget a CPU scorecard of ``checkpoint_path``; never blocks training.
+
+    Mirrors :func:`_spawn_training_render`: reaps finished scorecards, then spawns
+    ``scripts/eval_scorecard.py`` (CPU-only, never touches the GPUs) which writes
+    the decomposed scorecard JSON to ``json_out`` and the human-readable table to
+    its ``.log`` sibling. The fixed scenario suite spans the moderate AND the
+    60-100 agent high-density regime, so the eval tracks the same difficulty the
+    training GoalRate sees. Returns the updated list of (process, logfile).
+    """
+    still = [(p, lf) for (p, lf) in active if p.poll() is None]
+    for p, lf in active:
+        if p.poll() is not None:
+            lf.close()
+    logf = open(json_out.with_suffix(".log"), "w")
+    proc = subprocess.Popen(
+        _scorecard_command(config_path, checkpoint_path, json_out, max_steps),
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    still.append((proc, logf))
+    return still
+
+
 # ============================================================================
 # Training worker (one per GPU rank)
 # ============================================================================
@@ -1030,6 +1086,21 @@ def train_worker(
         render_during_training, render_interval_cfg, checkpoint_interval
     )
     render_label = results_dir.name.removeprefix("results_")
+
+    # Optional training-time CPU scorecard. Same fire-and-forget pattern as
+    # renders (piggybacks on checkpoint writes, CPU-only), but instead of one
+    # video it runs the fixed decomposed behavioural eval -- goal / collision /
+    # wall / freeze / stuck across the moderate AND 60-100 agent high-density
+    # scenarios -- writing ``scorecard_r<N>.json`` (+ a readable .log). Lets us
+    # track real capability over training the way renders track qualitative
+    # behaviour. Disabled by default; experiment configs opt in. The interval
+    # snaps to a multiple of ``checkpoint_interval`` (reuses the render resolver
+    # since both just piggyback the on-disk checkpoint).
+    scorecard_during_training = cfg.get("scorecard_during_training", False)
+    scorecard_interval = _resolve_render_interval(
+        scorecard_during_training, cfg.get("scorecard_interval", 0), checkpoint_interval
+    )
+    scorecard_max_steps = cfg.get("scorecard_max_steps", 1500)
 
     # -- Validate max_agents covers curriculum --------------------------------
     max_phase_agents = max(p.n_agents_range[1] for p in curriculum_config.phases)
@@ -1244,6 +1315,7 @@ def train_worker(
 
     # Still-running training-time render subprocesses, as (Popen, logfile) tuples.
     render_procs: list[tuple[subprocess.Popen, object]] = []
+    scorecard_procs: list[tuple[subprocess.Popen, object]] = []
 
     if is_main_rank():
         sps_header = "SPS (local)" if world_size > 1 else "SPS"
@@ -1434,12 +1506,39 @@ def train_worker(
                             flush=True,
                         )
 
+                if scorecard_interval > 0 and rollout % scorecard_interval == 0:
+                    sc_out = results_dir / f"scorecard_r{rollout:04d}.json"
+                    # Best-effort, like renders: a scorecard-spawn failure must
+                    # never crash a long training run.
+                    try:
+                        scorecard_procs = _spawn_training_scorecard(
+                            scorecard_procs,
+                            results_dir / "config_resolved.yaml",
+                            ckpt_path,
+                            sc_out,
+                            scorecard_max_steps,
+                        )
+                        print(
+                            f"  Spawned CPU scorecard of {ckpt_path.name} -> {sc_out.name} "
+                            f"(log: {sc_out.with_suffix('.log').name})",
+                            flush=True,
+                        )
+                    except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                        print(
+                            f"  Warning: scorecard spawn failed ({type(e).__name__}: {e}); "
+                            "continuing training.",
+                            flush=True,
+                        )
+
     finally:
         batched_env.close()
 
     # Reap finished training-time renders (close their logs); leave any still
     # running -- they are short and finish on their own during post-training.
     for _p, _lf in render_procs:
+        if _p.poll() is not None:
+            _lf.close()
+    for _p, _lf in scorecard_procs:
         if _p.poll() is not None:
             _lf.close()
 
