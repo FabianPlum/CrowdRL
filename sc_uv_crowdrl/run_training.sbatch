@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --account=ias-7
 #SBATCH --partition=dc-gpu
-#SBATCH --time=24:00:00
+#SBATCH --time=1:00:00
 #SBATCH --output=logs/training_%j.out
 #SBATCH --error=logs/training_%j.err
 
