@@ -48,6 +48,47 @@ class RewardConfig:
     Deters using walls as a free brake (instant deceleration at no cost).
     Mirrors the agent ``collision_penalty``. Default -1.0; set 0.0 to disable."""
 
+    # Impact-speed weighting for the collision / wall-contact penalties
+    # (optional, default OFF -> binary per-step penalty). A binary penalty has
+    # ZERO marginal cost for hitting at speed, so once contact is unavoidable
+    # the policy has no reason to slow down ("bulldozing"). Weighting the
+    # penalty by impact speed -- CLOSING speed for agent-agent contact, the
+    # agent's own speed for wall contact -- restores that gradient: a head-on at
+    # 3 m/s hurts far more than a gentle brush, while slow contact in a dense
+    # crowd stays cheap. The penalty is still GATED by the env's collision /
+    # wall-contact masks; this only reshapes its magnitude:
+    #   multiplier = max(0, collision_speed_floor + collision_speed_scale * v)
+    use_velocity_weighted_collision: bool = False
+    """Enable impact-speed weighting of the collision/wall-contact penalties.
+    False reproduces the binary per-step penalty exactly (the default)."""
+
+    collision_speed_floor: float = 0.5
+    """Penalty multiplier at zero impact speed -- a base deterrent so resting in
+    contact is not free. With the defaults, a ~1 m/s contact reproduces the
+    unweighted magnitude (floor + scale * 1.0 = 1.0)."""
+
+    collision_speed_scale: float = 0.5
+    """Extra penalty multiplier per m/s of impact speed (closing speed for
+    agent-agent contact, own speed for wall contact)."""
+
+    # Velocity weighting for the agent-PROXIMITY penalty (optional, default OFF).
+    # The distance-only proximity ramp penalises an agent for merely BEING near a
+    # neighbour, so in a crowd the cheapest policy is to stop at the edge and not
+    # enter -- a major driver of the freezing failure mode. Weighting the penalty
+    # by CLOSING speed makes slow coexistence / threading cheap and only taxes
+    # approaching a neighbour at speed, so agents can move THROUGH a crowd instead
+    # of freezing outside it. Same closing-speed philosophy as P1 (collision).
+    use_velocity_weighted_proximity: bool = False
+    """Enable closing-speed weighting of the agent-proximity penalty.
+    False reproduces the distance-only penalty exactly (the default)."""
+
+    proximity_speed_floor: float = 0.25
+    """Proximity-penalty multiplier at zero closing speed (a mild residual cost
+    so coexistence keeps some anticipation pressure; 0.0 = free when not closing)."""
+
+    proximity_speed_scale: float = 0.5
+    """Extra proximity-penalty multiplier per m/s of closing speed."""
+
     # Agent proximity penalty (graded linear ramp, learned collision avoidance)
     # The penalty per step is linearly interpolated on the center-to-center
     # distance between an agent and its nearest active neighbour:
@@ -187,6 +228,7 @@ def compute_rewards(
     wall_collision_mask: NDArray[np.bool_] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
     actions: NDArray[np.float64] | None = None,
+    collision_velocities: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
     """Compute per-agent rewards for one timestep.
 
@@ -208,6 +250,11 @@ def compute_rewards(
     agent_radii : (n_agents,) optional — agent body radii (used for the
         graded agent-proximity penalty: contact distance = r_i + r_j)
     actions : (n_agents, action_dim) optional — raw policy output this step
+    collision_velocities : (n_agents, 2) optional — pre-contact velocities (the
+        policy's chosen approach velocity, before contact-force impulses). Used
+        only by ``use_velocity_weighted_collision`` so the closing-speed weight
+        reflects the approach speed the policy controls, not the post-bounce
+        velocity. Falls back to ``velocities`` when not provided.
 
     Returns
     -------
@@ -227,8 +274,42 @@ def compute_rewards(
     reached_goal = (goal_distances < config.goal_radius) & active_mask
     rewards[reached_goal] += config.goal_bonus
 
-    # Collision penalty
-    rewards[collision_mask & active_mask] += config.collision_penalty
+    # Collision penalty. Binary per-step by default; when
+    # ``use_velocity_weighted_collision`` is set, scale by the closing speed
+    # between contacting agents so high-speed impacts cost more than gentle
+    # contact (still gated by ``collision_mask``).
+    coll_active = collision_mask & active_mask
+    if (
+        config.use_velocity_weighted_collision
+        and agent_radii is not None
+        and n_agents >= 2
+        and bool(coll_active.any())
+    ):
+        vel = collision_velocities if collision_velocities is not None else velocities
+        sep = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]  # p_i - p_j
+        sep_dist = np.sqrt(np.sum(sep**2, axis=-1))
+        sep_unit = sep / np.maximum(sep_dist[..., np.newaxis], 1e-9)
+        rel_vel = vel[:, np.newaxis, :] - vel[np.newaxis, :, :]  # v_i - v_j
+        closing = -np.sum(rel_vel * sep_unit, axis=-1)  # >0 when i, j approach
+        # Only count active neighbours within (slightly enlarged) contact range,
+        # so the weight reflects the actual colliding partner; the 1.2x absorbs
+        # the ellipse-vs-circle gap with the env's detect_collisions.
+        contact_dist = 1.2 * (agent_radii[:, np.newaxis] + agent_radii[np.newaxis, :])
+        eye = np.eye(n_agents, dtype=np.bool_)
+        near = (
+            (~eye)
+            & (sep_dist <= contact_dist)
+            & active_mask[:, np.newaxis]
+            & active_mask[np.newaxis, :]
+        )
+        closing = np.where(near, np.maximum(closing, 0.0), 0.0)
+        impact_speed = closing.max(axis=1)  # worst closing speed per agent
+        speed_scale = np.maximum(
+            config.collision_speed_floor + config.collision_speed_scale * impact_speed, 0.0
+        )
+        rewards[coll_active] += config.collision_penalty * speed_scale[coll_active]
+    else:
+        rewards[coll_active] += config.collision_penalty
 
     # Wall proximity penalty (smooth, distance-based)
     if (
@@ -244,7 +325,20 @@ def compute_rewards(
     # back). Distinct from the proximity band; mirrors the agent collision
     # penalty -- deters using walls as a free brake.
     if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
-        rewards[wall_collision_mask & active_mask] += config.wall_collision_penalty
+        wall_active = wall_collision_mask & active_mask
+        if config.use_velocity_weighted_collision and bool(wall_active.any()):
+            # No wall normal is available here, so weight by the agent's own
+            # (pre-contact) speed: ramming a wall at speed costs more than
+            # drifting into it. wall_collision_mask already implies into-wall
+            # motion the boundary had to cancel.
+            vel = collision_velocities if collision_velocities is not None else velocities
+            own_speed = np.linalg.norm(vel, axis=1)
+            wall_scale = np.maximum(
+                config.collision_speed_floor + config.collision_speed_scale * own_speed, 0.0
+            )
+            rewards[wall_active] += config.wall_collision_penalty * wall_scale[wall_active]
+        else:
+            rewards[wall_active] += config.wall_collision_penalty
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
     # Penalty interpolates between ``near`` (at contact, r_i + r_j) and
@@ -268,6 +362,20 @@ def compute_rewards(
         pair_penalty = (1.0 - t) * config.agent_proximity_penalty_near + (
             t * config.agent_proximity_penalty_far
         )
+
+        # Optionally weight by CLOSING speed (penalise approaching at speed, not
+        # mere coexistence). ``diff`` here is p_j - p_i, so the closing speed
+        # (>0 when i, j approach) is +(v_i - v_j) . unit(diff). Uses the
+        # pre-contact (policy-chosen) velocities when supplied.
+        if config.use_velocity_weighted_proximity:
+            vel = collision_velocities if collision_velocities is not None else velocities
+            diff_unit = diff / np.maximum(pair_dist[..., np.newaxis], 1e-9)
+            rel_vel = vel[:, np.newaxis, :] - vel[np.newaxis, :, :]  # v_i - v_j
+            closing = np.sum(rel_vel * diff_unit, axis=-1)  # (n, n), >0 approaching
+            speed_w = np.maximum(
+                config.proximity_speed_floor + config.proximity_speed_scale * closing, 0.0
+            )
+            pair_penalty = pair_penalty * speed_w
 
         # Mask: no self-pairs, only active-active pairs, only pairs inside zone.
         eye = np.eye(n_agents, dtype=np.bool_)

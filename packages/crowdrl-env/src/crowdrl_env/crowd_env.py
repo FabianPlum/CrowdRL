@@ -349,6 +349,13 @@ class CrowdEnv(gym.Env):
         self._world.torso_orientations[mask] = batch_result.new_torso_orientations[mask]
         self._world.head_orientations[mask] = batch_result.new_head_orientations[mask]
 
+        # Snapshot the policy's chosen (pre-contact) velocities so the reward's
+        # optional impact-speed weighting measures the approach speed the policy
+        # controls, not the post-contact bounce. Only materialised when enabled.
+        pre_contact_velocities = (
+            self._world.velocities.copy() if cfg.reward.use_velocity_weighted_collision else None
+        )
+
         # --- 3. Collision detection and contact forces ---
         # Detect collisions once, pass to both force computation and reward
         collisions = detect_collisions(self._world)
@@ -416,6 +423,7 @@ class CrowdEnv(gym.Env):
             wall_collision_mask=wall_collision_mask,
             agent_radii=agent_radii,
             actions=actions,
+            collision_velocities=pre_contact_velocities,
         )
 
         # --- 6. Update active mask ---

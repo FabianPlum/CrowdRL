@@ -107,6 +107,7 @@ def compute_rewards(
     wall_distances: Tensor | None = None,
     wall_collision_mask: Tensor | None = None,
     agent_radii: Tensor | None = None,
+    collision_velocities: Tensor | None = None,
     actions: Tensor | None = None,
     prev_actions: Tensor | None = None,
     headings: Tensor | None = None,
@@ -137,6 +138,9 @@ def compute_rewards(
         enforcement corrected the agent this step (hard wall-contact signal)
     agent_radii : (E, N) optional -- agent body radii (used for the graded
         agent-proximity penalty: per-pair contact distance = r_i + r_j)
+    collision_velocities : (E, N, 2) optional -- pre-contact velocities for the
+        impact-speed weighting (``use_velocity_weighted_collision``); falls back
+        to ``velocities`` when not given.
     actions : (E, N, 4) optional -- raw policy output this step
     prev_actions : (E, N, 4) optional -- raw policy output previous step
     headings : (E, N) optional -- current torso orientations (for angular accel)
@@ -174,12 +178,40 @@ def compute_rewards(
     comp_goal = torch.where(reached_goal, torch.full_like(rewards, config.goal_bonus), zero)
     rewards = rewards + comp_goal
 
-    # Collision penalty
-    comp_collision = torch.where(
-        collision_mask & active_mask,
-        torch.full_like(rewards, config.collision_penalty),
-        zero,
-    )
+    # Collision penalty. Binary per-step by default; when
+    # use_velocity_weighted_collision is set, scale by the CLOSING speed between
+    # contacting agents so high-speed impacts cost more than gentle contact
+    # (still gated by collision_mask). Mirrors crowdrl_env.reward.compute_rewards
+    # exactly -- keep the two in lockstep (test_equivalence guards this).
+    coll_active = collision_mask & active_mask
+    if config.use_velocity_weighted_collision and agent_radii is not None:
+        vel = collision_velocities if collision_velocities is not None else velocities
+        sep = positions.unsqueeze(2) - positions.unsqueeze(1)  # (E,N,N,2) p_i - p_j
+        sep_dist = (sep**2).sum(dim=-1).sqrt()  # (E,N,N)
+        sep_unit = sep / sep_dist.clamp(min=1e-9).unsqueeze(-1)
+        rel_vel = vel.unsqueeze(2) - vel.unsqueeze(1)  # (E,N,N,2) v_i - v_j
+        closing = -(rel_vel * sep_unit).sum(dim=-1)  # (E,N,N) >0 when approaching
+        contact_dist = 1.2 * (agent_radii.unsqueeze(2) + agent_radii.unsqueeze(1))
+        n_c = positions.shape[1]
+        eye_c = torch.eye(n_c, device=positions.device, dtype=torch.bool).unsqueeze(0)
+        near = (
+            (~eye_c)
+            & (sep_dist <= contact_dist)
+            & active_mask.unsqueeze(1)
+            & active_mask.unsqueeze(2)
+        )
+        closing = torch.where(near, closing.clamp(min=0.0), torch.zeros_like(closing))
+        impact_speed = closing.max(dim=2).values  # (E,N) worst closing speed
+        speed_scale = (
+            config.collision_speed_floor + config.collision_speed_scale * impact_speed
+        ).clamp(min=0.0)
+        comp_collision = torch.where(coll_active, config.collision_penalty * speed_scale, zero)
+    else:
+        comp_collision = torch.where(
+            coll_active,
+            torch.full_like(rewards, config.collision_penalty),
+            zero,
+        )
     rewards = rewards + comp_collision
 
     # Wall proximity penalty (smooth, distance-based)
@@ -203,11 +235,23 @@ def compute_rewards(
     # brake. Mirrors the agent collision penalty.
     comp_wall_collision = zero
     if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
-        comp_wall_collision = torch.where(
-            wall_collision_mask & active_mask,
-            torch.full_like(rewards, config.wall_collision_penalty),
-            zero,
-        )
+        wall_active = wall_collision_mask & active_mask
+        if config.use_velocity_weighted_collision:
+            # Wall is static, so impact speed = the agent's own (pre-contact) speed.
+            vel = collision_velocities if collision_velocities is not None else velocities
+            own_speed = (vel**2).sum(dim=-1).sqrt()  # (E,N)
+            wall_scale = (
+                config.collision_speed_floor + config.collision_speed_scale * own_speed
+            ).clamp(min=0.0)
+            comp_wall_collision = torch.where(
+                wall_active, config.wall_collision_penalty * wall_scale, zero
+            )
+        else:
+            comp_wall_collision = torch.where(
+                wall_active,
+                torch.full_like(rewards, config.wall_collision_penalty),
+                zero,
+            )
         rewards = rewards + comp_wall_collision
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
@@ -231,6 +275,19 @@ def compute_rewards(
         pair_penalty = (1.0 - t) * config.agent_proximity_penalty_near + (
             t * config.agent_proximity_penalty_far
         )
+
+        # Optionally weight by CLOSING speed (penalise approaching at speed, not
+        # mere coexistence) -- mirrors crowdrl_env.reward. Here ``diff_p`` is
+        # p_i - p_j, so closing (>0 when i, j approach) is -(v_i - v_j) . unit.
+        if config.use_velocity_weighted_proximity:
+            vel = collision_velocities if collision_velocities is not None else velocities
+            diff_unit = diff_p / pair_dist.clamp(min=1e-9).unsqueeze(-1)
+            rel_vel = vel.unsqueeze(2) - vel.unsqueeze(1)  # v_i - v_j
+            closing = -(rel_vel * diff_unit).sum(dim=-1)  # (E,N,N), >0 approaching
+            speed_w = (
+                config.proximity_speed_floor + config.proximity_speed_scale * closing
+            ).clamp(min=0.0)
+            pair_penalty = pair_penalty * speed_w
 
         # Mask: no self-pairs, only active-active pairs, only pairs inside zone.
         N_ = positions.shape[1]

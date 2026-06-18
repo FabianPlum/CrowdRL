@@ -196,6 +196,23 @@ class EnvConfig(NamedTuple):
         -0.005
     )  # Layer 1 v2: was -0.1 (20x down -- see reward.py docstring)
 
+    # Velocity-weighted collision cost (P1). When enabled, the agent-collision
+    # and wall-contact penalties are scaled by impact speed (closing speed for
+    # agents, own speed for walls) instead of being binary. Default OFF ->
+    # binary, identical to before. See crowdrl_env.reward.RewardConfig for the
+    # full rationale; this must stay in lockstep with that dataclass.
+    use_velocity_weighted_collision: bool = False
+    collision_speed_floor: float = 0.5
+    collision_speed_scale: float = 0.5
+
+    # Velocity-weighted agent-proximity penalty (option 1). Scales the proximity
+    # ramp by closing speed so coexisting / threading slowly is cheap and only
+    # fast approach is taxed -- targets the freezing mode. Lockstep with
+    # crowdrl_env.reward.RewardConfig.
+    use_velocity_weighted_proximity: bool = False
+    proximity_speed_floor: float = 0.25
+    proximity_speed_scale: float = 0.5
+
     # Episode
     max_steps: int = 5000
 
@@ -275,6 +292,12 @@ class EnvConfig(NamedTuple):
             jerk_penalty_weight=cfg.reward.jerk_penalty_weight,
             angular_accel_penalty_weight=cfg.reward.angular_accel_penalty_weight,
             speed_deviation_weight=cfg.reward.speed_deviation_weight,
+            use_velocity_weighted_collision=cfg.reward.use_velocity_weighted_collision,
+            collision_speed_floor=cfg.reward.collision_speed_floor,
+            collision_speed_scale=cfg.reward.collision_speed_scale,
+            use_velocity_weighted_proximity=cfg.reward.use_velocity_weighted_proximity,
+            proximity_speed_floor=cfg.reward.proximity_speed_floor,
+            proximity_speed_scale=cfg.reward.proximity_speed_scale,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
             use_goal_direction=cfg.obs.use_goal_direction,

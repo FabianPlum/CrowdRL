@@ -124,6 +124,13 @@ def batched_step(
     new_torso_orientations = torch.where(state.active_mask, new_torsos, state.torso_orientations)
     new_head_orientations = torch.where(state.active_mask, new_heads, state.head_orientations)
 
+    # Snapshot the policy's chosen (pre-contact) velocities for the reward's
+    # optional impact-speed weighting -- captured before the contact impulse
+    # (step 4) so it reflects the approach speed the policy controls, not the
+    # post-bounce velocity. The later reassignments of new_velocities are
+    # functional (no in-place mutation), so this reference stays valid.
+    pre_contact_velocities = new_velocities if config.use_velocity_weighted_collision else None
+
     # --- 3. Collision detection ---
     overlap_matrix, collision_mask = detect_collisions_pairwise(
         state.positions,
@@ -222,6 +229,7 @@ def batched_step(
         collision_mask,
         state.prev_nav_distances,
         config,
+        collision_velocities=pre_contact_velocities,
         current_distances=new_nav_distances,
         wall_distances=wall_distances,
         wall_collision_mask=wall_collision_mask,

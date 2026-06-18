@@ -590,3 +590,51 @@ class TestNeighborMemoryWiring:
                     assert np.all(vh[i, :, k, :] == 0.0), (
                         f"empty slot ({i}, {k}) has non-zero history"
                     )
+
+
+class TestVelocityWeightedCollisionEnv:
+    """End-to-end smoke of the impact-speed-weighted penalty through step()."""
+
+    def _dense_env(self, velocity_weighted: bool):
+        # Many agents in a small Tier-0 field so collisions actually occur and
+        # the pre-contact velocity snapshot / collision_velocities path runs.
+        config = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=6.0, max_side=6.0),
+            spawn=SpawnConfig(n_agents_range=(12, 12), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            max_steps=40,
+            reward=RewardConfig(
+                use_velocity_weighted_collision=velocity_weighted,
+                collision_speed_floor=0.5,
+                collision_speed_scale=0.5,
+            ),
+        )
+        return CrowdEnv(config=config, seed=7)
+
+    def test_step_runs_and_rewards_finite_with_weighting(self):
+        env = self._dense_env(velocity_weighted=True)
+        env.reset()
+        n = env.n_agents
+        # Drive everyone forward at full desired speed so they pack together.
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0
+        for _ in range(env.config.max_steps):
+            _, rewards, _, _, _ = env.step(actions)
+            assert np.all(np.isfinite(rewards))
+
+    def test_weighting_changes_reward_stream_vs_binary(self):
+        # Same seed/scenario/actions; only the flag differs. Reshaping the
+        # collision cost must change the realised reward stream somewhere.
+        def run(weighted):
+            env = self._dense_env(velocity_weighted=weighted)
+            env.reset(seed=7)
+            n = env.n_agents
+            actions = np.zeros((n, env.config.action.action_dim))
+            actions[:, 0] = 1.0
+            total = 0.0
+            for _ in range(env.config.max_steps):
+                _, rewards, _, _, _ = env.step(actions)
+                total += float(rewards.sum())
+            return total
+
+        assert run(weighted=True) != pytest.approx(run(weighted=False))

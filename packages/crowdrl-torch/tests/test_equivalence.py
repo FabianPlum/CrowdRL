@@ -16,6 +16,9 @@ from crowdrl_core.collision import detect_collisions
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.sensing import RaycastConfig
 from crowdrl_core.world_state import WorldState
+from crowdrl_env.reward import RewardConfig as NpRewardConfig
+from crowdrl_env.reward import RewardState as NpRewardState
+from crowdrl_env.reward import compute_rewards as np_compute_rewards
 
 # PyTorch implementations
 from crowdrl_torch.action import interpret_actions as torch_interpret_actions
@@ -701,6 +704,157 @@ class TestRewardEquivalence:
         comps = torch_comps[0].numpy()
         assert comps.shape == (n, len(REWARD_COMPONENT_NAMES))
         npt.assert_allclose(comps.sum(axis=-1), rewards, atol=1e-4, rtol=1e-4)
+
+    def test_velocity_weighted_collision_parity(self):
+        """The torch training reward must match the numpy reference reward when
+        impact-speed weighting (P1) is ON -- otherwise enabling the flag in a
+        config would silently change the scorecard (numpy) but not training
+        (torch). Isolates the collision/wall terms by zeroing everything else.
+
+        Scene (n=4): agents 0,1 in a head-on agent-collision (closing 3 m/s),
+        agent 2 in wall contact (own speed 2 m/s), agent 3 idle.
+        """
+        n = 4
+        positions = np.array([[5.0, 5.0], [5.4, 5.0], [2.0, 2.0], [8.0, 8.0]], dtype=np.float32)
+        velocities = np.array([[1.5, 0.0], [-1.5, 0.0], [2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)  # far -> no goal bonus
+        radii = np.array([0.3, 0.3, 0.3, 0.3], dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        collision_mask = np.array([True, True, False, False])
+        wall_mask = np.array([False, False, True, False])
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=-2.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=-0.5,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+
+        # NumPy reference (fresh state -> progress skipped; collision_velocities
+        # defaults to the passed velocities).
+        np_rewards, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            collision_mask,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_collision_mask=wall_mask,
+            agent_radii=radii.astype(np.float64),
+        )
+
+        # Torch training path (E=1).
+        cfg = EnvConfig(max_agents=n, **common)
+        t_rewards, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(collision_mask).unsqueeze(0),
+            torch.zeros(1, n),  # prev_distances (progress weight 0 -> ignored)
+            cfg,
+            wall_collision_mask=torch.tensor(wall_mask).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+
+        # Hand-computed expectation: 0,1 -> -2*(0.5+0.5*3)= -4; 2 -> -0.5*(0.5+0.5*2)= -0.75.
+        npt.assert_allclose(np_rewards, [-4.0, -4.0, -0.75, 0.0], atol=ATOL)
+        # The whole point: torch training reward == numpy reference reward.
+        npt.assert_allclose(t_rewards[0].numpy(), np_rewards, atol=ATOL, rtol=RTOL)
+
+    def test_velocity_weighted_proximity_parity(self):
+        """numpy and torch agent-PROXIMITY penalties must match when closing-
+        speed weighting (option 1) is ON. Guards the opposite sign conventions
+        (numpy diff = p_j-p_i, torch diff_p = p_i-p_j) in the two proximity
+        blocks, and that closing speed is signed correctly (approach taxed,
+        recede free). Two agents 0.8 m apart (t=0.5 on the ramp)."""
+        n = 2
+        positions = np.array([[0.0, 0.0], [0.8, 0.0]], dtype=np.float32)
+        radii = np.array([0.3, 0.3], dtype=np.float32)  # contact 0.6 -> t=0.5 at 0.8 m
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        no_coll = np.zeros(n, dtype=np.bool_)
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=0.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=0.0,
+            agent_proximity_penalty_near=-0.02,
+            agent_proximity_penalty_far=-0.002,
+            personal_space_radius=1.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_proximity=True,
+            proximity_speed_floor=0.25,
+            proximity_speed_scale=0.5,
+        )
+
+        def both(vel):
+            np_r, _ = np_compute_rewards(
+                positions.astype(np.float64),
+                vel.astype(np.float64),
+                headings.astype(np.float64),
+                goal_positions.astype(np.float64),
+                preferred.astype(np.float64),
+                active,
+                no_coll,
+                NpRewardState(),
+                NpRewardConfig(inverse_distance_weight=0.0, **common),
+                dt=0.01,
+                agent_radii=radii.astype(np.float64),
+            )
+            cfg = EnvConfig(max_agents=n, **common)
+            t_r, _, _, _ = torch_compute_rewards(
+                torch.tensor(positions).unsqueeze(0),
+                torch.tensor(vel).unsqueeze(0),
+                torch.tensor(goal_positions).unsqueeze(0),
+                torch.tensor(active).unsqueeze(0),
+                torch.tensor(no_coll).unsqueeze(0),
+                torch.zeros(1, n),
+                cfg,
+                agent_radii=torch.tensor(radii).unsqueeze(0),
+            )
+            return np_r, t_r[0].numpy()
+
+        approaching = np.array([[1.0, 0.0], [-1.0, 0.0]], dtype=np.float32)  # closing 2 m/s
+        parallel = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)  # closing 0
+        receding = np.array([[-1.0, 0.0], [1.0, 0.0]], dtype=np.float32)  # closing -2
+
+        results = {
+            k: both(v) for k, v in [("app", approaching), ("par", parallel), ("rec", receding)]
+        }
+        for np_r, t_r in results.values():
+            npt.assert_allclose(t_r, np_r, atol=ATOL, rtol=RTOL)  # numpy == torch
+
+        app, par, rec = results["app"][0], results["par"][0], results["rec"][0]
+        assert app[0] < par[0] < 0.0  # approaching taxed most; coexisting still > 0 cost
+        assert abs(rec[0]) < 1e-6  # receding -> no proximity penalty
+        # pair_penalty 0.5*(-0.02)+0.5*(-0.002) = -0.011; weight 0.25+0.5*2 = 1.25 -> -0.01375
+        assert abs(app[0] - (-0.01375)) < 1e-5
 
 
 class TestTemporalMemoryEquivalence:

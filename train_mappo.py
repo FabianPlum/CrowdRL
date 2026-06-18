@@ -173,6 +173,12 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             agent_proximity_penalty_far=rew.get("agent_proximity_penalty_far", -0.0001),
             personal_space_radius=rew.get("personal_space_radius", 1.0),
             action_rate_weight=rew.get("action_rate_weight", -0.01),
+            use_velocity_weighted_collision=rew.get("use_velocity_weighted_collision", False),
+            collision_speed_floor=rew.get("collision_speed_floor", 0.5),
+            collision_speed_scale=rew.get("collision_speed_scale", 0.5),
+            use_velocity_weighted_proximity=rew.get("use_velocity_weighted_proximity", False),
+            proximity_speed_floor=rew.get("proximity_speed_floor", 0.25),
+            proximity_speed_scale=rew.get("proximity_speed_scale", 0.5),
         ),
         max_steps=cfg.get("max_steps", 2000),
         # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this

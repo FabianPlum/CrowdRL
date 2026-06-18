@@ -468,3 +468,159 @@ class TestRewardState:
         assert state.prev_accelerations is None
         assert state.prev_nav_distances is not None
         assert len(state.prev_nav_distances) == 5
+
+
+def _collision_only_config(**overrides):
+    """RewardConfig with every term except the collision/wall penalties zeroed,
+    so a single compute_rewards call isolates the collision reward."""
+    base = dict(
+        goal_bonus=0.0,
+        collision_penalty=-2.0,
+        timeout_penalty=0.0,
+        wall_proximity_penalty=0.0,
+        wall_collision_penalty=0.0,
+        agent_proximity_penalty_near=0.0,
+        agent_proximity_penalty_far=0.0,
+        action_rate_weight=0.0,
+        use_smoothness=False,
+        speed_deviation_weight=0.0,
+        existence_penalty=0.0,
+        progress_weight=0.0,
+        inverse_distance_weight=0.0,
+    )
+    base.update(overrides)
+    return RewardConfig(**base)
+
+
+class TestVelocityWeightedCollision:
+    """Impact-speed weighting of the collision / wall-contact penalties (P1)."""
+
+    # Two agents at 0.5 m separation; contact = r_i+r_j = 0.6, 1.2x = 0.72 > 0.5.
+    _POS = np.array([[0.0, 0.0], [0.5, 0.0]])
+    _GOALS = np.array([[100.0, 0.0], [-100.0, 0.0]])  # far -> no goal bonus
+    _RADII = np.array([0.3, 0.3])
+    _HEAD = np.zeros(2)
+    _PREF = np.ones(2) * 1.34
+
+    def _collide(self, cfg, velocities, collision_velocities=None):
+        rewards, _ = compute_rewards(
+            self._POS,
+            velocities,
+            self._HEAD,
+            self._GOALS,
+            self._PREF,
+            np.ones(2, dtype=np.bool_),
+            np.ones(2, dtype=np.bool_),  # both flagged in collision
+            _make_state(2),
+            cfg,
+            dt=0.01,
+            agent_radii=self._RADII,
+            collision_velocities=collision_velocities,
+        )
+        return rewards
+
+    def test_off_reproduces_binary_penalty(self):
+        cfg = _collision_only_config(use_velocity_weighted_collision=False)
+        # Even at high speed, OFF is the flat binary penalty.
+        rewards = self._collide(cfg, np.array([[2.0, 0.0], [-2.0, 0.0]]))
+        assert rewards[0] == pytest.approx(-2.0)
+        assert rewards[1] == pytest.approx(-2.0)
+
+    def test_scales_with_closing_speed(self):
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+        # Head-on, closing 4 m/s -> 0.5 + 0.5*4 = 2.5 -> -5.0
+        fast = self._collide(cfg, np.array([[2.0, 0.0], [-2.0, 0.0]]))
+        # Head-on, closing 0.2 m/s -> 0.5 + 0.5*0.2 = 0.6 -> -1.2
+        slow = self._collide(cfg, np.array([[0.1, 0.0], [-0.1, 0.0]]))
+        assert fast[0] == pytest.approx(-5.0)
+        assert slow[0] == pytest.approx(-1.2)
+        assert fast[0] < slow[0]
+
+    def test_resting_contact_pays_only_floor(self):
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+        # Both at rest, closing 0 -> scale = floor 0.5 -> -1.0 (cheaper than -2).
+        rewards = self._collide(cfg, np.zeros((2, 2)))
+        assert rewards[0] == pytest.approx(-1.0)
+        assert rewards[1] == pytest.approx(-1.0)
+
+    def test_uses_relative_not_own_velocity(self):
+        """Two agents moving FAST but together (zero relative velocity) are not
+        closing, so they pay only the floor -- proving the weight is the pairwise
+        CLOSING speed, not either agent's own speed."""
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+        # Both +x at 2 m/s: own speed 2, but relative velocity 0.
+        rewards = self._collide(cfg, np.array([[2.0, 0.0], [2.0, 0.0]]))
+        # Own-speed weighting would give 0.5 + 0.5*2 = 1.5 -> -3.0 (WRONG).
+        # Closing-speed weighting gives floor 0.5 -> -1.0 (CORRECT).
+        assert rewards[0] == pytest.approx(-1.0)
+        assert rewards[0] != pytest.approx(-3.0)
+
+    def test_falls_back_to_velocities_when_no_snapshot(self):
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+        v = np.array([[2.0, 0.0], [-2.0, 0.0]])
+        with_snap = self._collide(cfg, np.zeros((2, 2)), collision_velocities=v)
+        without_snap = self._collide(cfg, v, collision_velocities=None)
+        assert with_snap[0] == pytest.approx(without_snap[0])
+        assert with_snap[0] == pytest.approx(-5.0)
+
+    def test_wall_contact_weighted_by_own_speed(self):
+        # A wall is static, so "relative velocity" reduces to the agent's own
+        # speed; ramming a wall at 2 m/s -> -0.5 * (0.5 + 0.5*2) = -0.75.
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            wall_collision_penalty=-0.5,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+        rewards, _ = compute_rewards(
+            np.array([[0.0, 0.0]]),
+            np.array([[2.0, 0.0]]),
+            np.zeros(1),
+            np.array([[100.0, 0.0]]),
+            np.ones(1) * 1.34,
+            np.ones(1, dtype=np.bool_),
+            np.zeros(1, dtype=np.bool_),  # no agent collision
+            _make_state(1),
+            cfg,
+            dt=0.01,
+            wall_collision_mask=np.ones(1, dtype=np.bool_),
+        )
+        assert rewards[0] == pytest.approx(-0.75)
+
+    def test_wall_contact_off_is_binary(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            wall_collision_penalty=-0.5,
+            use_velocity_weighted_collision=False,
+        )
+        rewards, _ = compute_rewards(
+            np.array([[0.0, 0.0]]),
+            np.array([[2.0, 0.0]]),
+            np.zeros(1),
+            np.array([[100.0, 0.0]]),
+            np.ones(1) * 1.34,
+            np.ones(1, dtype=np.bool_),
+            np.zeros(1, dtype=np.bool_),
+            _make_state(1),
+            cfg,
+            dt=0.01,
+            wall_collision_mask=np.ones(1, dtype=np.bool_),
+        )
+        assert rewards[0] == pytest.approx(-0.5)

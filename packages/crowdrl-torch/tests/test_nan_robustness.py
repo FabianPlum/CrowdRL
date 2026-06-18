@@ -116,3 +116,30 @@ def test_step_finite_under_coincident_pileup():
     assert torch.isfinite(new_state.velocities).all()
     assert torch.isfinite(obs).all()
     assert torch.isfinite(rewards).all()
+
+
+def test_step_velocity_weighted_collision_wires_pre_contact_snapshot():
+    """End-to-end through batched_step: the impact-speed-weighted collision
+    penalty (P1) must run (finite rewards) and actually reshape the reward
+    relative to the binary penalty. Agents 0,1 sit at contact distance, so the
+    collision term is exercised and the pre-contact velocity snapshot is wired
+    into compute_rewards."""
+    actions = torch.zeros((1, 4, 4))
+    actions[0, :, 0] = 1.0  # drive forward
+
+    base = _toy_config()
+    weighted = base._replace(
+        collision_penalty=-2.0,
+        use_velocity_weighted_collision=True,
+        collision_speed_floor=0.5,
+        collision_speed_scale=0.5,
+    )
+    binary = base._replace(collision_penalty=-2.0)
+
+    _, _, r_weighted, _, _, _ = batched_step(_toy_state(), actions, weighted)
+    _, _, r_binary, _, _, _ = batched_step(_toy_state(), actions, binary)
+
+    assert torch.isfinite(r_weighted).all()
+    # The reshaping (floor 0.5 + closing-speed scale) must change the reward
+    # stream relative to the flat binary penalty.
+    assert not torch.allclose(r_weighted, r_binary)
