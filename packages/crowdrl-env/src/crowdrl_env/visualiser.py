@@ -525,6 +525,7 @@ def collect_episode_frames(
     obs_normalizer=None,
     device=None,
     max_steps: int | None = None,
+    deterministic: bool = False,
 ) -> EpisodeFrames:
     """Run one episode and collect per-frame data for video rendering.
 
@@ -571,7 +572,9 @@ def collect_episode_frames(
 
         with torch.no_grad():
             obs_t = torch.as_tensor(obs_norm, dtype=torch.float32, device=device)
-            actions, _, _, _, _ = actor_critic.get_action_and_value(obs_t)
+            actions, _, _, _, _ = actor_critic.get_action_and_value(
+                obs_t, deterministic=deterministic
+            )
 
         obs, _rewards, terminated, _truncated, step_info = env.step(actions.cpu().numpy())
 

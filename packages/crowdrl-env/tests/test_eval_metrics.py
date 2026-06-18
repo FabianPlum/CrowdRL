@@ -97,3 +97,68 @@ def test_aggregate_metrics_means_over_present_keys():
     assert agg["goal_rate"] == 0.5
     assert agg["mean_speed"] == 2.0  # present in only one episode
     assert aggregate_metrics([]) == {}
+
+
+def test_freeze_and_stuck_for_frozen_agent():
+    # Agent 0 walks +x at 1 m/s and reaches goal; agent 1 sits still and never
+    # arrives -> half the active agent-steps are frozen, and the frozen,
+    # never-arriving agent counts as stuck.
+    pos = np.array(
+        [
+            [[0.0, 0.0], [5.0, 0.0]],
+            [[0.1, 0.0], [5.0, 0.0]],
+            [[0.2, 0.0], [5.0, 0.0]],
+            [[0.3, 0.0], [5.0, 0.0]],
+        ]
+    )  # (4, 2, 2)
+    frames = EpisodeFrames(
+        positions=pos,
+        torso_orientations=np.zeros((4, 2)),
+        head_orientations=np.zeros((4, 2)),
+        shoulder_widths=np.array([0.22, 0.22]),
+        chest_depths=np.array([0.12, 0.12]),
+        goal_positions=np.array([[0.3, 0.0], [99.0, 0.0]]),
+        active_masks=np.ones((4, 2), dtype=bool),
+        reached_goal=np.array([True, False]),
+        dt=0.1,
+    )
+    m = compute_episode_metrics(frames)
+    assert np.isclose(m["freeze_rate"], 0.5)
+    assert np.isclose(m["stuck_agent_frac"], 0.5)
+
+
+def test_moving_finished_agent_has_no_freeze_or_stuck():
+    pos = np.array([[[0.0, 0.0]], [[0.1, 0.0]], [[0.2, 0.0]]])  # (3, 1, 2)
+    frames = EpisodeFrames(
+        positions=pos,
+        torso_orientations=np.zeros((3, 1)),
+        head_orientations=np.zeros((3, 1)),
+        shoulder_widths=np.array([0.22]),
+        chest_depths=np.array([0.12]),
+        goal_positions=np.array([[1.0, 0.0]]),
+        active_masks=np.ones((3, 1), dtype=bool),
+        reached_goal=np.array([True]),
+        dt=0.1,
+    )
+    m = compute_episode_metrics(frames)
+    assert m["freeze_rate"] == 0.0
+    # All agents reached goal -> no stuck candidates -> key omitted, not guessed.
+    assert "stuck_agent_frac" not in m
+
+
+def test_stationary_unfinished_agent_is_fully_frozen_and_stuck():
+    pos = np.array([[[2.0, 2.0]], [[2.0, 2.0]], [[2.0, 2.0]]])  # (3, 1, 2)
+    frames = EpisodeFrames(
+        positions=pos,
+        torso_orientations=np.zeros((3, 1)),
+        head_orientations=np.zeros((3, 1)),
+        shoulder_widths=np.array([0.22]),
+        chest_depths=np.array([0.12]),
+        goal_positions=np.array([[9.0, 9.0]]),
+        active_masks=np.ones((3, 1), dtype=bool),
+        reached_goal=np.array([False]),
+        dt=0.1,
+    )
+    m = compute_episode_metrics(frames)
+    assert m["freeze_rate"] == 1.0
+    assert m["stuck_agent_frac"] == 1.0

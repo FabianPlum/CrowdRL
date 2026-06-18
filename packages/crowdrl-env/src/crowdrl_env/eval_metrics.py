@@ -15,6 +15,9 @@ Metrics target the behaviour artefacts under investigation:
 - ``wall_contact_rate`` -- how often do agents touch geometry?
 - ``agent_collision_rate`` -- how often do agents overlap each other?
 - ``goal_rate`` / ``path_efficiency`` -- are they still solving the task well?
+- ``freeze_rate`` / ``stuck_agent_frac`` -- are agents deadlocking (still active
+  but near-stationary) rather than navigating? Separates the gridlock failure
+  mode from the bulldozing one (which shows up as a high collision rate).
 
 Keys that need data absent from the frames (e.g. ``speed_over_preferred``
 without ``preferred_speeds``, or wall metrics without geometry) are omitted
@@ -62,7 +65,9 @@ def _frame_world(
     )
 
 
-def compute_episode_metrics(frames: EpisodeFrames) -> dict[str, float]:
+def compute_episode_metrics(
+    frames: EpisodeFrames, *, freeze_speed: float = 0.1
+) -> dict[str, float]:
     """Compute behavioural metrics for one recorded episode.
 
     Parameters
@@ -71,6 +76,10 @@ def compute_episode_metrics(frames: EpisodeFrames) -> dict[str, float]:
         Per-frame snapshot data (positions, orientations, body dims, active
         masks, geometry). ``walls`` or ``polygon`` enable the wall metrics;
         ``preferred_speeds`` enables the speed-vs-preferred metrics.
+    freeze_speed : float
+        Realized speed (m/s) below which an active agent counts as frozen for
+        ``freeze_rate`` / ``stuck_agent_frac``. Default 0.1 m/s -- effectively
+        stationary relative to the ~1.34 m/s preferred speed.
 
     Returns
     -------
@@ -107,6 +116,25 @@ def compute_episode_metrics(frames: EpisodeFrames) -> dict[str, float]:
             pref = np.maximum(pref[active_pair], 1e-6)
             metrics["speed_over_preferred"] = float((speeds / pref).mean())
             metrics["frac_steps_above_preferred"] = float((speeds > pref).mean())
+
+    # --- freeze / deadlock: active agents that are near-stationary ---
+    # The env deactivates an agent the instant it reaches its goal, so an agent
+    # that is still ACTIVE yet barely moving is genuinely stuck, not merely slow.
+    # This is the gridlock signature -- distinct from the bulldozing mode, which
+    # surfaces as a high collision rate instead.
+    if speeds.size:
+        metrics["freeze_rate"] = float((speeds < freeze_speed).mean())
+        # Terminal deadlock: agents that never reached goal and were
+        # near-stationary over the final quarter of the episode.
+        not_done = ~frames.reached_goal  # (N,)
+        if bool(not_done.any()):
+            window = max(1, (n_frames - 1) // 4)
+            tail_active = active_pair[-window:]  # (window, N)
+            tail_cnt = tail_active.sum(axis=0)  # (N,)
+            tail_sum = np.where(tail_active, step_speed[-window:], 0.0).sum(axis=0)
+            tail_mean = np.where(tail_cnt > 0, tail_sum / np.maximum(tail_cnt, 1), np.inf)
+            stuck = not_done & (tail_cnt > 0) & (tail_mean < freeze_speed)
+            metrics["stuck_agent_frac"] = float(stuck.sum()) / n_agents
 
     # --- wall segments: reuse what frames carry, else extract from polygon ---
     wall_segments: NDArray[np.float64] | None = frames.walls
