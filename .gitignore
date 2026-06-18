@@ -1,3 +1,6 @@
+# Caches (torch.compile, matplotlib, etc.)
+.cache/
+
 # Python
 __pycache__/
 *.py[cod]
