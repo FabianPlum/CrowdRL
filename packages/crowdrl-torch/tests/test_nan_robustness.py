@@ -143,3 +143,26 @@ def test_step_velocity_weighted_collision_wires_pre_contact_snapshot():
     # The reshaping (floor 0.5 + closing-speed scale) must change the reward
     # stream relative to the flat binary penalty.
     assert not torch.allclose(r_weighted, r_binary)
+
+
+def test_step_velocity_weighted_finite_under_nonfinite_velocity():
+    """The r855 NaN bug: with the velocity-weighted penalties ON, a transient
+    non-finite velocity fed the unguarded pre-contact snapshot into the reward,
+    producing a NaN that poisoned training. The reward must now sanitize the
+    snapshot so the reward stays finite even when a velocity goes NaN/Inf."""
+    state = _toy_state()
+    state.velocities[0, 0] = torch.tensor([NAN, INF])  # injected glitch
+    cfg = _toy_config()._replace(
+        use_velocity_weighted_collision=True,
+        use_velocity_weighted_proximity=True,
+        collision_speed_floor=0.1,
+        collision_speed_scale=0.5,
+        proximity_speed_floor=0.0,
+        proximity_speed_scale=0.5,
+    )
+    new_state, obs, rewards, _term, _trunc, _comps = batched_step(
+        state, torch.full((1, 4, 4), 1.0), cfg
+    )
+    assert torch.isfinite(rewards).all()
+    assert torch.isfinite(new_state.velocities).all()
+    assert torch.isfinite(obs).all()

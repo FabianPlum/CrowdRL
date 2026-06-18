@@ -624,3 +624,32 @@ class TestVelocityWeightedCollision:
             wall_collision_mask=np.ones(1, dtype=np.bool_),
         )
         assert rewards[0] == pytest.approx(-0.5)
+
+    def test_nan_velocity_snapshot_yields_finite_reward(self):
+        # A degenerate pileup / transient non-finite policy output can hand the
+        # weighting a NaN/Inf pre-contact velocity; it must be sanitized, not
+        # propagated into the reward (which would poison training -- the r855 bug).
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.1,
+            collision_speed_scale=0.5,
+        )
+        bad = np.array([[np.nan, 0.0], [np.inf, -np.inf]])
+        rewards = self._collide(cfg, np.zeros((2, 2)), collision_velocities=bad)
+        assert np.all(np.isfinite(rewards))
+        # sanitized to 0 closing -> floor only -> -2 * 0.1 = -0.2
+        assert rewards[0] == pytest.approx(-0.2)
+
+    def test_huge_closing_speed_penalty_is_bounded(self):
+        # A huge (finite) closing speed must not blow the penalty up -- the
+        # impact speed is capped at max_impact_speed (10 m/s).
+        cfg = _collision_only_config(
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.1,
+            collision_speed_scale=0.5,
+        )
+        huge = np.array([[1e6, 0.0], [-1e6, 0.0]])  # closing ~2e6 m/s
+        rewards = self._collide(cfg, np.zeros((2, 2)), collision_velocities=huge)
+        assert np.all(np.isfinite(rewards))
+        # capped: -2 * (0.1 + 0.5*10) = -10.2
+        assert rewards[0] == pytest.approx(-10.2)

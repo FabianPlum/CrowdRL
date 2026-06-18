@@ -173,6 +173,16 @@ def compute_rewards(
     rewards = torch.zeros_like(goal_distances)
     zero = torch.zeros_like(goal_distances)
 
+    # Numerical safety for the velocity-weighted penalties (mirrors crowdrl_env):
+    # sanitize the pre-contact velocity snapshot and cap the impact speed so a
+    # degenerate high-density pileup / transient non-finite velocity cannot
+    # inject NaN or an unbounded multiplier into the reward and poison training.
+    max_impact_speed = 10.0  # m/s, a safety ceiling well above any physical closing
+    if collision_velocities is not None:
+        collision_velocities = torch.nan_to_num(
+            collision_velocities, nan=0.0, posinf=0.0, neginf=0.0
+        )
+
     # Goal reaching
     reached_goal = (goal_distances < config.goal_radius) & active_mask
     comp_goal = torch.where(reached_goal, torch.full_like(rewards, config.goal_bonus), zero)
@@ -201,7 +211,7 @@ def compute_rewards(
             & active_mask.unsqueeze(2)
         )
         closing = torch.where(near, closing.clamp(min=0.0), torch.zeros_like(closing))
-        impact_speed = closing.max(dim=2).values  # (E,N) worst closing speed
+        impact_speed = closing.max(dim=2).values.clamp(max=max_impact_speed)  # (E,N) capped
         speed_scale = (
             config.collision_speed_floor + config.collision_speed_scale * impact_speed
         ).clamp(min=0.0)
@@ -239,7 +249,7 @@ def compute_rewards(
         if config.use_velocity_weighted_collision:
             # Wall is static, so impact speed = the agent's own (pre-contact) speed.
             vel = collision_velocities if collision_velocities is not None else velocities
-            own_speed = (vel**2).sum(dim=-1).sqrt()  # (E,N)
+            own_speed = (vel**2).sum(dim=-1).sqrt().clamp(max=max_impact_speed)  # (E,N) capped
             wall_scale = (
                 config.collision_speed_floor + config.collision_speed_scale * own_speed
             ).clamp(min=0.0)
@@ -283,7 +293,7 @@ def compute_rewards(
             vel = collision_velocities if collision_velocities is not None else velocities
             diff_unit = diff_p / pair_dist.clamp(min=1e-9).unsqueeze(-1)
             rel_vel = vel.unsqueeze(2) - vel.unsqueeze(1)  # v_i - v_j
-            closing = -(rel_vel * diff_unit).sum(dim=-1)  # (E,N,N), >0 approaching
+            closing = (-(rel_vel * diff_unit).sum(dim=-1)).clamp(max=max_impact_speed)  # capped
             speed_w = (
                 config.proximity_speed_floor + config.proximity_speed_scale * closing
             ).clamp(min=0.0)

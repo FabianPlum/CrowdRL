@@ -264,6 +264,15 @@ def compute_rewards(
     n_agents = len(positions)
     rewards = np.zeros(n_agents, dtype=np.float64)
 
+    # Numerical safety for the velocity-weighted penalties below: sanitize the
+    # pre-contact velocity snapshot -- a degenerate high-density pileup or a
+    # transient non-finite policy output could otherwise inject NaN/Inf into the
+    # reward and poison training -- and cap the impact speed that scales them so
+    # a blowup can never produce an unbounded multiplier.
+    max_impact_speed = 10.0  # m/s, a safety ceiling well above any physical closing
+    if collision_velocities is not None:
+        collision_velocities = np.nan_to_num(collision_velocities, nan=0.0, posinf=0.0, neginf=0.0)
+
     # Goal distances
     goal_diffs = goal_positions - positions
     goal_distances = np.linalg.norm(goal_diffs, axis=1)
@@ -303,7 +312,7 @@ def compute_rewards(
             & active_mask[np.newaxis, :]
         )
         closing = np.where(near, np.maximum(closing, 0.0), 0.0)
-        impact_speed = closing.max(axis=1)  # worst closing speed per agent
+        impact_speed = np.minimum(closing.max(axis=1), max_impact_speed)  # worst closing (capped)
         speed_scale = np.maximum(
             config.collision_speed_floor + config.collision_speed_scale * impact_speed, 0.0
         )
@@ -332,7 +341,7 @@ def compute_rewards(
             # drifting into it. wall_collision_mask already implies into-wall
             # motion the boundary had to cancel.
             vel = collision_velocities if collision_velocities is not None else velocities
-            own_speed = np.linalg.norm(vel, axis=1)
+            own_speed = np.minimum(np.linalg.norm(vel, axis=1), max_impact_speed)
             wall_scale = np.maximum(
                 config.collision_speed_floor + config.collision_speed_scale * own_speed, 0.0
             )
@@ -371,7 +380,9 @@ def compute_rewards(
             vel = collision_velocities if collision_velocities is not None else velocities
             diff_unit = diff / np.maximum(pair_dist[..., np.newaxis], 1e-9)
             rel_vel = vel[:, np.newaxis, :] - vel[np.newaxis, :, :]  # v_i - v_j
-            closing = np.sum(rel_vel * diff_unit, axis=-1)  # (n, n), >0 approaching
+            closing = np.minimum(
+                np.sum(rel_vel * diff_unit, axis=-1), max_impact_speed
+            )  # (n, n), >0 approaching (capped)
             speed_w = np.maximum(
                 config.proximity_speed_floor + config.proximity_speed_scale * closing, 0.0
             )
