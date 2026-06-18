@@ -59,3 +59,6 @@ results_*/
 
 # Diagnostic output directories (per-checkpoint analysis dumps)
 diagnostic_*/
+
+# Claude Code (personal/local settings; the shared .claude/CLAUDE.md stays tracked)
+.claude/settings*.json
