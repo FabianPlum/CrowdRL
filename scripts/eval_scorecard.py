@@ -12,8 +12,8 @@ WITHOUT the other axes worsening.
 
 Usage:
   uv run python scripts/eval_scorecard.py \
-      --config configs/exp_nogoaldir_stable_bigrooms_Aplus.yaml \
-      --checkpoint results_exp_nogoaldir_stable_bigrooms_Aplus/checkpoint_rollout_0300.pt \
+      --config configs/baseline.yaml \
+      --checkpoint results_baseline/checkpoint_rollout_0300.pt \
       [--max-steps 1500] [--json results_.../scorecard_r0300.json]
 """
 

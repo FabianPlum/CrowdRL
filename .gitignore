@@ -65,3 +65,20 @@ diagnostic_*/
 
 # Claude Code (personal/local settings; the shared .claude/CLAUDE.md stays tracked)
 .claude/settings*.json
+
+# Experimental configs are kept LOCAL (untracked). Lineage + learnings recorded in
+# plan/agent_dynamics_refactor_merge_review.md. Only the baseline + canonical
+# templates are tracked; new exp_/smoke_ configs are auto-ignored (use `git add -f`
+# to deliberately track a new one).
+configs/*.yaml
+!configs/baseline.yaml
+!configs/full_training.yaml
+!configs/smoke_baseline.yaml
+
+# One-off experiment launcher (hardcodes a local config + checkpoint path)
+sc_uv_crowdrl/run_nomemory.sbatch
+
+# Local result archives / run backups (kept locally, not tracked)
+*.zip
+*.bak*
+MOST_PROMISING_*/

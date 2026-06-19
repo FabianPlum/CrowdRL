@@ -7,10 +7,10 @@ touches the GPUs -- safe to run alongside live GPU training.
 
 Usage:
   uv run python scripts/render_cpu.py \
-      --config configs/exp_coupling_smoothoff.yaml \
-      --checkpoint results_exp_coupling_smoothoff/checkpoint_rollout_0500.pt \
-      --out results_exp_coupling_smoothoff/viz_r500_tier3B.mp4 \
-      --label "smoothness OFF"
+      --config configs/baseline.yaml \
+      --checkpoint results_baseline/checkpoint_rollout_0500.pt \
+      --out results_baseline/viz_r500_tier3B.mp4 \
+      --label "baseline"
 """
 
 from __future__ import annotations
