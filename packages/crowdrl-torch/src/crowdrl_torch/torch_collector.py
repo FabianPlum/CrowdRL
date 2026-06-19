@@ -14,6 +14,8 @@ not in the per-step hot path.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 
@@ -24,6 +26,93 @@ from crowdrl_train.normalizer import RewardNormalizer
 from crowdrl_torch.batched_env import BatchedTorchEnv
 from crowdrl_torch.normalizer import TorchRunningNormalizer
 from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
+
+# Diagnostic NaN tripwire (CROWDRL_NAN_TRIPWIRE=1). The collect loop checks every
+# tensor crossing the Python boundary -- raw obs -> normalized obs -> policy
+# action -> reward -> next env state -- in that order, so the FIRST stage to go
+# non-finite is where the NaN is BORN (bisects obs vs normalizer vs policy vs
+# reward vs dynamics). On a hit it prints a localized report (which obs feature
+# cols, which env/agent), dumps the offending env's full state to /tmp for
+# instant offline replay, and stops. Default OFF -> zero effect on real runs.
+_NAN_TRIPWIRE = os.environ.get("CROWDRL_NAN_TRIPWIRE", "") == "1"
+
+
+def _nan_tripwire(stage, named_tensors, loop_step, env_state=None):
+    """If any named tensor is non-finite, report + dump + SystemExit.
+
+    One GPU sync in the common (all-finite) case; the per-tensor breakdown only
+    runs once, on the failing step.
+    """
+    checks = [torch.isfinite(t).all() for t in named_tensors.values() if t is not None]
+    if not checks or bool(torch.stack(checks).all().item()):
+        return  # all finite -- single sync, no further work
+
+    for name, t in named_tensors.items():
+        if t is None or bool(torch.isfinite(t).all()):
+            continue
+        bad = ~torch.isfinite(t)
+        first = bad.nonzero(as_tuple=False)[0].tolist()
+        env_i = first[0]
+        lines = [
+            "\n" + "#" * 76,
+            f"# NAN TRIPWIRE @ stage='{stage}'  loop_step={loop_step}",
+            f"# tensor '{name}'  shape={tuple(t.shape)}  n_non_finite={int(bad.sum())}",
+            f"# first non-finite index {first}",
+        ]
+        if t.dim() == 3:  # (E, N, D) obs-like -> which feature columns
+            feats = bad.any(dim=0).any(dim=0).nonzero(as_tuple=False).flatten().tolist()
+            agents = bad[env_i].any(dim=-1).nonzero(as_tuple=False).flatten().tolist()
+            lines.append(f"# non-finite FEATURE cols (of D={t.shape[2]}): {feats}")
+            lines.append(f"# affected agents in env {env_i}: {agents[:16]}")
+        else:
+            lines.append(f"# first bad rows: {bad.nonzero(as_tuple=False)[:16].tolist()}")
+        lines.append("#" * 76)
+        print("\n".join(lines), flush=True)
+
+        try:
+            dump = {
+                "stage": stage,
+                "tensor_name": name,
+                "loop_step": loop_step,
+                "first_index": first,
+                f"tensor_{name}_env{env_i}": t[env_i].detach().cpu(),
+            }
+            if env_state is not None:
+                for attr in (
+                    "positions",
+                    "velocities",
+                    "torso_orientations",
+                    "head_orientations",
+                    "goal_positions",
+                    "active_mask",
+                    "n_agents",
+                    "shoulder_widths",
+                    "chest_depths",
+                    "wall_segments",
+                    "n_segments",
+                    "waypoints",
+                    "waypoint_cursor",
+                    "n_waypoints",
+                    "step_count",
+                    # World-GENERATION characterization: the initial spawn/goal
+                    # layout (not the moved positions), so the offending world can
+                    # be analyzed as a generation artifact, not just a failing step.
+                    "spawn_positions",
+                    "initial_goal_distances",
+                    "preferred_speeds",
+                    "masses",
+                    "prev_nav_distances",
+                    "cumulative_path_length",
+                ):
+                    v = getattr(env_state, attr, None)
+                    if torch.is_tensor(v):
+                        dump[f"state_{attr}"] = v[env_i].detach().cpu()
+            torch.save(dump, "/tmp/crowdrl_nan_dump.pt")
+            print(f"# dumped offending env {env_i} state -> /tmp/crowdrl_nan_dump.pt", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"# (state dump failed: {exc})", flush=True)
+
+        raise SystemExit(f"NaN tripwire: non-finite '{name}' at stage='{stage}'")
 
 
 class TorchRolloutCollector:
@@ -136,7 +225,9 @@ class TorchRolloutCollector:
         steps_collected = 0
         t = 0  # global timestep counter (within this collect)
 
+        _tw_step = 0
         while steps_collected < n_agent_steps:
+            _tw_step += 1
             # --- Agent masks (numpy, computed once) ---
             agent_mask = agent_idx < n_agents_t[:, None]  # (E, N) bool
             active_np = self.env.states.active_mask.cpu().numpy()  # (E, N)
@@ -152,6 +243,14 @@ class TorchRolloutCollector:
             else:
                 obs_norm_t = obs_t
 
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "pre_forward",
+                    {"obs_raw": obs_t, "obs_norm": obs_norm_t},
+                    _tw_step,
+                    self.env.states,
+                )
+
             # --- Forward pass on device (all E*N slots) ---
             with torch.no_grad():
                 flat_obs = obs_norm_t.reshape(-1, D)
@@ -159,11 +258,32 @@ class TorchRolloutCollector:
                     self.actor_critic.get_action_and_value(flat_obs)
                 )
 
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "post_forward",
+                    {"actions": actions_t, "actions_raw": actions_raw_t, "values": values_t},
+                    _tw_step,
+                    self.env.states,
+                )
+
             # --- Step all envs on device ---
             actions_gpu = actions_t.reshape(E, N, A)
             self.env.states, obs_t, rewards_t, terminated_t, truncated_t, reward_components_t = (
                 self.env.step(actions_gpu)
             )
+
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "post_step",
+                    {
+                        "rewards": rewards_t,
+                        "obs_next": obs_t,
+                        "state_velocities": self.env.states.velocities,
+                        "state_positions": self.env.states.positions,
+                    },
+                    _tw_step,
+                    self.env.states,
+                )
 
             # --- Single bulk transfer to CPU ---
             obs_norm_np = obs_norm_t.cpu().numpy()  # (E, N, D)
