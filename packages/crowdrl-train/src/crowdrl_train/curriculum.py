@@ -128,6 +128,8 @@ class CurriculumManager:
                 max_speed=base_config.spawn.max_speed,
                 min_spawn_separation=base_config.spawn.min_spawn_separation,
                 max_spawn_attempts=base_config.spawn.max_spawn_attempts,
+                min_spawn_goal_distance=base_config.spawn.min_spawn_goal_distance,
+                max_goal_attempts=base_config.spawn.max_goal_attempts,
             ),
             solvability_mode=base_config.solvability_mode,
             max_unsolvable_fraction=base_config.max_unsolvable_fraction,

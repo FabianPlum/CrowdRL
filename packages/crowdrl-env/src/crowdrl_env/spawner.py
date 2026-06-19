@@ -63,6 +63,20 @@ class SpawnConfig:
     max_spawn_attempts: int = 50
     """Maximum rejection-sampling attempts per agent before giving up."""
 
+    min_spawn_goal_distance: float = 3.0
+    """Minimum distance (metres) between an agent's spawn and its goal.
+
+    Goals are sampled per agent independently of spawns, and for several tiers
+    the spawn and goal regions are the SAME walkable polygon, so without this a
+    goal can land on top of its spawn (a trivial/degenerate task). Enforced via
+    rejection sampling with a farthest-of-attempts fallback for geometries too
+    small to satisfy it.
+    """
+
+    max_goal_attempts: int = 32
+    """Maximum rejection-sampling attempts per goal to satisfy
+    ``min_spawn_goal_distance`` before falling back to the farthest candidate."""
+
 
 @dataclass
 class SpawnResult:
@@ -177,17 +191,31 @@ def spawn_agents(
         masses = masses[:actual_n]
         preferred_speeds = preferred_speeds[:actual_n]
 
-    # Sample goal positions (one per agent, randomly from goal regions)
+    # Sample goal positions (one per agent), enforcing a minimum spawn->goal
+    # distance. Goals are drawn independently of spawns and for several tiers the
+    # spawn and goal regions are the SAME polygon, so a goal can otherwise land on
+    # a spawn (init_goal_distance ~= 0 -> trivial task + huge temporal-memory obs
+    # ratios). Reject-sample per agent; if a geometry is too small to satisfy the
+    # distance within max_goal_attempts, keep the FARTHEST candidate seen.
     goal_kw: dict = {}
     if walkable is not None:
         goal_kw = {"margin": max_body_radius, "walkable": walkable}
-    goal_positions = np.array(
-        [
-            sample_point_in_polygon(goal_regions[rng.integers(len(goal_regions))], rng, **goal_kw)
-            for _ in range(actual_n)
-        ],
-        dtype=np.float64,
-    )
+    min_sg = config.min_spawn_goal_distance
+    goal_positions = np.empty((actual_n, 2), dtype=np.float64)
+    for i in range(actual_n):
+        spawn_i = positions[i]
+        chosen = None
+        best, best_d = None, -1.0
+        for _ in range(config.max_goal_attempts):
+            region = goal_regions[rng.integers(len(goal_regions))]
+            cand = sample_point_in_polygon(region, rng, **goal_kw)
+            d = float(np.hypot(cand[0] - spawn_i[0], cand[1] - spawn_i[1]))
+            if d >= min_sg:
+                chosen = cand
+                break
+            if d > best_d:
+                best_d, best = d, cand
+        goal_positions[i] = chosen if chosen is not None else best
 
     # Initial orientation: face toward goal
     diff = goal_positions - positions
