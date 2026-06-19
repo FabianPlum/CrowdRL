@@ -8,6 +8,7 @@ dependencies = [
     "gymnasium>=1.0",
     "matplotlib>=3.8",
     "imageio-ffmpeg>=0.5",
+    "h5py>=3",
 ]
 
 [project.optional-dependencies]
