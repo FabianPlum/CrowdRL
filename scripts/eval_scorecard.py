@@ -48,6 +48,12 @@ def main() -> None:
     )
     ap.add_argument("--freeze-speed", type=float, default=0.1)
     ap.add_argument("--json", default=None, help="Optional path to dump the scorecard as JSON.")
+    ap.add_argument(
+        "--export-h5-dir",
+        default=None,
+        help="If set, also write a Kinora/pedpy HDF5 per scenario into this directory "
+        "(<label>_a<agents>_s<seed>.h5) so scenarios can be viewed in Kinora.",
+    )
     args = ap.parse_args()
 
     device = torch.device("cpu")
@@ -72,6 +78,7 @@ def main() -> None:
         device=device,
         max_steps=args.max_steps,
         freeze_speed=args.freeze_speed,
+        export_h5_dir=Path(args.export_h5_dir) if args.export_h5_dir else None,
     )
 
     print(f"\n[scorecard] {args.checkpoint}")
