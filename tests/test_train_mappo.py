@@ -23,7 +23,32 @@ from train_mappo import (  # noqa: E402
     _render_command,
     _resolve_render_interval,
     _scorecard_command,
+    build_env_config,
 )
+
+
+class TestBuildEnvConfigSpeed:
+    """max_forward_speed / max_backward_speed must propagate from YAML all the
+    way to the torch EnvConfig the training loop uses. build_env_config uses an
+    explicit per-field .get() allowlist, so a field that is NOT listed silently
+    falls back to the dataclass default no matter what the YAML says (the
+    velocity-weighting no-op bug). Guard the speed caps against that."""
+
+    def _torch_cfg(self, action_overrides: dict):
+        from crowdrl_torch.types import EnvConfig
+
+        crowd = build_env_config({"action": action_overrides})
+        return EnvConfig.from_crowd_env_config(crowd, max_agents=8, max_segments=64)
+
+    def test_speed_caps_propagate_from_yaml(self):
+        tc = self._torch_cfg({"max_forward_speed": 1.2, "max_backward_speed": 0.3})
+        assert tc.max_forward_speed == 1.2
+        assert tc.max_backward_speed == 0.3
+
+    def test_speed_caps_default_when_absent(self):
+        tc = self._torch_cfg({})
+        assert tc.max_forward_speed == 2.0
+        assert tc.max_backward_speed == 0.5
 
 
 # A minimal stand-in for CurriculumPhase -- the helper only reads `.name`.

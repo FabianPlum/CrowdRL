@@ -149,6 +149,8 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             # Layer 1 defaults: 115 / 57 / 172 deg/s at dt=0.01s.
             # Historical YAMLs set these to 15.0 deg/step explicitly,
             # giving the pre-Layer-1 1500 deg/s rates.
+            max_forward_speed=act.get("max_forward_speed", 2.0),
+            max_backward_speed=act.get("max_backward_speed", 0.5),
             max_heading_change=np.radians(act.get("max_heading_change_deg", 1.146)),
             max_torso_change=np.radians(act.get("max_torso_change_deg", 0.573)),
             max_head_change=np.radians(act.get("max_head_change_deg", 1.719)),
