@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 # cross-rank sync. Default OFF.
 _NORM_TRIPWIRE = os.environ.get("CROWDRL_NAN_TRIPWIRE", "") == "1"
 
+# Cap on the running sample count -- prevents float64 overflow of m_a = var*count.
+# sync_across_ranks() re-sums the merged count every rollout, so without a cap the
+# count grows GEOMETRICALLY (~doubles per rollout, since both ranks carry the full
+# merged total) and crosses ~1e307 in a few hundred rollouts -> var*count -> inf
+# -> var NaN -> every normalized obs NaN -> run death (the deterministic r355
+# collapse). The count only sets the Welford update weight (batch/count), so
+# capping it just makes the normalizer a stable large-window estimator -- which
+# is also the intended near-frozen behaviour once the obs distribution settles.
+_MAX_COUNT = 1e8
+
 
 def _norm_is_poisoned(norm) -> bool:
     """One GPU sync: are the running stats non-finite OR runaway-huge?
@@ -166,7 +176,7 @@ class TorchRunningNormalizer:
 
         self.mean = new_mean
         self.var = m2 / total_count
-        self.count = total_count
+        self.count = min(total_count, _MAX_COUNT)
 
     def normalize(self, x: Tensor | np.ndarray) -> Tensor | np.ndarray:
         """Normalize input. Accepts and returns tensors or numpy arrays.
@@ -204,7 +214,10 @@ class TorchRunningNormalizer:
         """Restore from checkpoint."""
         self.mean = torch.tensor(state["mean"], dtype=torch.float64, device=self.device)
         self.var = torch.tensor(state["var"], dtype=torch.float64, device=self.device)
-        self.count = state["count"]
+        # Cap a possibly-overflowed count from a checkpoint trained before the cap
+        # existed (the runaway-count bug inflated it past 1e300), so the first
+        # update's m_a = var*count cannot overflow.
+        self.count = min(float(state["count"]), _MAX_COUNT)
 
     def sync_across_ranks(self) -> None:
         """Merge running statistics across DDP ranks via parallel Welford.
@@ -244,7 +257,7 @@ class TorchRunningNormalizer:
 
         self.mean = new_mean
         self.var = new_var
-        self.count = total_count.item()
+        self.count = min(total_count.item(), _MAX_COUNT)
 
         if _NORM_TRIPWIRE and _norm_is_poisoned(self):
             _dump_norm_poison(

@@ -51,6 +51,32 @@ def test_normalize_finite_after_poison_attempt():
     assert torch.isfinite(out).all()
 
 
+def test_running_count_capped_no_overflow():
+    """The DDP sync re-sums the merged count every rollout, so an UNCAPPED count
+    grows geometrically to ~1e305 -- then m_a = var*count overflows to inf and
+    var -> NaN -> every normalized obs NaN (the deterministic r355 collapse).
+    The count must be capped so stats stay finite, even from a checkpoint whose
+    count already overflowed under the old bug."""
+    from crowdrl_torch.normalizer import _MAX_COUNT
+
+    norm = TorchRunningNormalizer(shape=(4,), device="cpu")
+    norm.update(torch.randn(500, 4) * 3.0)  # realistic per-feature variance ~9
+
+    # A checkpoint saved before the cap existed: its count had run away.
+    st = norm.state_dict()
+    st["count"] = 1e307  # var(~9) * 1e307 ~ 1e308 -> would overflow without the cap
+    norm.load_state_dict(st)
+    assert norm.count <= _MAX_COUNT, "load_state_dict must cap an overflowed count"
+
+    # Subsequent updates (the collect loop) stay finite and bounded.
+    for _ in range(50):
+        norm.update(torch.randn(1000, 4) * 3.0)
+        assert norm.count <= _MAX_COUNT
+    assert torch.isfinite(norm.mean).all()
+    assert torch.isfinite(norm.var).all()
+    assert torch.isfinite(norm.normalize(torch.randn(4))).all()
+
+
 # --- batched_step finite-state invariant --------------------------------------
 
 
