@@ -29,6 +29,7 @@ import torch
 
 from crowdrl_env.crowd_env import CrowdEnv
 from crowdrl_env.geometry_generator import GeometryTier
+from crowdrl_env.kinora_export import write_episode_h5
 from crowdrl_env.spawner import SpawnConfig
 from crowdrl_env.visualiser import collect_episode_frames, render_episode_video
 from crowdrl_train.networks import ActorCritic
@@ -103,6 +104,27 @@ def main() -> None:
         f"[render_cpu] timing: sim {t_sim:.1f}s + encode {t_enc:.1f}s = "
         f"{t_sim + t_enc:.1f}s total  ({frames.n_frames} frames, {frames.n_agents} agents)"
     )
+
+    # Always also write the Kinora/pedpy HDF5 next to the video, so the same
+    # episode can be opened in Kinora (/home/fabi/dev/Kinora), not just the MP4.
+    # Derive the path from the ORIGINAL --out (not render_episode_video's return,
+    # which becomes .gif on the ffmpeg fallback) so it is always a sibling .h5.
+    h5_path = Path(args.out).with_suffix(".h5")
+    t_h5_0 = time.perf_counter()
+    h5_out = write_episode_h5(
+        frames,
+        h5_path,
+        metadata={
+            "checkpoint": args.checkpoint,
+            "config": args.config,
+            "label": args.label,
+            "agents": list(args.agents),
+            "seed": args.seed,
+            "ckpt_tag": ckpt_tag,
+        },
+    )
+    t_h5 = time.perf_counter() - t_h5_0
+    print(f"[render_cpu] WROTE {h5_out}  (Kinora/pedpy HDF5, {t_h5:.1f}s)")
 
 
 if __name__ == "__main__":
