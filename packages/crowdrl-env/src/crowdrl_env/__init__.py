@@ -8,6 +8,11 @@ from crowdrl_env.geometry_generator import (
     GeometryTier,
     generate_geometry,
 )
+from crowdrl_env.kinora_export import (
+    OptionalChannels,
+    write_episode_h5,
+    write_trajectory_h5,
+)
 from crowdrl_env.reward import RewardConfig, RewardState, compute_rewards
 from crowdrl_env.solvability import SolvabilityMode, verify_solvability
 from crowdrl_env.spawner import SpawnConfig, SpawnResult, spawn_agents
@@ -18,6 +23,7 @@ __all__ = [
     "GeneratedGeometry",
     "GeometryConfig",
     "GeometryTier",
+    "OptionalChannels",
     "RewardConfig",
     "RewardState",
     "SolvabilityMode",
@@ -29,4 +35,6 @@ __all__ = [
     "generate_geometry",
     "spawn_agents",
     "verify_solvability",
+    "write_episode_h5",
+    "write_trajectory_h5",
 ]
