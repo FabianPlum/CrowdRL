@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from pathlib import Path
 
 from crowdrl_env.crowd_env import CrowdEnv, CrowdEnvConfig
 from crowdrl_env.eval_metrics import aggregate_metrics, compute_episode_metrics
 from crowdrl_env.geometry_generator import GeometryTier
+from crowdrl_env.kinora_export import write_episode_h5
 from crowdrl_env.visualiser import collect_episode_frames
 
 
@@ -93,6 +95,7 @@ def run_scorecard_policy(
     scenarios: list[ScenarioSpec] | None = None,
     max_steps: int | None = None,
     freeze_speed: float = 0.1,
+    export_h5_dir: Path | None = None,
 ) -> dict:
     """Run ``actor_critic`` through ``scenarios`` and return a structured scorecard.
 
@@ -110,6 +113,10 @@ def run_scorecard_policy(
         Per-episode cap; None uses each env config's ``max_steps``.
     freeze_speed : float
         Threshold forwarded to :func:`compute_episode_metrics`.
+    export_h5_dir : Path or None
+        If set, also write a Kinora/pedpy HDF5 per scenario into this directory
+        (``<label>_a<n_agents>_s<seed>.h5``) for visualisation. Default None leaves
+        the scorecard metrics-only (no behaviour change).
 
     Returns
     -------
@@ -131,6 +138,17 @@ def run_scorecard_policy(
             max_steps=max_steps if max_steps is not None else env.config.max_steps,
             deterministic=True,
         )
+        if export_h5_dir is not None:
+            write_episode_h5(
+                frames,
+                Path(export_h5_dir) / f"{spec.label}_a{spec.n_agents}_s{spec.seed}.h5",
+                metadata={
+                    "scenario": spec.label,
+                    "tier": spec.tier.name,
+                    "n_agents": spec.n_agents,
+                    "seed": spec.seed,
+                },
+            )
         metrics = compute_episode_metrics(frames, freeze_speed=freeze_speed)
         per_scenario.append(
             {
