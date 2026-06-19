@@ -18,7 +18,37 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from train_mappo import _load_history_and_infer_rollout  # noqa: E402
+from train_mappo import (  # noqa: E402
+    _load_history_and_infer_rollout,
+    _render_command,
+    _resolve_render_interval,
+    _scorecard_command,
+    build_env_config,
+)
+
+
+class TestBuildEnvConfigSpeed:
+    """max_forward_speed / max_backward_speed must propagate from YAML all the
+    way to the torch EnvConfig the training loop uses. build_env_config uses an
+    explicit per-field .get() allowlist, so a field that is NOT listed silently
+    falls back to the dataclass default no matter what the YAML says (the
+    velocity-weighting no-op bug). Guard the speed caps against that."""
+
+    def _torch_cfg(self, action_overrides: dict):
+        from crowdrl_torch.types import EnvConfig
+
+        crowd = build_env_config({"action": action_overrides})
+        return EnvConfig.from_crowd_env_config(crowd, max_agents=8, max_segments=64)
+
+    def test_speed_caps_propagate_from_yaml(self):
+        tc = self._torch_cfg({"max_forward_speed": 1.2, "max_backward_speed": 0.3})
+        assert tc.max_forward_speed == 1.2
+        assert tc.max_backward_speed == 0.3
+
+    def test_speed_caps_default_when_absent(self):
+        tc = self._torch_cfg({})
+        assert tc.max_forward_speed == 2.0
+        assert tc.max_backward_speed == 0.5
 
 
 # A minimal stand-in for CurriculumPhase -- the helper only reads `.name`.
@@ -222,3 +252,72 @@ class TestCliArgumentValidation:
         # results_dir does not exist, so no checkpoint -> FileNotFoundError
         with pytest.raises(FileNotFoundError, match="no checkpoint found"):
             train_worker(cfg, results_dir, resume_training=True)
+
+
+class TestResolveRenderInterval:
+    """Effective training-time render interval (must align with checkpoints)."""
+
+    def test_disabled_by_default(self):
+        assert _resolve_render_interval(False, 0, 100) == 0
+
+    def test_disabled_even_if_interval_set(self):
+        assert _resolve_render_interval(False, 100, 100) == 0
+
+    def test_defaults_to_checkpoint_interval(self):
+        assert _resolve_render_interval(True, 0, 100) == 100
+
+    def test_custom_multiple_kept(self):
+        assert _resolve_render_interval(True, 500, 100) == 500
+
+    def test_non_multiple_snaps_to_checkpoint(self):
+        assert _resolve_render_interval(True, 150, 100) == 100
+
+    def test_no_checkpoints_disables(self):
+        # Renders load the on-disk checkpoint; with checkpointing off there is
+        # nothing to render from.
+        assert _resolve_render_interval(True, 100, 0) == 0
+
+
+class TestRenderCommand:
+    """The CPU-render subprocess argv is well-formed."""
+
+    def test_command_shape(self, tmp_path: Path):
+        cmd = _render_command(
+            tmp_path / "config_resolved.yaml",
+            tmp_path / "checkpoint_rollout_0200.pt",
+            tmp_path / "viz_r0200_tier3B.mp4",
+            "exp_label",
+        )
+        assert cmd[0] == sys.executable
+        assert cmd[1].replace("\\", "/").endswith("scripts/render_cpu.py")
+        # Flags present and paired with the right values.
+        for flag, val in (
+            ("--config", str(tmp_path / "config_resolved.yaml")),
+            ("--checkpoint", str(tmp_path / "checkpoint_rollout_0200.pt")),
+            ("--out", str(tmp_path / "viz_r0200_tier3B.mp4")),
+            ("--label", "exp_label"),
+        ):
+            assert flag in cmd
+            assert cmd[cmd.index(flag) + 1] == val
+
+
+class TestScorecardCommand:
+    """The CPU-scorecard subprocess argv is well-formed."""
+
+    def test_command_shape(self, tmp_path: Path):
+        cmd = _scorecard_command(
+            tmp_path / "config_resolved.yaml",
+            tmp_path / "checkpoint_rollout_0200.pt",
+            tmp_path / "scorecard_r0200.json",
+            1500,
+        )
+        assert cmd[0] == sys.executable
+        assert cmd[1].replace("\\", "/").endswith("scripts/eval_scorecard.py")
+        for flag, val in (
+            ("--config", str(tmp_path / "config_resolved.yaml")),
+            ("--checkpoint", str(tmp_path / "checkpoint_rollout_0200.pt")),
+            ("--json", str(tmp_path / "scorecard_r0200.json")),
+            ("--max-steps", "1500"),
+        ):
+            assert flag in cmd
+            assert cmd[cmd.index(flag) + 1] == val

@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 
+from crowdrl_core.observation import ObsConfig
+
 from crowdrl_env.crowd_env import CrowdEnv, CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, GeometryTier
 from crowdrl_env.reward import RewardConfig
@@ -235,3 +237,404 @@ class TestPhysics:
         # No NaN or inf in positions
         assert np.all(np.isfinite(env._world.positions))
         assert np.all(np.isfinite(env._world.velocities))
+
+
+class TestTemporalMemory:
+    """End-to-end tests for the Option A temporal-memory observation features."""
+
+    @staticmethod
+    def _build_env(W=4, max_steps=50, dt=0.01):
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(3, 5), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_temporal_memory=True,
+                temporal_memory_window=W,
+                temporal_memory_max_steps=max_steps,
+                temporal_memory_dt=dt,
+            ),
+            max_steps=max_steps,
+            dt=dt,
+        )
+        return CrowdEnv(config=cfg, seed=7)
+
+    def test_obs_dim_includes_memory(self):
+        env = self._build_env()
+        obs, _ = env.reset()
+        # 8 ego + 8*7 social + 16 rays + 6 memory = 86
+        assert env.config.obs.obs_dim == 86
+        assert obs.shape[1] == 86
+
+    def test_reset_initialises_memory_state(self):
+        env = self._build_env()
+        env.reset()
+        world = env._world
+        assert world.spawn_positions is not None
+        assert world.initial_goal_distances is not None
+        assert world.cumulative_path_length is not None
+        assert world.pos_history is not None
+        assert world.gdist_history is not None
+        # Spawn matches current positions at t=0
+        np.testing.assert_array_equal(world.spawn_positions, world.positions)
+        # Cumulative path length starts at zero
+        assert np.all(world.cumulative_path_length == 0.0)
+        # Ring buffer pre-filled with spawn positions
+        n = world.n_agents
+        buf_size = env.config.obs.temporal_memory_window + 1
+        for t in range(buf_size):
+            np.testing.assert_array_equal(world.pos_history[:, t, :], world.positions[:n])
+
+    def test_features_at_reset_all_zero(self):
+        env = self._build_env()
+        obs, _ = env.reset()
+        # Last 6 dims are the memory block
+        memory = obs[:, -6:]
+        # Active agents should have zero memory features at t=0 since nothing
+        # has moved yet. Inactive rows are zero everywhere regardless.
+        for i in range(env.n_agents):
+            if env._active_mask[i]:
+                np.testing.assert_allclose(memory[i], 0.0, atol=1e-9)
+
+    def test_step_advances_cumulative_path(self):
+        env = self._build_env()
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # Forward
+        for _ in range(10):
+            env.step(actions)
+        # At least one agent moved a non-trivial distance
+        assert np.any(env._world.cumulative_path_length > 0.01)
+        # step_count tracks the episode step
+        assert env._world.step_count == 10
+
+    def test_elapsed_fraction_in_obs(self):
+        max_steps = 40
+        env = self._build_env(max_steps=max_steps)
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        for _ in range(10):
+            obs, *_ = env.step(actions)
+        # elapsed_fraction is memory feature index 3 = obs[:, -3]
+        for i in range(n):
+            if env._active_mask[i]:
+                assert abs(obs[i, -3] - 10 / max_steps) < 1e-6
+
+    def test_window_features_eventually_nonzero(self):
+        W = 4
+        env = self._build_env(W=W, dt=0.1, max_steps=50)
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # push forward
+        # Step for W+2 simulation steps so the ring buffer has fully filled
+        for _ in range(W + 2):
+            obs, *_ = env.step(actions)
+
+        # At least one active agent should show non-zero displacement window
+        any_disp = False
+        for i in range(n):
+            if env._active_mask[i]:
+                if abs(obs[i, -2]) > 1e-6 or abs(obs[i, -1]) > 1e-6:
+                    any_disp = True
+                    break
+        assert any_disp, "Expected non-zero window features after W+2 forward steps"
+
+    def test_memory_features_finite_during_rollout(self):
+        env = self._build_env()
+        env.reset()
+        n = env.n_agents
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(30):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs)), "observations must stay finite"
+
+
+class TestNeighborMemoryWiring:
+    """End-to-end wiring tests for the persistent neighbor-ID matcher.
+
+    Commit 2 of plan/neighbor_memory_extension.md: the matcher runs every
+    step when ``use_neighbor_memory`` is True, the slots stay stable across
+    steps for agents that remain in range, and commits 3-5 will read from
+    this table for observation features.
+    """
+
+    @staticmethod
+    def _build_env(use_neighbor_memory=True):
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=use_neighbor_memory,
+                neighbor_sensing_radius=5.0,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        return CrowdEnv(config=cfg, seed=11)
+
+    def test_disabled_leaves_neighbor_ids_as_none(self):
+        env = self._build_env(use_neighbor_memory=False)
+        env.reset()
+        assert env._world.neighbor_ids is None
+
+    def test_reset_populates_neighbor_ids(self):
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        nids = env._world.neighbor_ids
+        assert nids is not None
+        assert nids.shape == (env.n_agents, env.config.obs.k_neighbours)
+        assert nids.dtype == np.int32
+        # With >= 2 active agents there should be at least one non-empty slot
+        active_rows = nids[env._active_mask]
+        assert (active_rows >= 0).any(), "expected at least one populated slot after reset"
+
+    def test_step_updates_neighbor_ids(self):
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        pre = env._world.neighbor_ids.copy()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        env.step(actions)
+        post = env._world.neighbor_ids
+        assert post is not None
+        assert post.shape == pre.shape
+        # IDs must remain in [-1, n_agents). Values outside [-1, n-1] would be a bug.
+        n = env.n_agents
+        assert post.max() < n
+        assert post.min() >= -1
+
+    def test_no_self_assignment(self):
+        """An agent's own index must never appear in its own neighbor slots."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(5):
+            env.step(actions)
+            nids = env._world.neighbor_ids
+            for i in range(env.n_agents):
+                assert i not in nids[i], f"agent {i} appears in its own neighbor slots: {nids[i]}"
+
+    def test_vel_history_buffer_allocated_and_shaped(self):
+        """Ring buffer for neighbor velocities is allocated at reset."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        vh = env._world.neighbor_vel_history
+        assert vh is not None
+        W_n = env.config.obs.neighbor_vel_history_window
+        K = env.config.obs.k_neighbours
+        assert vh.shape == (env.n_agents, W_n + 1, K, 2)
+        # Fresh reset -> all zeros
+        assert np.all(vh == 0.0)
+
+    def test_vel_history_buffer_populated_after_step(self):
+        """After one step, at least one slot in the ring buffer holds a
+        non-zero velocity (because neighbors were assigned and moving)."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 1.0  # all agents push forward
+        env.step(actions)
+        vh = env._world.neighbor_vel_history
+        # Find the slot that was written (step_count - 1 % (W_n+1))
+        W_n = env.config.obs.neighbor_vel_history_window
+        write_idx = (1 - 1) % (W_n + 1)
+        written = vh[:, write_idx, :, :]
+        # At least one (agent, slot) pair should have a non-zero velocity
+        assert np.any(np.abs(written) > 1e-6), (
+            f"expected non-zero velocities at write slot {write_idx}"
+        )
+
+    def test_obs_dim_grows_by_k_times_2_with_vel_history(self):
+        """With both flags on, obs grows by exactly 2*K dims."""
+        base = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=False,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        on = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        k = on.obs.k_neighbours
+        assert on.obs.obs_dim == base.obs.obs_dim + 2 * k
+
+    def test_vel_history_feature_block_is_finite_after_steps(self):
+        """End-to-end: with vel history enabled, the feature block appears
+        at the right offset in the observation vector and stays finite."""
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        env = CrowdEnv(config=cfg, seed=11)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 1.0
+        for _ in range(10):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+            # Last 2*K dims are the vel-history block
+            k = env.config.obs.k_neighbours
+            nb_block = obs[:, -2 * k :]
+            # Sanity: active agents with neighbors should see at least one
+            # non-zero slot after the ring buffer fills.
+            assert nb_block.shape == (env.n_agents, 2 * k)
+
+    def test_aplusplus_obs_dim_and_finite_after_steps(self):
+        """A++ config (ego memory + neighbor vel history + neighbor
+        trajectory features) produces a 128-dim obs that stays finite."""
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=12.0),
+            spawn=SpawnConfig(n_agents_range=(5, 8), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_navmesh=True,
+                use_temporal_memory=True,
+                temporal_memory_window=10,
+                use_neighbor_memory=True,
+                use_neighbor_vel_history=True,
+                use_neighbor_trajectory_features=True,
+            ),
+            max_steps=50,
+            dt=0.01,
+        )
+        # 8 + 56 + 16 + 3 + 6 + 16 + 24 = 129
+        assert cfg.obs.obs_dim == 129
+        env = CrowdEnv(config=cfg, seed=17)
+        obs, _ = env.reset()
+        assert obs.shape[1] == 129
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.7
+        for _ in range(15):
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+
+    def test_vel_history_survives_forced_slot_reassignment(self):
+        """Regression test for a numpy broadcasting bug where boolean
+        indexing with a (n, K) mask into a (n, W_n+1, K, 2) history
+        array crashed with IndexError. Ensure the code path taken when
+        slot_changed.any() is True actually executes without error.
+
+        We build a high-density env and run enough steps for at least
+        one slot reassignment to happen.
+        """
+        cfg = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=8.0, max_side=10.0),
+            spawn=SpawnConfig(n_agents_range=(12, 18), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(
+                use_neighbor_memory=True,
+                neighbor_sensing_radius=3.0,  # tight radius -> easy to fall out of range
+                neighbor_vel_history_window=3,
+            ),
+            max_steps=50,
+            dt=0.1,  # big timestep so agents move a lot per step
+        )
+        env = CrowdEnv(config=cfg, seed=2026)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        # Alternate strong forward / strong turn to force reshuffling.
+        saw_reassignment = False
+        for step in range(30):
+            actions[:, 0] = 1.5
+            actions[:, 1] = 0.5 if step % 2 == 0 else -0.5
+            prev_nids = env._world.neighbor_ids.copy()
+            obs, *_ = env.step(actions)
+            assert np.all(np.isfinite(obs))
+            if not np.array_equal(prev_nids, env._world.neighbor_ids):
+                saw_reassignment = True
+        assert saw_reassignment, (
+            "test setup failed to force slot reassignment; raise action magnitude"
+        )
+
+    def test_vel_history_zero_for_empty_slot(self):
+        """Slots with neighbor_ids == -1 must hold zero velocities even
+        after several steps."""
+        env = self._build_env(use_neighbor_memory=True)
+        env.reset()
+        actions = np.zeros((env.n_agents, env.config.action.action_dim))
+        actions[:, 0] = 0.5
+        for _ in range(5):
+            env.step(actions)
+        vh = env._world.neighbor_vel_history  # (n, W_n+1, K, 2)
+        nids = env._world.neighbor_ids  # (n, K)
+        # For every (i, k) where nids[i, k] == -1, vh[i, :, k, :] must be zero.
+        for i in range(env.n_agents):
+            for k in range(env.config.obs.k_neighbours):
+                if nids[i, k] == -1:
+                    assert np.all(vh[i, :, k, :] == 0.0), (
+                        f"empty slot ({i}, {k}) has non-zero history"
+                    )
+
+
+class TestVelocityWeightedCollisionEnv:
+    """End-to-end smoke of the impact-speed-weighted penalty through step()."""
+
+    def _dense_env(self, velocity_weighted: bool):
+        # Many agents in a small Tier-0 field so collisions actually occur and
+        # the pre-contact velocity snapshot / collision_velocities path runs.
+        config = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=6.0, max_side=6.0),
+            spawn=SpawnConfig(n_agents_range=(12, 12), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            max_steps=40,
+            reward=RewardConfig(
+                use_velocity_weighted_collision=velocity_weighted,
+                collision_speed_floor=0.5,
+                collision_speed_scale=0.5,
+            ),
+        )
+        return CrowdEnv(config=config, seed=7)
+
+    def test_step_runs_and_rewards_finite_with_weighting(self):
+        env = self._dense_env(velocity_weighted=True)
+        env.reset()
+        n = env.n_agents
+        # Drive everyone forward at full desired speed so they pack together.
+        actions = np.zeros((n, env.config.action.action_dim))
+        actions[:, 0] = 1.0
+        for _ in range(env.config.max_steps):
+            _, rewards, _, _, _ = env.step(actions)
+            assert np.all(np.isfinite(rewards))
+
+    def test_weighting_changes_reward_stream_vs_binary(self):
+        # Same seed/scenario/actions; only the flag differs. Reshaping the
+        # collision cost must change the realised reward stream somewhere.
+        def run(weighted):
+            env = self._dense_env(velocity_weighted=weighted)
+            env.reset(seed=7)
+            n = env.n_agents
+            actions = np.zeros((n, env.config.action.action_dim))
+            actions[:, 0] = 1.0
+            total = 0.0
+            for _ in range(env.config.max_steps):
+                _, rewards, _, _, _ = env.step(actions)
+                total += float(rewards.sum())
+            return total
+
+        assert run(weighted=True) != pytest.approx(run(weighted=False))

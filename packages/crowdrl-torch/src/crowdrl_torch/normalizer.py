@@ -10,6 +10,7 @@ arrays with the same keys.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +20,78 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from crowdrl_train.normalizer import RunningNormalizer
+
+
+# Diagnostic (CROWDRL_NAN_TRIPWIRE=1): catch the EXACT step the running mean/var
+# first go non-finite -- in update() or the DDP merge -- with the batch that did
+# it (per-feature max|x|, worst row) and whether it was the local update or the
+# cross-rank sync. Default OFF.
+_NORM_TRIPWIRE = os.environ.get("CROWDRL_NAN_TRIPWIRE", "") == "1"
+
+# Cap on the running sample count -- prevents float64 overflow of m_a = var*count.
+# sync_across_ranks() re-sums the merged count every rollout, so without a cap the
+# count grows GEOMETRICALLY (~doubles per rollout, since both ranks carry the full
+# merged total) and crosses ~1e307 in a few hundred rollouts -> var*count -> inf
+# -> var NaN -> every normalized obs NaN -> run death (the deterministic r355
+# collapse). The count only sets the Welford update weight (batch/count), so
+# capping it just makes the normalizer a stable large-window estimator -- which
+# is also the intended near-frozen behaviour once the obs distribution settles.
+_MAX_COUNT = 1e8
+
+
+def _norm_is_poisoned(norm) -> bool:
+    """One GPU sync: are the running stats non-finite OR runaway-huge?
+
+    Flags non-finite mean/var, and also a variance that has exploded past 1e12
+    (std > 1e6 -- 1e10x a normal obs feature). Catching the runaway BEFORE it
+    saturates to inf/nan surfaces the batch that is actually driving it.
+    """
+    stacked = torch.stack([norm.mean, norm.var])
+    return (not bool(torch.isfinite(stacked).all().item())) or bool((norm.var > 1e12).any().item())
+
+
+def _dump_norm_poison(stage, norm, batch, batch_mean, batch_var, batch_count, **extra):
+    """Report + dump + SystemExit when the running stats first go non-finite."""
+    bad_mean = (~torch.isfinite(norm.mean)).nonzero(as_tuple=False).flatten().tolist()
+    bad_var = (~torch.isfinite(norm.var)).nonzero(as_tuple=False).flatten().tolist()
+    lines = [
+        "\n" + "@" * 78,
+        f"@ NORMALIZER POISONED @ stage='{stage}'",
+        f"@ count={norm.count:.6g}  batch_count={batch_count}  extra={extra}",
+        f"@ non-finite MEAN cols ({len(bad_mean)}/{norm.mean.numel()}): {bad_mean[:48]}",
+        f"@ non-finite VAR  cols ({len(bad_var)}/{norm.var.numel()}): {bad_var[:48]}",
+    ]
+    dump = {
+        "stage": stage,
+        "count": float(norm.count),
+        "batch_count": batch_count,
+        "bad_mean_feats": bad_mean,
+        "bad_var_feats": bad_var,
+        "mean": norm.mean.detach().cpu(),
+        "var": norm.var.detach().cpu(),
+        **extra,
+    }
+    if batch is not None:
+        bmax = batch.abs().max(dim=0).values  # (D,)
+        worst_feat = int(bmax.argmax())
+        worst_row = int(batch[:, worst_feat].abs().argmax())
+        top = sorted(range(batch.shape[1]), key=lambda i: -float(bmax[i]))[:8]
+        lines.append(f"@ batch max|x|={float(bmax.max()):.5g} at feature {worst_feat}")
+        lines.append(
+            f"@ batch top-8 features by max|x|: {[(f, round(float(bmax[f]), 3)) for f in top]}"
+        )
+        dump["batch_max_per_feat"] = bmax.detach().cpu()
+        dump["batch_worst_row"] = batch[worst_row].detach().cpu()
+        dump["batch_mean"] = None if batch_mean is None else batch_mean.detach().cpu()
+        dump["batch_var"] = None if batch_var is None else batch_var.detach().cpu()
+    lines.append("@" * 78)
+    print("\n".join(lines), flush=True)
+    try:
+        torch.save(dump, "/tmp/crowdrl_norm_poison.pt")
+        print("@ dumped -> /tmp/crowdrl_norm_poison.pt", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"@ (dump failed: {exc})", flush=True)
+    raise SystemExit(f"Normalizer stats went non-finite at stage='{stage}'")
 
 
 class TorchRunningNormalizer:
@@ -69,11 +142,25 @@ class TorchRunningNormalizer:
             batch = batch.unsqueeze(0)
         batch = batch.reshape(-1, *self.shape)
 
+        # Drop any non-finite samples. A single NaN/Inf observation must never
+        # permanently poison the running mean/var -- that would NaN every future
+        # normalized observation and silently, unrecoverably kill the run. A
+        # transient physics glitch should degrade gracefully, not be fatal.
+        reduce_dims = tuple(range(1, batch.ndim))
+        finite_rows = torch.isfinite(batch).all(dim=reduce_dims)
+        if not bool(finite_rows.all()):
+            batch = batch[finite_rows]
+        if batch.shape[0] == 0:
+            return
+
         batch_mean = batch.mean(dim=0)
         batch_var = batch.var(dim=0, correction=0)
         batch_count = batch.shape[0]
 
         self._update_from_moments(batch_mean, batch_var, batch_count)
+
+        if _NORM_TRIPWIRE and _norm_is_poisoned(self):
+            _dump_norm_poison("update", self, batch, batch_mean, batch_var, batch_count)
 
     def _update_from_moments(
         self, batch_mean: Tensor, batch_var: Tensor, batch_count: int
@@ -89,7 +176,7 @@ class TorchRunningNormalizer:
 
         self.mean = new_mean
         self.var = m2 / total_count
-        self.count = total_count
+        self.count = min(total_count, _MAX_COUNT)
 
     def normalize(self, x: Tensor | np.ndarray) -> Tensor | np.ndarray:
         """Normalize input. Accepts and returns tensors or numpy arrays.
@@ -127,7 +214,10 @@ class TorchRunningNormalizer:
         """Restore from checkpoint."""
         self.mean = torch.tensor(state["mean"], dtype=torch.float64, device=self.device)
         self.var = torch.tensor(state["var"], dtype=torch.float64, device=self.device)
-        self.count = state["count"]
+        # Cap a possibly-overflowed count from a checkpoint trained before the cap
+        # existed (the runaway-count bug inflated it past 1e300), so the first
+        # update's m_a = var*count cannot overflow.
+        self.count = min(float(state["count"]), _MAX_COUNT)
 
     def sync_across_ranks(self) -> None:
         """Merge running statistics across DDP ranks via parallel Welford.
@@ -143,6 +233,8 @@ class TorchRunningNormalizer:
         """
         if not (dist.is_available() and dist.is_initialized()):
             return
+
+        _pre_finite = (not _norm_is_poisoned(self)) if _NORM_TRIPWIRE else True
 
         local_count = torch.tensor([self.count], dtype=torch.float64, device=self.device)
 
@@ -165,7 +257,19 @@ class TorchRunningNormalizer:
 
         self.mean = new_mean
         self.var = new_var
-        self.count = total_count.item()
+        self.count = min(total_count.item(), _MAX_COUNT)
+
+        if _NORM_TRIPWIRE and _norm_is_poisoned(self):
+            _dump_norm_poison(
+                "sync",
+                self,
+                None,
+                None,
+                None,
+                0,
+                total_count=float(total_count.item()),
+                local_stats_were_finite=_pre_finite,
+            )
 
     @staticmethod
     def from_cpu_normalizer(

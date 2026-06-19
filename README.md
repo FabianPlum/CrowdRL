@@ -59,23 +59,30 @@ At deployment time, the `LearnedPolicyModel` adapter runs each timestep:
 The teal blocks (`observation builder`, `action interpreter`) are **the same crowdrl-core code**
 used during training -- no reimplementation, no drift.
 
-### Observation space (~80-95D per agent)
+### Observation space (~80-99D per agent)
 
 | Component | Dims | Details |
 |-----------|------|---------|
-| Ego state | 7 | goal direction (2), velocity (2), heading (1), torso angle (1), head angle relative to torso (1) |
+| Ego state | 8 | goal direction (2), velocity (2), speed (1), preferred speed (1, raw m/s), torso angle (1), head angle relative to torso (1) |
 | Social | 56 | K=8 nearest neighbours: relative position (2), relative velocity (2), body orientation (1), body dims (2) |
 | Raycasts | 16-32 | Head-anchored, 200 deg FOV, normalised distances. Optional 2-channel (distance + hit-type) |
 | Navmesh | 3 | Next-waypoint direction (2) + path deviation (1) -- pre-computed via A\*+funnel at episode reset, pure GPU tensor lookup per step |
 
-All observations are in egocentric frame.
+All observations are in egocentric frame. Base obs_dim is `8 + 56 + 16 = 80`;
+with 2-channel raycasts and navmesh enabled it grows to `8 + 56 + 32 + 3 = 99`.
 
 ### Action space (4D continuous)
 
-1. Desired speed (scalar)
+1. Desired speed (scalar, mapped from `[-1, +1]` to `[-max_backward_speed, +max_forward_speed]`; negative values mean motion opposite to heading)
 2. Desired heading change (scalar)
 3. Desired torso orientation change (scalar)
 4. Desired head orientation change relative to torso (scalar, clamped +/-90 deg)
+
+Defaults are asymmetric (`max_forward_speed = 2.0` m/s, `max_backward_speed = 0.5` m/s)
+because humans walk forward much faster than backward. A hard
+`max_velocity_magnitude = 3.0` m/s clamp on the actual velocity guards against
+contact-force-induced blowup. All three numbers are experimental starting points
+to be backed by literature.
 
 ## Getting started
 
@@ -189,7 +196,7 @@ uv run jupyter lab
 
 ## Current status
 
-**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v6.md) for details):
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v7.md) for details):
 
 | Milestone | Status |
 |-----------|--------|

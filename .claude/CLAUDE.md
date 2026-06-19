@@ -77,20 +77,20 @@ A* on navmesh verifies all (spawn, goal) pairs. Three modes:
 - **Tier 2** — Smoothness: jerk penalty, angular acceleration penalty, preferred-speed deviation
 - **Tier 3** — Distributional style matching from PeTrack trajectory data (velocity autocorrelation, neighbour-distance distributions)
 
-## Observation space (~80–95D per agent)
+## Observation space (~80–99D per agent)
 
 | Component | Dims | Details |
 |-----------|------|---------|
-| Ego state | 7 | goal dir (2), velocity (2), heading (1), torso angle (1), head angle rel. torso (1) |
+| Ego state | 8 | goal dir (2), velocity (2), speed (1), preferred speed (1, raw m/s), torso angle (1), head angle rel. torso (1) |
 | Social | K×7 = 56 | K=8 nearest: rel pos (2), rel vel (2), body orient (1), body dims (2) |
 | Raycasts | N = 16 | Head-anchored, 200° FOV, normalised distances. Optional 2-channel (distance + hit-type) → 32D |
 | Navmesh (optional) | 3 | Next-waypoint direction (2) + path deviation (1) |
 
-All in egocentric frame. Total: 79D (1-channel rays) to 98D (2-channel + navmesh).
+All in egocentric frame. Total: 80D (1-channel rays) to 99D (2-channel + navmesh).
 
 ## Action space (4D continuous)
 
-1. Desired speed (scalar)
+1. Desired speed (scalar; maps [-1, +1] to [-max_backward_speed, +max_forward_speed], negative = backing up)
 2. Desired heading change (scalar)
 3. Desired torso orientation change (scalar)
 4. Desired head orientation change relative to torso (scalar, clamped ±90°)
@@ -120,7 +120,7 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 
 - **Active**: Building crowdrl-core (WorldState, geometry, navmesh) and crowdrl-env (procedural generator Tiers 0–2)
 - **Not started**: crowdrl-train, crowdrl-jupedsim, Tier 3 reward
-- **Reference doc**: CrowdRL_Project_Plan_v6.md (full design rationale, milestones, risks)
+- **Reference doc**: CrowdRL_Project_Plan_v7.md (full design rationale, milestones, risks)
 
 ## Development tooling
 

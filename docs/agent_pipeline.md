@@ -6,7 +6,7 @@ are detected, resolved, and penalised.
 
 ---
 
-## 1. Perception: building the 79-D observation vector
+## 1. Perception: building the observation vector (80-D base, up to 129-D)
 
 Every timestep, each agent receives an **egocentric** observation assembled in
 `crowdrl_core/observation.py` from a `WorldState` struct. Everything is rotated
@@ -15,12 +15,15 @@ into the agent's own torso-heading frame via a 2-D rotation matrix built from
 
 | Component | Dims | Details |
 |-----------|------|---------|
-| **Ego state** | 7 | Goal direction (2, unit vector), velocity (2, ego frame), scalar speed (1), torso angle (1, always 0 in ego frame), head angle relative to torso (1, wrapped to [-pi, pi]) |
+| **Ego state** | 8 | Goal direction (2, unit vector), velocity (2, ego frame), scalar speed (1), preferred speed (1, raw m/s), torso angle (1, always 0 in ego frame), head angle relative to torso (1, wrapped to [-pi, pi]) |
 | **Social** | 56 | 8 nearest neighbours x 7: relative position (2), relative velocity (2), body orientation relative to ego (1), shoulder width (1), chest depth (1). Zero-padded when fewer than 8 neighbours exist |
 | **Raycasts** | 16 | 16 rays over 200 deg FOV anchored to the **head** (not torso). Max range 5 m. Each ray yields a normalised distance in [0, 1] where 1.0 = max range / no hit. Optional 2-channel mode adds a hit-type channel |
 | **Navmesh** *(optional)* | 3 | Next-waypoint direction in ego frame (2) + path deviation from A\* shortest path (1) |
+| **Temporal memory** *(optional)* | 6 | Own-trajectory summary: displacement-from-spawn, cumulative path, path efficiency, elapsed fraction, windowed displacement + goal-progress (window W=50) |
+| **Neighbour velocity history** *(optional)* | K x 2 = 16 | Per tracked neighbour: velocity change over the last W_n=5 steps in ego frame (acceleration proxy). Needs the persistent neighbour-ID tracker |
+| **Neighbour trajectory** *(optional)* | K x 3 = 24 | Per tracked neighbour: its own path-efficiency + windowed displacement/goal-progress. Off in the current run |
 
-**Total**: `7 + (8 x 7) + 16 = 79` (default, single-channel rays, navmesh off).
+**Total**: `8 + (8 x 7) + 16 = 80` base (single-channel rays, all optional blocks off). The optional blocks add +3 (navmesh), +6 (temporal memory), +16 (neighbour velocity history), +24 (neighbour trajectory); 2-channel rays add a further +16. The current **Layer 1 v2 config** enables navmesh + temporal memory + neighbour velocity history -> **obs_dim = 105**; full instrumentation reaches 129.
 
 Key implementation details:
 - Goal direction is safe-divided (zero vector if at goal).
@@ -38,9 +41,12 @@ Defined in `crowdrl_train/networks.py`. Both actor and critic are **separate**
 2-hidden-layer MLPs (no shared trunk, per Andrychowicz et al. 2021):
 
 ```
-Actor:   79 --> [256, tanh] --> [256, tanh] --> 4  (action means)
-Critic:  79 --> [256, tanh] --> [256, tanh] --> 1  (state value)
+Actor:   obs_dim --> [256, tanh] --> [256, tanh] --> 4  (action means)
+Critic:  obs_dim --> [256, tanh] --> [256, tanh] --> 1  (state value)
 ```
+
+`obs_dim` is 80 for the default observation and 105 in the current Layer 1 v2
+config (navmesh + temporal memory + neighbour velocity history); see Section 1.
 
 ### Policy distribution
 
@@ -71,10 +77,10 @@ The 4-D output in [-1, 1] is mapped by `crowdrl_core/action.py`:
 
 | Output | Raw range | Physical quantity | Default range |
 |--------|-----------|-------------------|---------------|
-| `a[0]` | [-1, 1] | Desired speed | 0 to 1.5 m/s (linear: `(a+1)/2 * 1.5`) |
-| `a[1]` | [-1, 1] | Heading change (velocity direction) | +/-45 deg/step |
-| `a[2]` | [-1, 1] | Torso orientation change | +/-30 deg/step |
-| `a[3]` | [-1, 1] | Head orientation change | +/-60 deg/step, hard-clamped to +/-90 deg from torso |
+| `a[0]` | [-1, 1] | Desired speed | [-0.5, +2.0] m/s asymmetric (linear: `-0.5 + (a+1)/2 * 2.5`; negative = backing up) |
+| `a[1]` | [-1, 1] | Heading change (velocity direction) | +/-1.15 deg/step (115 deg/s) |
+| `a[2]` | [-1, 1] | Torso orientation change | +/-0.57 deg/step (57 deg/s) |
+| `a[3]` | [-1, 1] | Head orientation change | +/-1.72 deg/step (172 deg/s), hard-clamped to +/-90 deg from torso |
 
 **Important nuance**: In `CrowdEnv.step()` (line 204-210), both `current_headings`
 and `current_torsos` are initialised from `self._world.torso_orientations`.
@@ -83,7 +89,7 @@ current torso orientation each step, gets a delta applied, and is used purely to
 compute the desired velocity direction vector:
 
 ```
-new_heading = current_torso_orientation + a[1] * pi/4
+new_heading = current_torso_orientation + a[1] * 0.020   # a[1] * max_heading_change (rad)
 desired_velocity = desired_speed * [cos(new_heading), sin(new_heading)]
 ```
 
@@ -106,12 +112,14 @@ The full sequence in `CrowdEnv.step()` (lines 200-258) is:
 ### Step 1: Velocity blending (exponential filter)
 
 ```
-v_new = 0.8 * v_desired + 0.2 * v_old
+v_new = 0.05 * v_desired + 0.95 * v_old
 ```
 
-This provides inertia: agents cannot instantly change direction. The damping
-factor of 0.8 means 80% of the network's desired velocity is applied each step,
-with 20% carry-over.
+This provides inertia: agents cannot instantly change direction. The blend
+weight `desired_velocity_weight = 0.05` means only 5% of the network's desired
+velocity is applied each step, with 95% carry-over -- a first-order low-pass
+with tau ~200 ms at dt=0.01s. It was 0.8 before the Layer 1 recalibration
+(tau ~12 ms, effectively no filter).
 
 ### Step 2: Contact force impulse
 
@@ -125,7 +133,7 @@ velocity impulses.
 ### Step 3: Speed clamping
 
 ```
-max_vel = 2.0 * 1.5 = 3.0 m/s
+max_vel = 3.0 m/s        # max_velocity_magnitude (sits above max_forward_speed = 2.0)
 if ||v|| > max_vel:
     v *= max_vel / ||v||
 ```
@@ -155,10 +163,10 @@ harder than heavier ones -- matching real crowd dynamics.
 | Parameter | Value | Unit | Source |
 |-----------|-------|------|--------|
 | `dt` | 0.01 | s | `CrowdEnvConfig.dt` |
-| `velocity_damping` | 0.8 | -- | `CrowdEnvConfig.velocity_damping` |
+| `desired_velocity_weight` | 0.05 | -- | `CrowdEnvConfig.desired_velocity_weight` (Layer 1; was 0.8) |
 | `contact_stiffness` | 30,000 | N / overlap | `CrowdEnvConfig.contact_stiffness` |
 | `contact_damping` | 500 | N*s/m | `CrowdEnvConfig.contact_damping` |
-| `max_speed_multiplier` | 2.0 | -- | `CrowdEnvConfig.max_speed_multiplier` |
+| `max_velocity_magnitude` | 3.0 | m/s | `CrowdEnvConfig.max_velocity_magnitude` (hard velocity clamp, safety against contact-force blowup) |
 | `agent mass` | ~80 | kg | `SpawnConfig.mass_mean` |
 
 ---
@@ -261,7 +269,7 @@ The **agent proximity penalty** is a reward signal (not a physics force) that
 teaches the policy to maintain personal space. Unlike JuPedSim's Social Force
 Model which prescribes exponential repulsion as a world force, CrowdRL lets
 the policy discover its own avoidance strategy through this tunable reward
-term. See Project Plan v6, Section 3.2, and Section 8.3 below for the
+term. See Project Plan v7, Section 3.2, and Section 8.3 below for the
 current graded-ramp form.
 
 ### Tier 2: Progress shaping (potential-based)
@@ -277,10 +285,10 @@ it does not introduce spurious optima. Default `progress_weight = 1.0`.
 
 | Penalty | Weight | What it discourages |
 |---------|--------|---------------------|
-| Jerk (change in acceleration) | -1e-6 * \|\|da/dt\|\| | Sudden acceleration changes |
-| Angular acceleration | -1e-4 * \|d_omega/dt\| | Rapid heading oscillations |
-| Speed deviation | -1e-3 * \|v - v_preferred\| | Deviating from natural walking speed |
-| Action rate | 0.0 (disabled) * \|\|a_t - a_{t-1}\|\| | Chattering/oscillating policy outputs |
+| Jerk (change in acceleration) | -1e-5 * \|\|da/dt\|\| | Sudden acceleration changes |
+| Angular acceleration | -1e-2 * \|d_omega/dt\| | Rapid heading oscillations |
+| Speed deviation | -5e-3 * \|v - v_preferred\| | Deviating from natural walking speed |
+| Action rate | -1e-2 * \|\|a_t - a_{t-1}\|\| | Chattering/oscillating policy outputs (enabled in Layer 1) |
 
 Jerk and angular acceleration require two steps of history to compute
 (acceleration needs previous velocity, jerk needs previous acceleration).
@@ -293,7 +301,7 @@ collision signals in congested scenarios.
 ## 7. The full loop (single timestep)
 
 ```
-observations (N, 82)              79D base + 3D navmesh (when enabled)
+observations (N, 105)            80D base + 3D navmesh + 6D temporal + 16D neighbour-vel (Layer 1 v2 config)
        |
        v
   Actor network: obs -> mu (4) + sigma
@@ -301,13 +309,13 @@ observations (N, 82)              79D base + 3D navmesh (when enabled)
        |
        v
   interpret_actions_batch()
-  a[0] -> desired speed (0 to 1.5 m/s)
-  a[1] -> heading change (current_torso +/- 15 deg -> velocity direction)
-  a[2] -> torso change (+/- 15 deg -> rotates collision ellipse)
-  a[3] -> head change (+/- 60 deg -> steers raycasts, clamped +/-90 from torso)
+  a[0] -> desired speed ([-0.5, +2.0] m/s asymmetric)
+  a[1] -> heading change (current_torso +/- 1.15 deg -> velocity direction)
+  a[2] -> torso change (+/- 0.57 deg -> rotates collision ellipse)
+  a[3] -> head change (+/- 1.72 deg -> steers raycasts, clamped +/-90 from torso)
        |
        v
-  Velocity blending: v = 0.8 * v_desired + 0.2 * v_old
+  Velocity blending: v = 0.05 * v_desired + 0.95 * v_old
        |
        v
   detect_collisions(): pairwise ellipse boundary-distance test
@@ -363,9 +371,12 @@ Configurable via `RewardConfig.wall_proximity_penalty` (default -0.1) and
 output. Configured via `RewardConfig.action_rate_weight` (default 0.0 -- disabled).
 Targets the network's output before the nonlinear action interpretation.
 
-**B. Tightened orientation limits** -- Heading and torso change limits reduced
-from pi/4 and pi/6 to pi/12 each (~15 deg/step, ~1500 deg/s). Still above
-human capability (~120 deg/s) but prevents physically impossible snap turns.
+**B. Biomechanical orientation limits** -- Per-step rate caps were re-grounded
+in the human walking envelope in the agent-dynamics refactor (Layer 1): heading
+0.020 rad/step (115 deg/s), torso 0.010 rad/step (57 deg/s), head 0.030 rad/step
+(172 deg/s). These replaced the earlier pi/12 (1500 deg/s) heading/torso and
+pi/3 (6000 deg/s) head caps, which were far above human capability. See
+`plan/agent_dynamics_refactor.md` and Project Plan v7, Section 3.3.
 
 ### 8.3 Agent proximity penalty (graded linear ramp) -- IMPLEMENTED
 
@@ -512,8 +523,10 @@ leaves the source actor on its original device.
 
 ### 8.9 Remaining potential improvements
 
-**C. Increase velocity damping** -- Raising `velocity_damping` from 0.8 toward
-0.9 or 0.95 increases inertia. Trades responsiveness for smoother trajectories.
+**C. Decrease desired_velocity_weight -- IMPLEMENTED (Layer 1).** The default
+dropped from 0.8 to 0.05 in the agent-dynamics refactor, adding genuine
+first-order inertia (95% carry-over, tau ~200 ms at dt=0.01s). (Renamed from
+`velocity_damping`; the old name suggested the opposite direction.)
 
 **D. Temporal action smoothing** -- Low-pass filter on the policy output:
 `smoothed = alpha * raw + (1 - alpha) * prev`. Guarantees smooth trajectories

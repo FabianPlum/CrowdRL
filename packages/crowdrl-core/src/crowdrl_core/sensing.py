@@ -550,3 +550,93 @@ def knn_social_batch(
     social[..., 6] = np.where(valid_mask, nb_depths, 0.0)
 
     return social
+
+
+def match_persistent_neighbors(
+    positions: NDArray[np.float64],
+    prev_slots: NDArray[np.int32],
+    active_mask: NDArray[np.bool_],
+    sensing_radius: float,
+    k: int,
+) -> NDArray[np.int32]:
+    """Greedy persistent-neighbor matching.
+
+    For each ego agent, update the K-slot neighbor-ID table so that
+
+    1. A previously-assigned neighbor keeps its slot if and only if it is
+       still active and still within ``sensing_radius`` of the ego agent.
+    2. Slots that became empty (either because the prior assignee moved
+       out of range / deactivated, or because they were empty at the start)
+       are filled with the nearest currently-in-range active agent that
+       is not already in another slot of the same ego.
+
+    This preserves neighbor identity across timesteps so long as the
+    neighbor stays visible, which is the prerequisite for any per-neighbor
+    temporal memory feature (velocity history, trajectory features, etc.).
+
+    Parameters
+    ----------
+    positions : (N, 2) float64 -- current agent positions.
+    prev_slots : (N, K) int32 -- previous step's neighbor-ID table, or
+        an all-``-1`` table on the first step.
+    active_mask : (N,) bool -- True for agents still active in the episode.
+    sensing_radius : float -- metres. Previously-assigned neighbors beyond
+        this distance are evicted; newly filled slots only consider
+        candidates within this range.
+    k : int -- number of slots per ego agent.
+
+    Returns
+    -------
+    new_slots : (N, K) int32 -- updated assignment table.
+    """
+    n = positions.shape[0]
+    new_slots = np.full((n, k), -1, dtype=np.int32)
+
+    # Pairwise squared distances: (N, N). Diagonal set to +inf so an agent
+    # never becomes its own neighbor.
+    diff = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+    dist_sq = np.sum(diff * diff, axis=-1)
+    np.fill_diagonal(dist_sq, np.inf)
+
+    # Mask out inactive agents as candidates
+    dist_sq[:, ~active_mask] = np.inf
+
+    # Also mask rows where ego itself is inactive (those will return all -1)
+    radius_sq = sensing_radius * sensing_radius
+
+    for i in range(n):
+        if not active_mask[i]:
+            continue  # leave row as all -1
+
+        # Step 1: retain eligible prev slots
+        for s in range(k):
+            prev = int(prev_slots[i, s])
+            if prev < 0 or prev >= n:
+                continue
+            if not active_mask[prev]:
+                continue
+            if dist_sq[i, prev] <= radius_sq:
+                new_slots[i, s] = prev
+
+        # Step 2: fill empty slots with nearest unassigned in-range candidate
+        assigned: set[int] = {int(x) for x in new_slots[i] if x >= 0}
+
+        for s in range(k):
+            if new_slots[i, s] >= 0:
+                continue
+
+            best_j = -1
+            best_d = np.inf
+            for j in range(n):
+                if j == i or not active_mask[j] or j in assigned:
+                    continue
+                d = float(dist_sq[i, j])
+                if d <= radius_sq and d < best_d:
+                    best_d = d
+                    best_j = j
+
+            if best_j >= 0:
+                new_slots[i, s] = best_j
+                assigned.add(best_j)
+
+    return new_slots

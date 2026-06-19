@@ -16,9 +16,60 @@ from torch import Tensor
 from crowdrl_torch.action import interpret_actions
 from crowdrl_torch.collision import compute_contact_forces, detect_collisions_pairwise
 from crowdrl_torch.observation import build_observations
-from crowdrl_torch.reward import compute_rewards
+from crowdrl_torch.reward import (
+    TIMEOUT_COMPONENT_IDX,
+    compute_rewards,
+    path_distance_metric,
+)
+from crowdrl_torch.sensing import match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
+
+
+def advance_waypoint_cursor(
+    positions: Tensor,
+    waypoints: Tensor,
+    n_waypoints: Tensor,
+    waypoint_cursor: Tensor,
+    active_mask: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Advance each agent's monotonic waypoint cursor, robust to being off-route.
+
+    Advance a -> a+1 when the agent either
+      (a) is within ``waypoint_crossing_threshold`` of the current waypoint, or
+      (b) is closer to the NEXT waypoint than to the current one -- i.e. it has
+          passed the corner even if it cut wide and never entered the threshold
+          disk.
+
+    (b) fixes the failure mode of the old proximity-only rule: in a crowd, contact
+    forces push agents off the precomputed route, so an agent could round a corner
+    >0.5 m from the inset waypoint and never advance. A stuck cursor then made the
+    path-distance metric measure to a waypoint behind the agent -> negative
+    progress reward and false stuck-termination. The cursor stays monotonic (never
+    moves backward) and holds at the final waypoint (the goal).
+    """
+    E, N = positions.shape[:2]
+    cursor = waypoint_cursor.long()
+    max_idx = (n_waypoints.long() - 1).clamp(min=0)
+    cursor_a = cursor.clamp(min=0, max=config.max_waypoints - 1).clamp(max=max_idx)
+    cursor_b = (cursor_a + 1).clamp(max=max_idx)
+
+    idx_a = cursor_a.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
+    idx_b = cursor_b.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
+    wp_a = waypoints.gather(2, idx_a).squeeze(2)
+    wp_b = waypoints.gather(2, idx_b).squeeze(2)
+
+    d_a = ((positions - wp_a) ** 2).sum(dim=-1).sqrt()
+    d_b = ((positions - wp_b) ** 2).sum(dim=-1).sqrt()
+
+    has_next = cursor_b > cursor_a  # False at the final waypoint (goal)
+    reached = d_a < config.waypoint_crossing_threshold
+    passed = has_next & (d_b < d_a)  # closer to the next waypoint => past the corner
+    advance = (reached | passed) & active_mask
+
+    new_cursor = torch.where(advance, cursor + 1, cursor)
+    return new_cursor.clamp(max=max_idx).to(waypoint_cursor.dtype)
 
 
 def batched_step(
@@ -41,6 +92,9 @@ def batched_step(
     rewards : (E, N)
     terminated : (E, N) bool — agent reached goal
     truncated : (E, N) bool — episode time limit
+    reward_components : (E, N, C) — per-component reward breakdown, channels
+        ordered by ``crowdrl_torch.reward.REWARD_COMPONENT_NAMES``; sums to
+        ``rewards``. For collapse instrumentation only — not used by the env.
     """
     E, N = state.positions.shape[:2]
     step_count = state.step_count + 1  # (E,)
@@ -52,18 +106,30 @@ def batched_step(
         state.torso_orientations,
         state.head_orientations,
         config,
+        current_speeds=state.velocities.norm(dim=-1),
     )
 
-    # --- 2. Velocity blending (damped) ---
+    # --- 2. Velocity blending (damped first-order velocity lag) ---
+    # NOTE: this blends the full velocity VECTOR toward the desired one, so the
+    # actual motion direction lags the commanded heading (the agent can briefly
+    # slide sideways relative to where it faces). At low desired_velocity_weight
+    # that lag is the "ice-skating" mechanism; configs pin the weight to 0.8.
     mask_2d = state.active_mask.unsqueeze(-1)
     new_velocities = torch.where(
         mask_2d,
-        config.velocity_damping * desired_velocities
-        + (1.0 - config.velocity_damping) * state.velocities,
+        config.desired_velocity_weight * desired_velocities
+        + (1.0 - config.desired_velocity_weight) * state.velocities,
         state.velocities,
     )
     new_torso_orientations = torch.where(state.active_mask, new_torsos, state.torso_orientations)
     new_head_orientations = torch.where(state.active_mask, new_heads, state.head_orientations)
+
+    # Snapshot the policy's chosen (pre-contact) velocities for the reward's
+    # optional impact-speed weighting -- captured before the contact impulse
+    # (step 4) so it reflects the approach speed the policy controls, not the
+    # post-bounce velocity. The later reassignments of new_velocities are
+    # functional (no in-place mutation), so this reference stays valid.
+    pre_contact_velocities = new_velocities if config.use_velocity_weighted_collision else None
 
     # --- 3. Collision detection ---
     overlap_matrix, collision_mask = detect_collisions_pairwise(
@@ -97,12 +163,20 @@ def batched_step(
     )
 
     # Clamp velocity magnitudes to prevent contact-force blow-up
-    max_vel = config.max_speed_multiplier * config.max_speed
+    max_vel = config.max_velocity_magnitude
     speeds = (new_velocities**2).sum(dim=-1, keepdim=True).sqrt()
     scale = torch.where(
         speeds > max_vel, max_vel / torch.clamp(speeds, min=1e-10), torch.ones_like(speeds)
     )
     new_velocities = new_velocities * scale
+
+    # Finite-state invariant. A degenerate pileup (many jammed/near-coincident
+    # agents, especially with stuck-termination off) can drive contact/wall
+    # forces non-finite, and the magnitude clamp above can even turn an inf speed
+    # into inf * 0 = NaN. Zero any non-finite velocity so agent state -- and thus
+    # the observations built from it -- stays finite. A single NaN obs would
+    # otherwise poison the running obs-normalizer and kill the run unrecoverably.
+    new_velocities = torch.nan_to_num(new_velocities, nan=0.0, posinf=0.0, neginf=0.0)
 
     # --- 5. Position update ---
     new_positions = torch.where(
@@ -112,7 +186,7 @@ def batched_step(
     )
 
     # --- 6. Wall boundary enforcement ---
-    new_positions, new_velocities = enforce_wall_boundaries(
+    new_positions, new_velocities, wall_collision_mask = enforce_wall_boundaries(
         new_positions,
         new_velocities,
         state.shoulder_widths,
@@ -132,15 +206,33 @@ def batched_step(
     )
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
 
-    rewards, reached_goal, new_goal_distances = compute_rewards(
+    # Path-distance metric (remaining navmesh path, straight-line goal fallback).
+    # Drives both the progress reward and the stuck check so progress is measured
+    # ALONG THE ROUTE, not the bee-line to the goal. Uses the pre-advance cursor
+    # (the cursor is advanced later this step); a waypoint crossing only ever
+    # decreases this, so it never produces spurious negative progress.
+    new_nav_distances = path_distance_metric(
+        new_positions,
+        state.goal_positions,
+        state.waypoints,
+        state.waypoint_cursor,
+        state.n_waypoints,
+        state.waypoint_path_lengths,
+        config.use_navmesh,
+    )
+
+    rewards, reached_goal, new_goal_distances, reward_components = compute_rewards(
         new_positions,
         new_velocities,
         state.goal_positions,
         state.active_mask,
         collision_mask,
-        state.prev_goal_distances,
+        state.prev_nav_distances,
         config,
+        collision_velocities=pre_contact_velocities,
+        current_distances=new_nav_distances,
         wall_distances=wall_distances,
+        wall_collision_mask=wall_collision_mask,
         agent_radii=agent_radii,
         actions=actions,
         prev_actions=state.prev_actions,
@@ -151,6 +243,11 @@ def batched_step(
         prev_headings=state.prev_headings,
         prev_heading_changes=state.prev_heading_changes,
     )
+
+    # Accumulator for the timeout/stuck penalties applied below, folded into
+    # the ``timeout`` channel of reward_components before returning so the
+    # per-component breakdown stays exhaustive.
+    timeout_component = torch.zeros_like(rewards)
 
     # --- 8. Update active mask ---
     newly_done = reached_goal & state.active_mask
@@ -170,7 +267,7 @@ def batched_step(
     truncated = torch.zeros(E, N, dtype=torch.bool, device=state.positions.device)
     stuck_mask = torch.zeros_like(new_active_mask)
     new_stuck_window_step = state.stuck_window_step
-    new_stuck_window_start_dist = state.stuck_window_start_dist
+    new_stuck_window_start_nav = state.stuck_window_start_nav
     if config.stuck_termination_enabled:
         # Increment the window step for agents that were active coming into
         # this step AND are still active after the goal-reach update.
@@ -180,27 +277,35 @@ def batched_step(
             state.stuck_window_step + 1,
             state.stuck_window_step,
         )
-        # At end of window: compute progress = start_dist - current_dist.
+        # At end of window: progress = start_nav - current_nav, measured along
+        # the navmesh path (not straight-line goal distance), so an agent that
+        # correctly follows a route bending away from the goal is not flagged.
         # If progress < threshold, agent is stuck. Otherwise reset window.
         window_full = new_stuck_window_step >= config.stuck_window_steps
-        progress = state.stuck_window_start_dist - new_goal_distances
+        progress = state.stuck_window_start_nav - new_nav_distances
         stuck_mask = window_full & inc_mask & (progress < config.stuck_progress_threshold)
         # For non-stuck window-full agents, restart the window: zero the
-        # counter and capture the current distance as the new start.
+        # counter and capture the current path distance as the new start.
         reset_mask = window_full & inc_mask & ~stuck_mask
         new_stuck_window_step = torch.where(
             window_full & inc_mask,
             torch.zeros_like(new_stuck_window_step),
             new_stuck_window_step,
         )
-        new_stuck_window_start_dist = torch.where(
+        new_stuck_window_start_nav = torch.where(
             reset_mask,
-            new_goal_distances,
-            state.stuck_window_start_dist,
+            new_nav_distances,
+            state.stuck_window_start_nav,
         )
 
         # Apply timeout penalty to stuck agents and mark them truncated.
-        rewards = torch.where(stuck_mask, rewards + config.timeout_penalty, rewards)
+        # ``where(m, r + p, r) == r + where(m, p, 0)`` keeps rewards identical
+        # while letting us tally the penalty in the timeout component.
+        stuck_pen = torch.where(
+            stuck_mask, torch.full_like(rewards, config.timeout_penalty), torch.zeros_like(rewards)
+        )
+        rewards = rewards + stuck_pen
+        timeout_component = timeout_component + stuck_pen
         truncated = torch.where(stuck_mask, torch.ones_like(truncated), truncated)
         new_active_mask = new_active_mask & ~stuck_mask
         new_velocities = torch.where(
@@ -208,37 +313,38 @@ def batched_step(
         )
 
     # --- 10. Termination / truncation (episode timeout) ---
-    terminated = reached_goal
+    # Report termination only at the step an agent actually reaches its goal
+    # (newly_done), not on every subsequent frozen-at-goal step. The collector's
+    # GAE bootstrap keys off this flag; a stale per-step terminated would also be
+    # a footgun for any future consumer.
+    terminated = newly_done
 
     # Check for timeout: (E,) -> broadcast to (E, N)
     is_timeout = (step_count >= config.max_steps).unsqueeze(1)  # (E, 1)
     truncated = torch.where(is_timeout & new_active_mask, torch.ones_like(truncated), truncated)
-    rewards = torch.where(is_timeout & new_active_mask, rewards + config.timeout_penalty, rewards)
+    timeout_pen = torch.where(
+        is_timeout & new_active_mask,
+        torch.full_like(rewards, config.timeout_penalty),
+        torch.zeros_like(rewards),
+    )
+    rewards = rewards + timeout_pen
+    timeout_component = timeout_component + timeout_pen
     new_active_mask = torch.where(
         is_timeout.expand_as(new_active_mask),
         torch.zeros_like(new_active_mask),
         new_active_mask,
     )
 
-    # --- 10. Advance waypoint cursor ---
-    # An agent's cursor advances when it gets close enough to the current waypoint.
-    # This is a monotonic index — once passed, a waypoint is never reconsidered.
+    # --- 10. Advance waypoint cursor (robust to being pushed off-route) ---
     if config.use_navmesh:
-        wp_cursor = state.waypoint_cursor.long()
-        wp_max_idx = (state.n_waypoints.long() - 1).clamp(min=0)
-        cur_idx = wp_cursor.clamp(min=0, max=config.max_waypoints - 1).clamp(max=wp_max_idx)
-
-        # Gather current waypoint position: (E, N, 2)
-        gather_idx = cur_idx.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)
-        cur_wp = state.waypoints.gather(2, gather_idx).squeeze(2)
-
-        # Distance to current waypoint
-        dist_to_wp = ((new_positions - cur_wp) ** 2).sum(dim=-1).sqrt()
-
-        # Advance cursor where agent is within crossing threshold
-        advance = (dist_to_wp < config.waypoint_crossing_threshold) & new_active_mask
-        new_wp_cursor = torch.where(advance, wp_cursor + 1, wp_cursor)
-        new_wp_cursor = new_wp_cursor.clamp(max=wp_max_idx).to(state.waypoint_cursor.dtype)
+        new_wp_cursor = advance_waypoint_cursor(
+            new_positions,
+            state.waypoints,
+            state.n_waypoints,
+            state.waypoint_cursor,
+            new_active_mask,
+            config,
+        )
     else:
         new_wp_cursor = state.waypoint_cursor
 
@@ -259,6 +365,92 @@ def batched_step(
         state.prev_heading_changes,
     )
 
+    # --- 11b. Update temporal memory state ---
+    # Cumulative path length accumulates only while the agent is active going
+    # into this step (excluding stuck/timeout termination which zeros the
+    # active mask above). We use the pre-step position so the per-step
+    # delta reflects this step's actual motion.
+    step_delta = ((new_positions - state.positions) ** 2).sum(dim=-1).sqrt()  # (E, N)
+    # Use state.active_mask (pre-update) so the final motion step of an agent
+    # that just reached the goal or was just deactivated still counts.
+    path_inc = torch.where(state.active_mask, step_delta, torch.zeros_like(step_delta))
+    new_cumulative_path_length = state.cumulative_path_length + path_inc
+
+    # Scatter-write the new position and goal distance into the ring buffer.
+    # Writer index = pre-step step_count mod (W+1). After the first W steps
+    # the oldest slot gets overwritten, and the read at (step_count+1) mod
+    # (W+1) returns the entry from W steps back.
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    write_idx = (state.step_count % buf_size).long()  # (E,)
+    write_idx_pos = write_idx.view(E, 1, 1, 1).expand(E, N, 1, 2)  # (E, N, 1, 2)
+    new_pos_history = state.pos_history.scatter(
+        dim=2, index=write_idx_pos, src=new_positions.unsqueeze(2)
+    )
+    write_idx_gd = write_idx.view(E, 1, 1).expand(E, N, 1)  # (E, N, 1)
+    new_gdist_history = state.gdist_history.scatter(
+        dim=2, index=write_idx_gd, src=new_goal_distances.unsqueeze(2)
+    )
+
+    # --- 11c. Update persistent neighbor slots + velocity history ---
+    # Recompute neighbor slot assignments from the new positions. Uses the
+    # post-update active mask so newly-deactivated agents (goal-reach or
+    # stuck-termination) are immediately evicted from other agents' slots.
+    # Guarded so we only pay the ~2% compute hit when neighbor memory is
+    # actually consumed by the observation builder (commits 4/5).
+    if config.use_neighbor_memory:
+        new_neighbor_ids = match_persistent_neighbors(
+            new_positions,
+            state.neighbor_ids,
+            new_active_mask,
+            state.n_agents,
+            sensing_radius=config.neighbor_sensing_radius,
+            config=config,
+        )
+
+        # --- Zero-reset slot history on reassignment ---
+        # When slot k at ego i gets a new neighbor ID, we wipe the full
+        # history for that slot so the diff/mean features don't mix the
+        # prior assignee's velocities with the new one. For slots that
+        # kept their previous assignment, the history passes through
+        # unchanged (the scatter below will overwrite only the write slot).
+        K_local = config.k_neighbours
+        slot_changed = new_neighbor_ids != state.neighbor_ids  # (E, N, K)
+        # Broadcast to (E, N, W_n+1, K, 2) for torch.where
+        preserve_mask = ~slot_changed.view(E, N, 1, K_local, 1)
+        history_after_reset = torch.where(
+            preserve_mask,
+            state.neighbor_vel_history,
+            torch.zeros_like(state.neighbor_vel_history),
+        )
+
+        # --- Gather new velocities for each slot's assigned neighbor ---
+        # new_neighbor_ids[e, i, k] holds the global agent index of the k-th
+        # neighbor of ego i; -1 means empty. Use advanced indexing to pull
+        # new_velocities[e, nb_id] for each slot. Clamp -1 to 0 first so
+        # the gather doesn't index out of bounds, then mask empty slots.
+        nb_ids_safe = new_neighbor_ids.clamp(min=0).long()  # (E, N, K)
+        env_idx = torch.arange(E, device=new_positions.device).view(E, 1, 1).expand(E, N, K_local)
+        nb_vels = new_velocities[env_idx, nb_ids_safe]  # (E, N, K, 2)
+        nb_valid = (new_neighbor_ids >= 0).unsqueeze(-1)  # (E, N, K, 1)
+        nb_vels = torch.where(nb_valid, nb_vels, torch.zeros_like(nb_vels))
+
+        # --- Scatter-write into the ring buffer at step_count % (W_n+1) ---
+        W_n = config.neighbor_vel_history_window
+        nb_buf = W_n + 1
+        nb_write_idx = (state.step_count % nb_buf).long()  # (E,)
+        # history_after_reset has shape (E, N, W_n+1, K, 2); we scatter on
+        # dim=2 with index of shape (E, N, 1, K, 2) and src of the same shape.
+        nb_write_idx_exp = nb_write_idx.view(E, 1, 1, 1, 1).expand(E, N, 1, K_local, 2)
+        new_neighbor_vel_history = history_after_reset.scatter(
+            dim=2,
+            index=nb_write_idx_exp,
+            src=nb_vels.unsqueeze(2),
+        )
+    else:
+        new_neighbor_ids = state.neighbor_ids
+        new_neighbor_vel_history = state.neighbor_vel_history
+
     # --- 12. Build new state ---
     new_state = TorchWorldState(
         positions=new_positions,
@@ -275,7 +467,7 @@ def batched_step(
         wall_segments=state.wall_segments,
         n_segments=state.n_segments,
         prev_velocities=new_velocities,
-        prev_goal_distances=new_goal_distances,
+        prev_nav_distances=new_nav_distances,
         prev_accelerations=new_prev_accelerations,
         prev_headings=new_torso_orientations,
         prev_heading_changes=new_prev_heading_changes,
@@ -287,7 +479,27 @@ def batched_step(
         n_agents=state.n_agents,
         step_count=step_count,
         stuck_window_step=new_stuck_window_step,
-        stuck_window_start_dist=new_stuck_window_start_dist,
+        stuck_window_start_nav=new_stuck_window_start_nav,
+        spawn_positions=state.spawn_positions,
+        initial_goal_distances=state.initial_goal_distances,
+        cumulative_path_length=new_cumulative_path_length,
+        pos_history=new_pos_history,
+        gdist_history=new_gdist_history,
+        neighbor_ids=new_neighbor_ids,
+        neighbor_vel_history=new_neighbor_vel_history,
+    )
+
+    # Fold the episode-end timeout/stuck penalties into the timeout channel so
+    # ``reward_components`` sums to ``rewards`` (the channel left zero by
+    # compute_rewards). ``cat`` avoids an in-place index write inside the
+    # compiled region. timeout is the last channel, so the slice is [:-1].
+    idx = TIMEOUT_COMPONENT_IDX
+    reward_components = torch.cat(
+        [
+            reward_components[..., :idx],
+            (reward_components[..., idx] + timeout_component).unsqueeze(-1),
+        ],
+        dim=-1,
     )
 
     # --- 13. Build observations ---
@@ -308,6 +520,15 @@ def batched_step(
         n_waypoints=state.n_waypoints,
         waypoint_cursor=new_wp_cursor,
         waypoint_path_lengths=state.waypoint_path_lengths,
+        spawn_positions=new_state.spawn_positions,
+        initial_goal_distances=new_state.initial_goal_distances,
+        cumulative_path_length=new_state.cumulative_path_length,
+        pos_history=new_state.pos_history,
+        gdist_history=new_state.gdist_history,
+        preferred_speeds=new_state.preferred_speeds,
+        step_count=step_count,
+        neighbor_ids=new_state.neighbor_ids,
+        neighbor_vel_history=new_state.neighbor_vel_history,
     )
 
-    return new_state, observations, rewards, terminated, truncated
+    return new_state, observations, rewards, terminated, truncated, reward_components

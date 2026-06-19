@@ -14,6 +14,8 @@ not in the per-step hot path.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 
@@ -23,6 +25,94 @@ from crowdrl_train.normalizer import RewardNormalizer
 
 from crowdrl_torch.batched_env import BatchedTorchEnv
 from crowdrl_torch.normalizer import TorchRunningNormalizer
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
+
+# Diagnostic NaN tripwire (CROWDRL_NAN_TRIPWIRE=1). The collect loop checks every
+# tensor crossing the Python boundary -- raw obs -> normalized obs -> policy
+# action -> reward -> next env state -- in that order, so the FIRST stage to go
+# non-finite is where the NaN is BORN (bisects obs vs normalizer vs policy vs
+# reward vs dynamics). On a hit it prints a localized report (which obs feature
+# cols, which env/agent), dumps the offending env's full state to /tmp for
+# instant offline replay, and stops. Default OFF -> zero effect on real runs.
+_NAN_TRIPWIRE = os.environ.get("CROWDRL_NAN_TRIPWIRE", "") == "1"
+
+
+def _nan_tripwire(stage, named_tensors, loop_step, env_state=None):
+    """If any named tensor is non-finite, report + dump + SystemExit.
+
+    One GPU sync in the common (all-finite) case; the per-tensor breakdown only
+    runs once, on the failing step.
+    """
+    checks = [torch.isfinite(t).all() for t in named_tensors.values() if t is not None]
+    if not checks or bool(torch.stack(checks).all().item()):
+        return  # all finite -- single sync, no further work
+
+    for name, t in named_tensors.items():
+        if t is None or bool(torch.isfinite(t).all()):
+            continue
+        bad = ~torch.isfinite(t)
+        first = bad.nonzero(as_tuple=False)[0].tolist()
+        env_i = first[0]
+        lines = [
+            "\n" + "#" * 76,
+            f"# NAN TRIPWIRE @ stage='{stage}'  loop_step={loop_step}",
+            f"# tensor '{name}'  shape={tuple(t.shape)}  n_non_finite={int(bad.sum())}",
+            f"# first non-finite index {first}",
+        ]
+        if t.dim() == 3:  # (E, N, D) obs-like -> which feature columns
+            feats = bad.any(dim=0).any(dim=0).nonzero(as_tuple=False).flatten().tolist()
+            agents = bad[env_i].any(dim=-1).nonzero(as_tuple=False).flatten().tolist()
+            lines.append(f"# non-finite FEATURE cols (of D={t.shape[2]}): {feats}")
+            lines.append(f"# affected agents in env {env_i}: {agents[:16]}")
+        else:
+            lines.append(f"# first bad rows: {bad.nonzero(as_tuple=False)[:16].tolist()}")
+        lines.append("#" * 76)
+        print("\n".join(lines), flush=True)
+
+        try:
+            dump = {
+                "stage": stage,
+                "tensor_name": name,
+                "loop_step": loop_step,
+                "first_index": first,
+                f"tensor_{name}_env{env_i}": t[env_i].detach().cpu(),
+            }
+            if env_state is not None:
+                for attr in (
+                    "positions",
+                    "velocities",
+                    "torso_orientations",
+                    "head_orientations",
+                    "goal_positions",
+                    "active_mask",
+                    "n_agents",
+                    "shoulder_widths",
+                    "chest_depths",
+                    "wall_segments",
+                    "n_segments",
+                    "waypoints",
+                    "waypoint_cursor",
+                    "n_waypoints",
+                    "step_count",
+                    # World-GENERATION characterization: the initial spawn/goal
+                    # layout (not the moved positions), so the offending world can
+                    # be analyzed as a generation artifact, not just a failing step.
+                    "spawn_positions",
+                    "initial_goal_distances",
+                    "preferred_speeds",
+                    "masses",
+                    "prev_nav_distances",
+                    "cumulative_path_length",
+                ):
+                    v = getattr(env_state, attr, None)
+                    if torch.is_tensor(v):
+                        dump[f"state_{attr}"] = v[env_i].detach().cpu()
+            torch.save(dump, "/tmp/crowdrl_nan_dump.pt")
+            print(f"# dumped offending env {env_i} state -> /tmp/crowdrl_nan_dump.pt", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"# (state dump failed: {exc})", flush=True)
+
+        raise SystemExit(f"NaN tripwire: non-finite '{name}' at stage='{stage}'")
 
 
 class TorchRolloutCollector:
@@ -69,6 +159,10 @@ class TorchRolloutCollector:
         self._ep_terminated: np.ndarray | None = None
         self._ep_lengths: np.ndarray | None = None
         self._n_agents_t: np.ndarray | None = None
+        # Per-episode reward decomposition accumulator (E, N, C), persisted
+        # across collect() calls alongside ep_rewards so the breakdown of an
+        # episode that spans rollouts is not lost.
+        self._ep_components: np.ndarray | None = None
 
     def collect(self, n_agent_steps: int) -> list[dict]:
         """Collect at least ``n_agent_steps`` across all envs.
@@ -95,14 +189,17 @@ class TorchRolloutCollector:
             self._ep_terminated = np.zeros((E, N), dtype=np.bool_)
             self._ep_lengths = np.zeros(E, dtype=np.int32)
             self._n_agents_t = self.env.states.n_agents.cpu().numpy().astype(np.int32)
+            self._ep_components = np.zeros((E, N, len(REWARD_COMPONENT_NAMES)), dtype=np.float64)
 
         obs_t = self._obs_t
         ep_rewards = self._ep_rewards
         ep_terminated = self._ep_terminated
         ep_lengths = self._ep_lengths
         n_agents_t = self._n_agents_t
+        ep_components = self._ep_components
         assert ep_rewards is not None and ep_terminated is not None
         assert ep_lengths is not None and n_agents_t is not None
+        assert ep_components is not None
 
         # --- Per-step padded storage (fresh each collect) ---
         step_obs: list[np.ndarray] = []
@@ -110,7 +207,10 @@ class TorchRolloutCollector:
         step_log_probs: list[np.ndarray] = []
         step_rewards: list[np.ndarray] = []
         step_values: list[np.ndarray] = []
-        step_dones: list[np.ndarray] = []
+        # terminated (goal) and truncated (timeout/stuck) are stored separately so
+        # GAE can bootstrap V(s_T) on truncation but zero it on true termination.
+        step_terminated: list[np.ndarray] = []
+        step_truncated: list[np.ndarray] = []
         step_active: list[np.ndarray] = []
 
         # --- Episode boundary tracking (per-env, relative to current collect) ---
@@ -125,7 +225,9 @@ class TorchRolloutCollector:
         steps_collected = 0
         t = 0  # global timestep counter (within this collect)
 
+        _tw_step = 0
         while steps_collected < n_agent_steps:
+            _tw_step += 1
             # --- Agent masks (numpy, computed once) ---
             agent_mask = agent_idx < n_agents_t[:, None]  # (E, N) bool
             active_np = self.env.states.active_mask.cpu().numpy()  # (E, N)
@@ -141,6 +243,14 @@ class TorchRolloutCollector:
             else:
                 obs_norm_t = obs_t
 
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "pre_forward",
+                    {"obs_raw": obs_t, "obs_norm": obs_norm_t},
+                    _tw_step,
+                    self.env.states,
+                )
+
             # --- Forward pass on device (all E*N slots) ---
             with torch.no_grad():
                 flat_obs = obs_norm_t.reshape(-1, D)
@@ -148,11 +258,32 @@ class TorchRolloutCollector:
                     self.actor_critic.get_action_and_value(flat_obs)
                 )
 
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "post_forward",
+                    {"actions": actions_t, "actions_raw": actions_raw_t, "values": values_t},
+                    _tw_step,
+                    self.env.states,
+                )
+
             # --- Step all envs on device ---
             actions_gpu = actions_t.reshape(E, N, A)
-            self.env.states, obs_t, rewards_t, terminated_t, truncated_t = self.env.step(
-                actions_gpu
+            self.env.states, obs_t, rewards_t, terminated_t, truncated_t, reward_components_t = (
+                self.env.step(actions_gpu)
             )
+
+            if _NAN_TRIPWIRE:
+                _nan_tripwire(
+                    "post_step",
+                    {
+                        "rewards": rewards_t,
+                        "obs_next": obs_t,
+                        "state_velocities": self.env.states.velocities,
+                        "state_positions": self.env.states.positions,
+                    },
+                    _tw_step,
+                    self.env.states,
+                )
 
             # --- Single bulk transfer to CPU ---
             obs_norm_np = obs_norm_t.cpu().numpy()  # (E, N, D)
@@ -160,6 +291,7 @@ class TorchRolloutCollector:
             log_probs_np = log_probs_t.cpu().numpy().reshape(E, N)
             values_np = values_t.cpu().numpy().reshape(E, N)
             rewards_np = rewards_t.cpu().numpy()  # (E, N)
+            reward_components_np = reward_components_t.cpu().numpy()  # (E, N, C)
             terminated_np = terminated_t.cpu().numpy()
             truncated_np = truncated_t.cpu().numpy()
             dones_np = terminated_np | truncated_np
@@ -177,11 +309,16 @@ class TorchRolloutCollector:
             step_log_probs.append(log_probs_np)
             step_rewards.append(rewards_np)
             step_values.append(values_np)
-            step_dones.append(dones_np)
+            step_terminated.append(terminated_np)
+            step_truncated.append(truncated_np)
             step_active.append(active_np)
 
             # --- Vectorized episode tracking ---
             ep_rewards += rewards_np * active_np
+            # Reward decomposition uses the RAW (pre-normalization) components so
+            # the breakdown reflects the reward design directly; their sum is the
+            # raw episode return (distinct from the scaled mean_reward above).
+            ep_components += reward_components_np * active_np[:, :, None]
             ep_terminated |= terminated_np
             ep_lengths += np.any(real_active, axis=1).astype(np.int32)
             steps_collected += int(real_active.sum())
@@ -213,6 +350,8 @@ class TorchRolloutCollector:
                     # Record episode stats
                     n_reached = int(ep_terminated[i, :n_ag].sum())
                     total_rew = float(ep_rewards[i, :n_ag].sum())
+                    # Per-agent raw reward decomposition (sums to the raw return).
+                    comp_sums = ep_components[i, :n_ag].sum(axis=0)  # (C,)
                     ep_dict = {
                         "n_agents": n_ag,
                         "episode_length": int(ep_lengths[i]),
@@ -220,6 +359,10 @@ class TorchRolloutCollector:
                         "n_reached_goal": n_reached,
                         "mean_reward": total_rew / n_ag,
                         "total_reward": total_rew,
+                        "reward_components": {
+                            name: float(comp_sums[c] / n_ag)
+                            for c, name in enumerate(REWARD_COMPONENT_NAMES)
+                        },
                     }
                     if env_tiers is not None:
                         ep_dict["geometry_tier"] = env_tiers[i]
@@ -231,6 +374,7 @@ class TorchRolloutCollector:
 
                     # Reset per-env episode tracking
                     ep_rewards[i] = 0.0
+                    ep_components[i] = 0.0
                     ep_terminated[i] = False
                     ep_lengths[i] = 0
 
@@ -256,7 +400,8 @@ class TorchRolloutCollector:
         self._step_log_probs = step_log_probs
         self._step_rewards = step_rewards
         self._step_values = step_values
-        self._step_dones = step_dones
+        self._step_terminated = step_terminated
+        self._step_truncated = step_truncated
         self._step_active = step_active
         self._episode_starts = episode_starts
         self._n_agents_per_env = n_agents_t.copy()
@@ -264,6 +409,58 @@ class TorchRolloutCollector:
         self._total_active = steps_collected
 
         return completed_episodes
+
+    @staticmethod
+    def _segment_gae(
+        ep_active: list[np.ndarray],
+        ep_rew: list[np.ndarray],
+        ep_val: list[np.ndarray],
+        ep_term: list[np.ndarray],
+        ep_trunc: list[np.ndarray],
+        bootstrap_values: np.ndarray,
+        gamma: float,
+        gae_lambda: float,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """Per-agent GAE over one episode segment, time-limit aware.
+
+        Termination (goal reached) is a true terminal: the value bootstrap is
+        zeroed. Truncation (timeout / stuck) cuts the episode artificially, so we
+        bootstrap the agent's own last value V(s_t) as a proxy for the post-step
+        value V(s_{t+1}) -- once the agent goes inactive its post-truncation
+        observation is zeroed and unavailable to re-evaluate. Treating truncation
+        as a hard terminal (the prior behaviour) systematically under-valued
+        states near the time limit / stuck cutoff.
+
+        Either boundary resets the GAE lambda recursion (the next buffer step
+        belongs to a new episode). ``bootstrap_values`` seeds the next-value for
+        the final step of an unfinished (trailing) segment; for a completed
+        segment it is zeros and never used (every agent ends terminated/truncated).
+        """
+        T = len(ep_active)
+        advantages: list[np.ndarray] = [None] * T
+        returns: list[np.ndarray] = [None] * T
+        gae = np.zeros_like(bootstrap_values)
+        next_values = bootstrap_values
+        for t_idx in reversed(range(T)):
+            active = ep_active[t_idx].astype(np.float64)
+            rewards = ep_rew[t_idx].astype(np.float64)
+            values = ep_val[t_idx].astype(np.float64)
+            term = ep_term[t_idx]
+            trunc = ep_trunc[t_idx]
+            # Zero the value bootstrap only on a true terminal; reset the GAE
+            # lambda recursion at any boundary (terminated OR truncated).
+            not_term = (~term).astype(np.float64)
+            not_done = (~(term | trunc)).astype(np.float64)
+            # On truncation, bootstrap the agent's own value as a proxy for
+            # V(s_{t+1}); otherwise use the next step's value.
+            boot = np.where(trunc, values, next_values)
+            delta = rewards + gamma * boot * not_term - values
+            gae = delta + gamma * gae_lambda * not_done * gae
+            gae *= active
+            advantages[t_idx] = gae.copy()
+            returns[t_idx] = gae + values
+            next_values = values
+        return advantages, returns
 
     def compute_gae_and_flatten(
         self,
@@ -308,7 +505,8 @@ class TorchRolloutCollector:
                 ep_lp = [self._step_log_probs[t][i] for t in range(ep_start, ep_end)]
                 ep_rew = [self._step_rewards[t][i] for t in range(ep_start, ep_end)]
                 ep_val = [self._step_values[t][i] for t in range(ep_start, ep_end)]
-                ep_done = [self._step_dones[t][i] for t in range(ep_start, ep_end)]
+                ep_term = [self._step_terminated[t][i] for t in range(ep_start, ep_end)]
+                ep_trunc = [self._step_truncated[t][i] for t in range(ep_start, ep_end)]
                 ep_active = [self._step_active[t][i] for t in range(ep_start, ep_end)]
 
                 # If nothing is active anywhere in the segment, skip entirely
@@ -316,28 +514,19 @@ class TorchRolloutCollector:
                 if not any(a.any() for a in ep_active):
                     continue
 
-                # Completed segment: bootstrap with zeros.
+                # Completed segment: every agent ended terminated/truncated, so
+                # the segment-end bootstrap is unused (zeros).
                 bootstrap_values = np.zeros(N, dtype=np.float64)
-
-                gae = np.zeros(N, dtype=np.float64)
-                next_values = bootstrap_values
-                advantages = [None] * len(ep_obs)
-                returns = [None] * len(ep_obs)
-
-                for t_idx in reversed(range(len(ep_obs))):
-                    active = ep_active[t_idx].astype(np.float64)
-                    rewards = ep_rew[t_idx].astype(np.float64)
-                    values = ep_val[t_idx].astype(np.float64)
-                    dones = ep_done[t_idx]
-                    not_done = (~dones).astype(np.float64)
-
-                    delta = rewards + gamma * next_values * not_done - values
-                    gae = delta + gamma * gae_lambda * not_done * gae
-                    gae *= active
-
-                    advantages[t_idx] = gae.copy()
-                    returns[t_idx] = gae + values
-                    next_values = values
+                advantages, returns = self._segment_gae(
+                    ep_active,
+                    ep_rew,
+                    ep_val,
+                    ep_term,
+                    ep_trunc,
+                    bootstrap_values,
+                    gamma,
+                    gae_lambda,
+                )
 
                 # Flatten active steps for this segment
                 for t_idx in range(len(ep_obs)):
@@ -359,7 +548,8 @@ class TorchRolloutCollector:
                 ep_lp = [self._step_log_probs[t][i] for t in range(last_start, T)]
                 ep_rew = [self._step_rewards[t][i] for t in range(last_start, T)]
                 ep_val = [self._step_values[t][i] for t in range(last_start, T)]
-                ep_done = [self._step_dones[t][i] for t in range(last_start, T)]
+                ep_term = [self._step_terminated[t][i] for t in range(last_start, T)]
+                ep_trunc = [self._step_truncated[t][i] for t in range(last_start, T)]
                 ep_active = [self._step_active[t][i] for t in range(last_start, T)]
 
                 if not any(a.any() for a in ep_active):
@@ -377,25 +567,16 @@ class TorchRolloutCollector:
                         self.actor_critic.get_value(obs_gpu).cpu().numpy().astype(np.float64)
                     )
 
-                gae = np.zeros(N, dtype=np.float64)
-                next_values = bootstrap_values
-                advantages = [None] * len(ep_obs)
-                returns_arr = [None] * len(ep_obs)
-
-                for t_idx in reversed(range(len(ep_obs))):
-                    active = ep_active[t_idx].astype(np.float64)
-                    rewards = ep_rew[t_idx].astype(np.float64)
-                    values = ep_val[t_idx].astype(np.float64)
-                    dones = ep_done[t_idx]
-                    not_done = (~dones).astype(np.float64)
-
-                    delta = rewards + gamma * next_values * not_done - values
-                    gae = delta + gamma * gae_lambda * not_done * gae
-                    gae *= active
-
-                    advantages[t_idx] = gae.copy()
-                    returns_arr[t_idx] = gae + values
-                    next_values = values
+                advantages, returns_arr = self._segment_gae(
+                    ep_active,
+                    ep_rew,
+                    ep_val,
+                    ep_term,
+                    ep_trunc,
+                    bootstrap_values,
+                    gamma,
+                    gae_lambda,
+                )
 
                 for t_idx in range(len(ep_obs)):
                     mask = ep_active[t_idx].astype(np.bool_)
@@ -439,7 +620,16 @@ class TorchRolloutCollector:
     def _normalize_rewards_batched(
         self, rewards: np.ndarray, dones: np.ndarray, active: np.ndarray
     ) -> np.ndarray:
-        """Normalise rewards using shared RewardNormalizer with batch stats."""
+        """Normalise rewards by the running std of discounted returns (no mean
+        subtraction), VecNormalize-style.
+
+        NOTE: the running-return statistic is driven by the MEAN reward across all
+        active agents each step -- a single scalar shared by the whole batch, not
+        per-agent. Large one-off spikes (e.g. the +goal_bonus) inflate the std for
+        everyone for a while. This is the standard PPO reward-norm trade-off;
+        downstream advantage normalization keeps the policy step largely invariant
+        to the absolute reward scale.
+        """
         active_r = rewards[active]
         active_d = dones[active]
         if active_r.size == 0:

@@ -93,6 +93,7 @@ class MAPPOUpdater:
         total_approx_kl = 0.0
         total_clip_frac = 0.0
         n_updates = 0
+        n_grad_skips = 0
         early_stopped = False
 
         for epoch in range(cfg.n_epochs):
@@ -178,8 +179,18 @@ class MAPPOUpdater:
                 actor_loss.backward()
                 if self._distributed:
                     _allreduce_gradients(self.actor_critic.actor)
-                nn.utils.clip_grad_norm_(self.actor_critic.actor.parameters(), cfg.max_grad_norm)
-                self.actor_optimizer.step()
+                actor_gn = nn.utils.clip_grad_norm_(
+                    self.actor_critic.actor.parameters(), cfg.max_grad_norm
+                )
+                # Skip the step on a non-finite gradient (e.g. a freak
+                # extreme-reward batch) so one bad update can't poison the
+                # weights with NaN/Inf and silently kill the rest of the run.
+                # Grads are already all-reduced under DDP, so every rank sees the
+                # same norm and makes the same skip decision (no desync).
+                if torch.isfinite(actor_gn):
+                    self.actor_optimizer.step()
+                else:
+                    n_grad_skips += 1
 
                 # --- Critic update ---
                 critic_loss = cfg.value_coef * value_loss
@@ -187,8 +198,13 @@ class MAPPOUpdater:
                 critic_loss.backward()
                 if self._distributed:
                     _allreduce_gradients(self.actor_critic.critic)
-                nn.utils.clip_grad_norm_(self.actor_critic.critic.parameters(), cfg.max_grad_norm)
-                self.critic_optimizer.step()
+                critic_gn = nn.utils.clip_grad_norm_(
+                    self.actor_critic.critic.parameters(), cfg.max_grad_norm
+                )
+                if torch.isfinite(critic_gn):
+                    self.critic_optimizer.step()
+                else:
+                    n_grad_skips += 1
 
                 # Accumulate metrics
                 total_policy_loss += policy_loss.item()
@@ -207,6 +223,11 @@ class MAPPOUpdater:
             if isinstance(ev, torch.Tensor):
                 ev = ev.item()
 
+        # Mean per-dim action std actually in effect (post-clamp). Watching this
+        # directly is the cleanest signal for the std-runaway failure mode
+        # (entropy is a proxy; this is the quantity itself).
+        action_std_mean = float(self.actor_critic.actor.current_std().mean().item())
+
         n = max(n_updates, 1)
         return {
             "policy_loss": total_policy_loss / n,
@@ -215,7 +236,9 @@ class MAPPOUpdater:
             "approx_kl": total_approx_kl / n,
             "clip_fraction": total_clip_frac / n,
             "explained_variance": ev,
+            "action_std_mean": action_std_mean,
             "n_epochs_actual": n_updates / max(cfg.n_minibatches, 1),
+            "n_grad_skips": float(n_grad_skips),
         }
 
     def update_learning_rate(self, progress: float) -> None:

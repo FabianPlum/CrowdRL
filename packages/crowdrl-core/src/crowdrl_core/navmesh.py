@@ -445,6 +445,85 @@ def path_deviation(
     return (path_length / euclidean) - 1.0
 
 
+def first_waypoint_headings(
+    navmesh: NavMesh,
+    positions: NDArray[np.float64],
+    goals: NDArray[np.float64],
+    agent_radii: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Per-agent spawn heading (radians, world frame) toward the first waypoint.
+
+    For each agent, returns ``atan2`` of the unit direction to the next funnel
+    waypoint -- i.e. the first turning point the agent should head for. Falls
+    back to the straight-line bearing to the global goal for any agent whose
+    path cannot be computed (unreachable) or whose first waypoint coincides
+    with its spawn position.
+
+    Intended for use at episode reset so agents start oriented along the
+    navigable route rather than straight at a goal that may sit behind a wall
+    relative to the first waypoint. Mirrors the ``use_navmesh=False`` behaviour
+    (global-goal bearing) for the fallback cases, so callers can use this
+    unconditionally whenever the navmesh is active.
+
+    Parameters
+    ----------
+    navmesh : NavMesh
+    positions : (N, 2) — spawn positions
+    goals : (N, 2) — global goal positions
+    agent_radii : (N,) — clearance radius per agent (larger body half-dimension)
+
+    Returns
+    -------
+    headings : (N,) float64 — torso/head heading per agent
+    """
+    positions = np.asarray(positions, dtype=np.float64)
+    goals = np.asarray(goals, dtype=np.float64)
+    # Default to the global-goal bearing (the use_navmesh=False behaviour). This
+    # also covers any agent without a computable path in the loop below.
+    headings = np.arctan2(goals[:, 1] - positions[:, 1], goals[:, 0] - positions[:, 0])
+    for i in range(len(positions)):
+        wp_dir = next_waypoint_direction(navmesh, positions[i], goals[i], float(agent_radii[i]))
+        if wp_dir is not None and (wp_dir[0] != 0.0 or wp_dir[1] != 0.0):
+            headings[i] = float(np.arctan2(wp_dir[1], wp_dir[0]))
+    return headings
+
+
+def remaining_path_lengths(
+    navmesh: NavMesh,
+    positions: NDArray[np.float64],
+    goals: NDArray[np.float64],
+    agent_radii: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Per-agent shortest navmesh path length from position to goal.
+
+    Falls back to straight-line distance for any agent whose path cannot be
+    computed (unreachable). This is the route-aware distance used by the
+    progress reward and the stuck-termination check so progress is measured
+    ALONG THE PATH, not as the straight-line bee-line to the goal -- the two
+    diverge whenever the route bends away from the goal, and grading on the
+    bee-line both under-rewards and prematurely kills correct path-following.
+    Mirrors the torch ``path_distance_metric`` / ``compute_remaining_path``.
+
+    Parameters
+    ----------
+    positions : (N, 2)
+    goals : (N, 2)
+    agent_radii : (N,) clearance radius per agent (larger body half-dimension)
+
+    Returns
+    -------
+    distances : (N,) float64 -- remaining path length (or straight-line fallback)
+    """
+    positions = np.asarray(positions, dtype=np.float64)
+    goals = np.asarray(goals, dtype=np.float64)
+    out = np.linalg.norm(goals - positions, axis=1)  # straight-line fallback
+    for i in range(len(positions)):
+        wps = shortest_path(navmesh, positions[i], goals[i], float(agent_radii[i]))
+        if wps is not None and len(wps) >= 2:
+            out[i] = sum(float(np.linalg.norm(wps[k + 1] - wps[k])) for k in range(len(wps) - 1))
+    return out
+
+
 def is_reachable(
     navmesh: NavMesh,
     start: NDArray[np.float64],

@@ -80,6 +80,50 @@ class TestRunningNormalizer:
         np.testing.assert_allclose(batch_norm.mean, incr_norm.mean, atol=1e-10)
         np.testing.assert_allclose(batch_norm.var, incr_norm.var, atol=1e-6)
 
+    def test_count_capped_no_overflow(self):
+        """The DDP reward-normalizer sync re-sums the already-merged count every
+        rollout, so an UNCAPPED count grows geometrically to ~1e305 -- then
+        m_a = var * count overflows to inf and var -> NaN -> every normalized
+        value NaN (the deterministic r360 collapse, twin of the obs-normalizer
+        r355 overflow). The count must stay capped, even when restored from a
+        checkpoint whose count already overflowed under the old bug."""
+        from crowdrl_train.normalizer import _MAX_COUNT
+
+        norm = RunningNormalizer(shape=(1,))
+        norm.update(np.random.default_rng(0).normal(scale=3.0, size=(500, 1)))
+
+        # A checkpoint / sync that drove the count past float64 sanity.
+        st = norm.state_dict()
+        st["count"] = 1e307  # var(~9) * 1e307 ~ 1e308 -> would overflow uncapped
+        norm.load_state_dict(st)
+        assert norm.count <= _MAX_COUNT, "load_state_dict must cap an overflowed count"
+
+        # Subsequent updates stay finite and bounded.
+        rng = np.random.default_rng(1)
+        for _ in range(50):
+            norm.update(rng.normal(scale=3.0, size=(200, 1)))
+            assert norm.count <= _MAX_COUNT
+        assert np.isfinite(norm.mean).all()
+        assert np.isfinite(norm.var).all()
+        assert np.isfinite(norm.normalize(np.array([[1.0]]))).all()
+
+    def test_update_drops_nonfinite_samples(self):
+        """A single NaN/Inf sample must not permanently poison running mean/var
+        (which would NaN every future normalized value)."""
+        norm = RunningNormalizer(shape=(2,))
+        good = np.array([[1.0, 2.0], [1.0, 2.0]])
+        bad = np.array([[np.nan, 0.0], [np.inf, 0.0]])
+        norm.update(np.concatenate([good, bad], axis=0))
+        assert np.isfinite(norm.mean).all()
+        assert np.isfinite(norm.var).all()
+
+        # An all-non-finite batch is a no-op (stats unchanged).
+        m0, v0, c0 = norm.mean.copy(), norm.var.copy(), norm.count
+        norm.update(np.array([[np.nan, np.inf]]))
+        np.testing.assert_array_equal(norm.mean, m0)
+        np.testing.assert_array_equal(norm.var, v0)
+        assert norm.count == c0
+
 
 class TestRewardNormalizer:
     def test_normalizes_rewards(self):
@@ -109,3 +153,27 @@ class TestRewardNormalizer:
         restored.load_state_dict(state)
 
         assert normalizer._running_return == restored._running_return
+
+    def test_overflowed_return_var_recovers_finite(self):
+        """The r360 collapse: the internal return-variance tracker's count is
+        DDP-synced (re-summed) every rollout, so without a cap it overflows and
+        std = sqrt(var) -> NaN -> every normalized reward NaN -> value_loss NaN
+        -> frozen policy. Even from an already-overflowed count, normalize() must
+        return finite rewards (the cap rescues a poisoned checkpoint too)."""
+        from crowdrl_train.normalizer import _MAX_COUNT
+
+        norm = RewardNormalizer(gamma=0.99)
+        rng = np.random.default_rng(7)
+        for _ in range(30):
+            norm.normalize(
+                rng.normal(loc=-0.2, scale=1.0, size=(16,)), np.zeros(16, dtype=np.bool_)
+            )
+
+        # Simulate the uncapped DDP sync having driven the count to overflow.
+        st = norm.state_dict()
+        st["return_var"]["count"] = 1e307
+        norm.load_state_dict(st)
+        assert norm._return_var.count <= _MAX_COUNT
+
+        out = norm.normalize(np.full(16, -0.2), np.zeros(16, dtype=np.bool_))
+        assert np.isfinite(out).all(), "overflowed return-var must not NaN the rewards"

@@ -16,14 +16,19 @@ from crowdrl_core.collision import detect_collisions
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.sensing import RaycastConfig
 from crowdrl_core.world_state import WorldState
+from crowdrl_env.reward import RewardConfig as NpRewardConfig
+from crowdrl_env.reward import RewardState as NpRewardState
+from crowdrl_env.reward import compute_rewards as np_compute_rewards
 
 # PyTorch implementations
 from crowdrl_torch.action import interpret_actions as torch_interpret_actions
 from crowdrl_torch.collision import detect_collisions_pairwise as torch_detect_collisions
 from crowdrl_torch.observation import build_observations as torch_build_observations
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
 from crowdrl_torch.reward import compute_rewards as torch_compute_rewards
 from crowdrl_torch.sensing import cast_rays as torch_cast_rays
 from crowdrl_torch.sensing import knn_social as torch_knn_social
+from crowdrl_torch.sensing import match_persistent_neighbors as torch_match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig
 from crowdrl_torch.walls import point_in_polygon, points_to_segments_nearest
 
@@ -305,6 +310,318 @@ class TestSensingEquivalence:
         n = world.n_agents
         npt.assert_allclose(torch_social[0, :n].numpy(), np_social, atol=ATOL, rtol=RTOL)
 
+    def test_neighbor_vel_history_features(self):
+        """compute_neighbor_vel_history_features in torch must match the
+        numpy reference _per_agent_neighbor_vel_history_features.
+
+        We construct a hand-rolled WorldState / TorchWorldState pair with:
+          - 4 agents in a 2-agent-per-env x 2-env layout (E=1, N=4)
+          - A fully-populated ring buffer (all W_n+1 slots written)
+          - A mix of ego rotations so the frame change is non-trivial
+          - One empty slot so masking is exercised
+        and compare the per-agent feature blocks element-wise.
+        """
+        from crowdrl_core.observation import _per_agent_neighbor_vel_history_features
+        from crowdrl_core.sensing import RaycastConfig
+        from crowdrl_core.world_state import WorldState
+        from crowdrl_torch.observation import compute_neighbor_vel_history_features
+
+        rng = np.random.default_rng(7)
+        N = 4
+        K = 3
+        W_n = 2  # buf_size = 3
+        buf = W_n + 1
+
+        positions = rng.uniform(1.0, 9.0, (N, 2))
+        velocities = rng.uniform(-1.0, 1.0, (N, 2))
+        torso = rng.uniform(-np.pi, np.pi, N)
+        heads = torso.copy()
+        shoulder = np.full(N, 0.25)
+        chest = np.full(N, 0.18)
+        masses = np.full(N, 80.0)
+        goals = rng.uniform(1.0, 9.0, (N, 2))
+
+        wall_segments = np.array(
+            [
+                [[0, 0], [10, 0]],
+                [[10, 0], [10, 10]],
+                [[10, 10], [0, 10]],
+                [[0, 10], [0, 0]],
+            ],
+            dtype=np.float64,
+        )
+
+        # Fully-populated ring buffer. Fill each (W_n+1, K, 2) slot with a
+        # unique value so we can verify the rotation & diff work correctly.
+        nb_vel_history = rng.uniform(-1.0, 1.0, (N, buf, K, 2))
+
+        # Slot 2 of agent 0 is empty (-1). All other slots point to valid
+        # neighbors.
+        neighbor_ids = np.array(
+            [
+                [1, 2, -1],
+                [0, 2, 3],
+                [0, 1, 3],
+                [0, 1, 2],
+            ],
+            dtype=np.int32,
+        )
+
+        world = WorldState(
+            positions=positions,
+            velocities=velocities,
+            torso_orientations=torso,
+            head_orientations=heads,
+            shoulder_widths=shoulder,
+            chest_depths=chest,
+            masses=masses,
+            goal_positions=goals,
+            walkable_polygon=None,
+            wall_segments=wall_segments,
+            navmesh=None,
+            neighbor_ids=neighbor_ids,
+            neighbor_vel_history=nb_vel_history,
+            step_count=5,  # post-step, so newest = (5-1) % 3 = 1, oldest = 5 % 3 = 2
+        )
+
+        config_core = ObsConfig(
+            k_neighbours=K,
+            raycast=RaycastConfig(n_rays=16),
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            neighbor_vel_history_window=W_n,
+        )
+
+        # NumPy reference: per-agent with precomputed rotation
+        np_feats = np.zeros((N, K * 2), dtype=np.float64)
+        for i in range(N):
+            cos_h, sin_h = np.cos(-torso[i]), np.sin(-torso[i])
+            rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]], dtype=np.float64)
+            np_feats[i] = _per_agent_neighbor_vel_history_features(world, i, config_core, rot)
+
+        # Torch path
+        env_cfg = EnvConfig(
+            max_agents=N,
+            k_neighbours=K,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            neighbor_vel_history_window=W_n,
+        )
+        cos_h_t = torch.tensor(np.cos(-torso), dtype=torch.float32).unsqueeze(0)
+        sin_h_t = torch.tensor(np.sin(-torso), dtype=torch.float32).unsqueeze(0)
+        nb_ids_t = torch.tensor(neighbor_ids, dtype=torch.int32).unsqueeze(0)
+        nb_hist_t = torch.tensor(nb_vel_history, dtype=torch.float32).unsqueeze(0)
+        step_t = torch.tensor([5], dtype=torch.int32)
+
+        torch_feats = compute_neighbor_vel_history_features(
+            nb_ids_t,
+            nb_hist_t,
+            cos_h_t,
+            sin_h_t,
+            step_t,
+            env_cfg,
+        )  # (1, N, K*2)
+
+        npt.assert_allclose(torch_feats[0].numpy(), np_feats, atol=ATOL, rtol=RTOL)
+
+        # Sanity: empty-slot entries (agent 0, slot 2) must be zero
+        assert np.allclose(np_feats[0, 4:6], 0.0), "empty slot must yield zero diff"
+
+    def test_neighbor_trajectory_features(self):
+        """compute_neighbor_trajectory_features in torch must match the
+        numpy reference _per_agent_neighbor_trajectory_features.
+
+        Constructs a scene with populated Option A buffers and a mix of
+        valid / empty neighbor slots, then compares per-agent blocks
+        element-wise.
+        """
+        from crowdrl_core.observation import _per_agent_neighbor_trajectory_features
+        from crowdrl_core.sensing import RaycastConfig
+        from crowdrl_core.world_state import WorldState
+        from crowdrl_torch.observation import compute_neighbor_trajectory_features
+
+        rng = np.random.default_rng(13)
+        N = 5
+        K = 3
+        W = 4
+        buf = W + 1
+        dt = 0.01
+
+        positions = rng.uniform(1.0, 9.0, (N, 2))
+        velocities = rng.uniform(-1.0, 1.0, (N, 2))
+        torso = rng.uniform(-np.pi, np.pi, N)
+        heads = torso.copy()
+        shoulder = np.full(N, 0.25)
+        chest = np.full(N, 0.18)
+        masses = np.full(N, 80.0)
+        goals = rng.uniform(1.0, 9.0, (N, 2))
+        preferred = np.full(N, 1.3)
+
+        # Option A buffers
+        spawn = positions - rng.uniform(-2.0, 2.0, (N, 2))
+        init_g = np.linalg.norm(goals - spawn, axis=-1) + 1.0
+        cum_path = rng.uniform(0.5, 5.0, N)
+        pos_hist = rng.uniform(0.0, 10.0, (N, buf, 2))
+        gdist_hist = rng.uniform(0.5, 10.0, (N, buf))
+
+        wall_segments = np.array(
+            [
+                [[0, 0], [10, 0]],
+                [[10, 0], [10, 10]],
+                [[10, 10], [0, 10]],
+                [[0, 10], [0, 0]],
+            ],
+            dtype=np.float64,
+        )
+
+        # Neighbor-ID table: agent 0 has slot 2 empty, others fully populated.
+        neighbor_ids = np.array(
+            [
+                [1, 2, -1],
+                [0, 2, 3],
+                [0, 1, 4],
+                [0, 1, 2],
+                [0, 2, 3],
+            ],
+            dtype=np.int32,
+        )
+
+        world = WorldState(
+            positions=positions,
+            velocities=velocities,
+            torso_orientations=torso,
+            head_orientations=heads,
+            shoulder_widths=shoulder,
+            chest_depths=chest,
+            masses=masses,
+            goal_positions=goals,
+            walkable_polygon=None,
+            wall_segments=wall_segments,
+            navmesh=None,
+            spawn_positions=spawn,
+            initial_goal_distances=init_g,
+            cumulative_path_length=cum_path,
+            pos_history=pos_hist,
+            gdist_history=gdist_hist,
+            preferred_speeds=preferred,
+            neighbor_ids=neighbor_ids,
+            step_count=3,  # anywhere in the buffer range
+        )
+
+        config_core = ObsConfig(
+            k_neighbours=K,
+            raycast=RaycastConfig(n_rays=16),
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            temporal_memory_dt=dt,
+            use_neighbor_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+
+        # NumPy reference
+        np_feats = np.zeros((N, K * 3), dtype=np.float64)
+        for i in range(N):
+            np_feats[i] = _per_agent_neighbor_trajectory_features(world, i, config_core)
+
+        # PyTorch
+        env_cfg = EnvConfig(
+            max_agents=N,
+            k_neighbours=K,
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            use_neighbor_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+
+        def t(x, dtype):
+            return torch.tensor(x, dtype=dtype).unsqueeze(0)
+
+        torch_feats = compute_neighbor_trajectory_features(
+            t(neighbor_ids, torch.int32),
+            t(positions, torch.float32),
+            t(goals, torch.float32),
+            t(spawn, torch.float32),
+            t(init_g, torch.float32),
+            t(cum_path, torch.float32),
+            t(pos_hist, torch.float32),
+            t(gdist_hist, torch.float32),
+            t(preferred, torch.float32),
+            torch.tensor([3], dtype=torch.int32),
+            env_cfg,
+        )  # (1, N, K*3)
+
+        npt.assert_allclose(torch_feats[0].numpy(), np_feats, atol=ATOL, rtol=RTOL)
+
+        # Empty slot sanity: agent 0 slot 2 -> last 3 dims of row 0 are zero
+        assert np.allclose(np_feats[0, 6:9], 0.0)
+
+    def test_match_persistent_neighbors(self):
+        """Numpy and torch match_persistent_neighbors must agree bit-for-bit
+        on a deterministic fixture covering all four scenarios: first step
+        fill, stable retention, out-of-range eviction, inactive eviction."""
+        from crowdrl_core.sensing import match_persistent_neighbors as np_match
+
+        # Hand-built 6-agent scene. Agents live on a line at x = 0..5.
+        # Agent 2 sits in an initially-valid slot of agent 0 but is about
+        # to go inactive (simulates goal reach).
+        n = 6
+        positions = np.array(
+            [[0.0, 0.0], [1.2, 0.0], [2.0, 0.0], [3.5, 0.0], [6.0, 0.0], [9.0, 0.0]],
+            dtype=np.float32,
+        )
+        K = 3
+        prev_np = np.array(
+            [
+                [2, 4, -1],  # agent 0: slot 0 -> inactive below, slot 1 -> out of range below
+                [0, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+                [-1, -1, -1],
+            ],
+            dtype=np.int32,
+        )
+        active_np = np.array([True, True, False, True, True, True])  # agent 2 inactive
+        sensing_radius = 5.0
+
+        # NumPy reference
+        np_slots = np_match(
+            positions.astype(np.float64),
+            prev_np,
+            active_np,
+            sensing_radius=sensing_radius,
+            k=K,
+        )
+
+        # PyTorch (E=1)
+        config = EnvConfig(max_agents=n, k_neighbours=K)
+        torch_positions = torch.tensor(positions, dtype=torch.float32).unsqueeze(0)
+        torch_prev = torch.tensor(prev_np, dtype=torch.int32).unsqueeze(0)
+        torch_active = torch.tensor(active_np, dtype=torch.bool).unsqueeze(0)
+        torch_nagents = torch.tensor([n], dtype=torch.int32)
+
+        torch_slots = torch_match_persistent_neighbors(
+            torch_positions,
+            torch_prev,
+            torch_active,
+            torch_nagents,
+            sensing_radius=sensing_radius,
+            config=config,
+        )
+
+        npt.assert_array_equal(torch_slots[0].numpy(), np_slots)
+
+        # Sanity check the semantics independently of bit-equivalence:
+        # - agent 0's slot 0 (prev agent 2) is evicted because 2 is inactive
+        # - agent 0's slot 1 (prev agent 4 at dist 6) is evicted because out of range
+        # -> both slots should be refilled from the nearest in-range active set
+        #    = {1 (dist 1.2), 3 (dist 3.5)}, which are agents 1 and 3
+        slot0 = set(int(x) for x in np_slots[0] if x >= 0)
+        assert 1 in slot0, "nearest in-range active neighbor (agent 1) should be kept"
+        assert 3 in slot0, "second nearest (agent 3) should be kept"
+        assert 2 not in slot0, "inactive agent should be evicted"
+        assert 4 not in slot0, "out-of-range agent should be evicted"
+
 
 class TestObservationEquivalence:
     """Test full observation builder matches."""
@@ -337,6 +654,38 @@ class TestObservationEquivalence:
         n = world.n_agents
         npt.assert_allclose(torch_obs[0, :n].numpy(), np_obs, atol=ATOL, rtol=RTOL)
 
+    def test_build_observations_nan_robust(self):
+        """build_observations must NEVER emit a NaN obs, even if an input is
+        non-finite. The per-feature clamps guard div-by-ZERO, not NaN
+        propagation (NaN.clamp() == NaN), so the builder nan_to_num's its output
+        -- the r355 obs-NaN that poisoned the policy/critic and killed training.
+        Checked for BOTH numpy and torch builders."""
+        world = _make_test_world(n_agents=8)
+        world.velocities[0] = [np.nan, np.inf]  # non-finite inputs that flow into the obs
+        world.positions[1] = [np.inf, np.nan]
+        obs_config = ObsConfig(k_neighbours=8, raycast=RaycastConfig(n_rays=16))
+
+        np_obs = build_observations_batch(world, obs_config)
+        assert np.isfinite(np_obs).all(), "numpy obs builder emitted non-finite values"
+
+        config = EnvConfig(max_agents=8, max_segments=128, k_neighbours=8, n_rays=16)
+        td = _world_to_torch(world, config)
+        torch_obs = torch_build_observations(
+            td["positions"],
+            td["velocities"],
+            td["torso_orientations"],
+            torch.tensor(world.head_orientations, dtype=torch.float32).unsqueeze(0),
+            td["shoulder_widths"],
+            td["chest_depths"],
+            td["goal_positions"],
+            td["active_mask"],
+            td["n_agents"],
+            td["wall_segments"],
+            td["n_segments"],
+            config,
+        )
+        assert torch.isfinite(torch_obs).all(), "torch obs builder emitted non-finite values"
+
 
 class TestRewardEquivalence:
     """Test reward computation matches."""
@@ -362,7 +711,7 @@ class TestRewardEquivalence:
         config = EnvConfig(max_agents=n)
 
         # PyTorch (E=1)
-        torch_rewards, torch_reached, torch_dists = torch_compute_rewards(
+        torch_rewards, torch_reached, torch_dists, torch_comps = torch_compute_rewards(
             torch.tensor(positions).unsqueeze(0),
             torch.tensor(velocities).unsqueeze(0),
             torch.tensor(goal_positions).unsqueeze(0),
@@ -382,3 +731,314 @@ class TestRewardEquivalence:
         # Reached goal agents should have positive reward
         if reached.any():
             assert rewards[reached].max() >= config.goal_bonus - 1.0
+
+        # Per-component breakdown is exhaustive: channels sum to total reward.
+        comps = torch_comps[0].numpy()
+        assert comps.shape == (n, len(REWARD_COMPONENT_NAMES))
+        npt.assert_allclose(comps.sum(axis=-1), rewards, atol=1e-4, rtol=1e-4)
+
+    def test_velocity_weighted_collision_parity(self):
+        """The torch training reward must match the numpy reference reward when
+        impact-speed weighting (P1) is ON -- otherwise enabling the flag in a
+        config would silently change the scorecard (numpy) but not training
+        (torch). Isolates the collision/wall terms by zeroing everything else.
+
+        Scene (n=4): agents 0,1 in a head-on agent-collision (closing 3 m/s),
+        agent 2 in wall contact (own speed 2 m/s), agent 3 idle.
+        """
+        n = 4
+        positions = np.array([[5.0, 5.0], [5.4, 5.0], [2.0, 2.0], [8.0, 8.0]], dtype=np.float32)
+        velocities = np.array([[1.5, 0.0], [-1.5, 0.0], [2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)  # far -> no goal bonus
+        radii = np.array([0.3, 0.3, 0.3, 0.3], dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        collision_mask = np.array([True, True, False, False])
+        wall_mask = np.array([False, False, True, False])
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=-2.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=-0.5,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+        )
+
+        # NumPy reference (fresh state -> progress skipped; collision_velocities
+        # defaults to the passed velocities).
+        np_rewards, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            collision_mask,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_collision_mask=wall_mask,
+            agent_radii=radii.astype(np.float64),
+        )
+
+        # Torch training path (E=1).
+        cfg = EnvConfig(max_agents=n, **common)
+        t_rewards, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(collision_mask).unsqueeze(0),
+            torch.zeros(1, n),  # prev_distances (progress weight 0 -> ignored)
+            cfg,
+            wall_collision_mask=torch.tensor(wall_mask).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+
+        # Hand-computed expectation: 0,1 -> -2*(0.5+0.5*3)= -4; 2 -> -0.5*(0.5+0.5*2)= -0.75.
+        npt.assert_allclose(np_rewards, [-4.0, -4.0, -0.75, 0.0], atol=ATOL)
+        # The whole point: torch training reward == numpy reference reward.
+        npt.assert_allclose(t_rewards[0].numpy(), np_rewards, atol=ATOL, rtol=RTOL)
+
+    def test_collision_penalty_cap_parity(self):
+        """collision_penalty_cap floors the per-step collision penalty so the
+        velocity weighting may DISCOUNT slow contact but not AMPLIFY fast contact
+        below the cap. Same head-on scene as the parity test (closing 3 m/s ->
+        uncapped -4.0); the -2.0 cap clamps it to -2.0, the wall (-0.75) is above
+        the cap so untouched, and numpy MUST still equal torch (the cap lives in
+        BOTH reward paths -- the dual-implementation trap)."""
+        n = 4
+        positions = np.array([[5.0, 5.0], [5.4, 5.0], [2.0, 2.0], [8.0, 8.0]], dtype=np.float32)
+        velocities = np.array([[1.5, 0.0], [-1.5, 0.0], [2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        radii = np.array([0.3, 0.3, 0.3, 0.3], dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        collision_mask = np.array([True, True, False, False])
+        wall_mask = np.array([False, False, True, False])
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=-2.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=-0.5,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.5,
+            collision_speed_scale=0.5,
+            collision_penalty_cap=-2.0,  # the cap under test
+        )
+
+        np_rewards, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            collision_mask,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_collision_mask=wall_mask,
+            agent_radii=radii.astype(np.float64),
+        )
+
+        cfg = EnvConfig(max_agents=n, **common)
+        t_rewards, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(collision_mask).unsqueeze(0),
+            torch.zeros(1, n),
+            cfg,
+            wall_collision_mask=torch.tensor(wall_mask).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+
+        # Head-on pair clamped -4.0 -> -2.0; wall (-0.75) above the cap, untouched.
+        npt.assert_allclose(np_rewards, [-2.0, -2.0, -0.75, 0.0], atol=ATOL)
+        npt.assert_allclose(t_rewards[0].numpy(), np_rewards, atol=ATOL, rtol=RTOL)
+
+    def test_velocity_weighted_proximity_parity(self):
+        """numpy and torch agent-PROXIMITY penalties must match when closing-
+        speed weighting (option 1) is ON. Guards the opposite sign conventions
+        (numpy diff = p_j-p_i, torch diff_p = p_i-p_j) in the two proximity
+        blocks, and that closing speed is signed correctly (approach taxed,
+        recede free). Two agents 0.8 m apart (t=0.5 on the ramp)."""
+        n = 2
+        positions = np.array([[0.0, 0.0], [0.8, 0.0]], dtype=np.float32)
+        radii = np.array([0.3, 0.3], dtype=np.float32)  # contact 0.6 -> t=0.5 at 0.8 m
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        no_coll = np.zeros(n, dtype=np.bool_)
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=0.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=0.0,
+            agent_proximity_penalty_near=-0.02,
+            agent_proximity_penalty_far=-0.002,
+            personal_space_radius=1.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_proximity=True,
+            proximity_speed_floor=0.25,
+            proximity_speed_scale=0.5,
+        )
+
+        def both(vel):
+            np_r, _ = np_compute_rewards(
+                positions.astype(np.float64),
+                vel.astype(np.float64),
+                headings.astype(np.float64),
+                goal_positions.astype(np.float64),
+                preferred.astype(np.float64),
+                active,
+                no_coll,
+                NpRewardState(),
+                NpRewardConfig(inverse_distance_weight=0.0, **common),
+                dt=0.01,
+                agent_radii=radii.astype(np.float64),
+            )
+            cfg = EnvConfig(max_agents=n, **common)
+            t_r, _, _, _ = torch_compute_rewards(
+                torch.tensor(positions).unsqueeze(0),
+                torch.tensor(vel).unsqueeze(0),
+                torch.tensor(goal_positions).unsqueeze(0),
+                torch.tensor(active).unsqueeze(0),
+                torch.tensor(no_coll).unsqueeze(0),
+                torch.zeros(1, n),
+                cfg,
+                agent_radii=torch.tensor(radii).unsqueeze(0),
+            )
+            return np_r, t_r[0].numpy()
+
+        approaching = np.array([[1.0, 0.0], [-1.0, 0.0]], dtype=np.float32)  # closing 2 m/s
+        parallel = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)  # closing 0
+        receding = np.array([[-1.0, 0.0], [1.0, 0.0]], dtype=np.float32)  # closing -2
+
+        results = {
+            k: both(v) for k, v in [("app", approaching), ("par", parallel), ("rec", receding)]
+        }
+        for np_r, t_r in results.values():
+            npt.assert_allclose(t_r, np_r, atol=ATOL, rtol=RTOL)  # numpy == torch
+
+        app, par, rec = results["app"][0], results["par"][0], results["rec"][0]
+        assert app[0] < par[0] < 0.0  # approaching taxed most; coexisting still > 0 cost
+        assert abs(rec[0]) < 1e-6  # receding -> no proximity penalty
+        # pair_penalty 0.5*(-0.02)+0.5*(-0.002) = -0.011; weight 0.25+0.5*2 = 1.25 -> -0.01375
+        assert abs(app[0] - (-0.01375)) < 1e-5
+
+
+class TestTemporalMemoryEquivalence:
+    """Numpy and torch temporal-memory features should match numerically."""
+
+    def test_temporal_features_numpy_vs_torch(self):
+        from crowdrl_core.observation import (
+            ObsConfig as CoreObsConfig,
+            _temporal_features as np_temporal_features,
+        )
+        from crowdrl_torch.observation import compute_temporal_features as torch_temporal
+
+        W = 5
+        n = 4
+        rng = np.random.default_rng(123)
+
+        pos_now = rng.uniform(0, 10, (n, 2))
+        spawn = rng.uniform(0, 10, (n, 2))
+        goal = rng.uniform(0, 10, (n, 2))
+        init_g = np.linalg.norm(goal - spawn, axis=1)
+        cum_path = rng.uniform(0, 20, n)
+        pos_window = rng.uniform(0, 10, (n, 2))
+        gdist_window = rng.uniform(0, 10, n)
+        gdist_now = np.linalg.norm(goal - pos_now, axis=1)
+        preferred = np.full(n, 1.3)
+        step_count = 20
+        max_steps = 100
+        dt = 0.01
+
+        np_out = np_temporal_features(
+            pos_now=pos_now,
+            gdist_now=gdist_now,
+            spawn_pos=spawn,
+            initial_gdist=init_g,
+            cum_path=cum_path,
+            pos_window=pos_window,
+            gdist_window=gdist_window,
+            step_count=step_count,
+            max_steps=max_steps,
+            preferred_speeds=preferred,
+            dt=dt,
+            window=W,
+        )
+
+        # Build a (1, n, ...) torch state with step_count broadcast to (1,) and
+        # the ring-buffer slot at `step_count % buf_size` pre-filled with
+        # pos_window / gdist_window, so the gather picks them up correctly.
+        buf_size = W + 1
+        pos_history = np.broadcast_to(spawn[:, np.newaxis, :], (n, buf_size, 2)).copy()
+        gdist_history = np.broadcast_to(init_g[:, np.newaxis], (n, buf_size)).copy()
+        read_idx = step_count % buf_size
+        pos_history[:, read_idx, :] = pos_window
+        gdist_history[:, read_idx] = gdist_window
+
+        core_cfg = CoreObsConfig(
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            temporal_memory_max_steps=max_steps,
+            temporal_memory_dt=dt,
+        )
+        # Build a minimal EnvConfig mirroring the above for torch
+        torch_cfg = EnvConfig(
+            max_agents=n,
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            max_steps=max_steps,
+            dt=dt,
+        )
+
+        torch_out = torch_temporal(
+            positions=torch.tensor(pos_now, dtype=torch.float32).unsqueeze(0),
+            spawn_positions=torch.tensor(spawn, dtype=torch.float32).unsqueeze(0),
+            initial_goal_distances=torch.tensor(init_g, dtype=torch.float32).unsqueeze(0),
+            cumulative_path_length=torch.tensor(cum_path, dtype=torch.float32).unsqueeze(0),
+            pos_history=torch.tensor(pos_history, dtype=torch.float32).unsqueeze(0),
+            gdist_history=torch.tensor(gdist_history, dtype=torch.float32).unsqueeze(0),
+            goal_positions=torch.tensor(goal, dtype=torch.float32).unsqueeze(0),
+            preferred_speeds=torch.tensor(preferred, dtype=torch.float32).unsqueeze(0),
+            step_count=torch.tensor([step_count], dtype=torch.int32),
+            config=torch_cfg,
+        )
+
+        torch_out_np = torch_out[0].numpy()
+        npt.assert_allclose(torch_out_np, np_out, atol=ATOL, rtol=RTOL)
+        # Also verify the obs_dim reports +6 when flag is set
+        assert core_cfg.obs_dim == CoreObsConfig().obs_dim + 6

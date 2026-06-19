@@ -16,7 +16,7 @@ from crowdrl_train.networks import Actor, ActorCritic, Critic
 def tiny_network_config() -> NetworkConfig:
     """Minimal network config for fast tests."""
     return NetworkConfig(
-        obs_dim=79,
+        obs_dim=80,
         action_dim=4,
         actor_hidden_sizes=(32, 32),
         critic_hidden_sizes=(32, 32),
@@ -58,7 +58,7 @@ def tiny_train_config(tiny_env_config: CrowdEnvConfig) -> TrainConfig:
     """Minimal training config for fast integration tests."""
     return TrainConfig(
         network=NetworkConfig(
-            obs_dim=79,
+            obs_dim=80,
             action_dim=4,
             actor_hidden_sizes=(32, 32),
             critic_hidden_sizes=(32, 32),

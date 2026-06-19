@@ -175,15 +175,15 @@ class TestRolloutCollector:
             )
             vec_env = SubprocVecEnv(config, seeds=[42, 43])
 
-            net_config = NetworkConfig(obs_dim=79, action_dim=4,
+            net_config = NetworkConfig(obs_dim=80, action_dim=4,
                                        actor_hidden_sizes=(32, 32),
                                        critic_hidden_sizes=(32, 32))
             actor_critic = ActorCritic(net_config)
-            obs_norm = RunningNormalizer(shape=(79,))
+            obs_norm = RunningNormalizer(shape=(80,))
 
             collector = RolloutCollector(
                 vec_env, actor_critic, obs_norm, None, torch.device("cpu"),
-                obs_dim=79, action_dim=4,
+                obs_dim=80, action_dim=4,
             )
 
             episodes = collector.collect(n_agent_steps=200)

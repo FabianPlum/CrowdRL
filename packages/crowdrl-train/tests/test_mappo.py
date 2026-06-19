@@ -39,12 +39,12 @@ class TestMAPPOUpdater:
             from crowdrl_train.mappo import MAPPOUpdater
             from crowdrl_train.networks import ActorCritic
 
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
             updater = MAPPOUpdater(ac, PPOConfig(n_epochs=2), torch.device("cpu"))
             batch = FlatBatch(
-                obs=torch.randn(50, 79), actions_raw=torch.randn(50, 4) * 0.5,
+                obs=torch.randn(50, 80), actions_raw=torch.randn(50, 4) * 0.5,
                 log_probs=torch.randn(50) * 0.5, advantages=torch.randn(50),
                 returns=torch.randn(50), values=torch.randn(50),
             )
@@ -68,14 +68,14 @@ class TestMAPPOUpdater:
             from crowdrl_train.mappo import MAPPOUpdater
             from crowdrl_train.networks import ActorCritic
 
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
             updater = MAPPOUpdater(
                 ac, PPOConfig(n_epochs=100, target_kl=1e-10), torch.device("cpu")
             )
             batch = FlatBatch(
-                obs=torch.randn(50, 79), actions_raw=torch.randn(50, 4) * 0.5,
+                obs=torch.randn(50, 80), actions_raw=torch.randn(50, 4) * 0.5,
                 log_probs=torch.randn(50) * 0.5, advantages=torch.randn(50),
                 returns=torch.randn(50), values=torch.randn(50),
             )
@@ -144,7 +144,7 @@ class TestMAPPOUpdater:
             from crowdrl_train.mappo import MAPPOUpdater
             from crowdrl_train.networks import ActorCritic
 
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
             # distributed=True forces the DDP code paths even with world_size=1
@@ -153,7 +153,7 @@ class TestMAPPOUpdater:
                 torch.device("cpu"), distributed=True,
             )
             batch = FlatBatch(
-                obs=torch.randn(50, 79), actions_raw=torch.randn(50, 4) * 0.5,
+                obs=torch.randn(50, 80), actions_raw=torch.randn(50, 4) * 0.5,
                 log_probs=torch.randn(50) * 0.5, advantages=torch.randn(50),
                 returns=torch.randn(50), values=torch.randn(50),
             )
@@ -212,7 +212,7 @@ class TestMAPPOUpdater:
             from crowdrl_train.networks import ActorCritic
 
             torch.manual_seed(0)
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
             updater = MAPPOUpdater(
@@ -220,7 +220,7 @@ class TestMAPPOUpdater:
                 torch.device("cpu"), distributed=True,
             )
             batch = FlatBatch(
-                obs=torch.randn(50, 79), actions_raw=torch.randn(50, 4) * 0.5,
+                obs=torch.randn(50, 80), actions_raw=torch.randn(50, 4) * 0.5,
                 log_probs=torch.randn(50) * 0.5, advantages=torch.randn(50),
                 returns=torch.randn(50), values=torch.randn(50),
             )

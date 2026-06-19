@@ -16,6 +16,102 @@ from torch import Tensor
 from crowdrl_torch.sensing import cast_rays, knn_social
 from crowdrl_torch.types import EnvConfig
 
+_TEMPORAL_EPS = 1e-6
+
+
+def compute_temporal_features(
+    positions: Tensor,
+    spawn_positions: Tensor,
+    initial_goal_distances: Tensor,
+    cumulative_path_length: Tensor,
+    pos_history: Tensor,
+    gdist_history: Tensor,
+    goal_positions: Tensor,
+    preferred_speeds: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the 6D temporal-memory feature block.
+
+    All operations are pure tensor ops — torch.compile friendly, no host sync.
+
+    Parameters
+    ----------
+    positions : (E, N, 2) — current positions
+    spawn_positions : (E, N, 2) — positions at episode start
+    initial_goal_distances : (E, N) — ||goal - spawn|| at episode start
+    cumulative_path_length : (E, N) — running path length
+    pos_history : (E, N, W+1, 2) — ring buffer of positions
+    gdist_history : (E, N, W+1) — ring buffer of goal distances
+    goal_positions : (E, N, 2) — current goal
+    preferred_speeds : (E, N) — per-agent preferred speed
+    step_count : (E,) int — current episode step per env
+    config : EnvConfig
+
+    Returns
+    -------
+    features : (E, N, 6) float — the 6 temporal features per agent
+    """
+    E, N = positions.shape[:2]
+    W = config.temporal_memory_window
+    buf_size = W + 1
+    eps = _TEMPORAL_EPS
+
+    # Current goal distance
+    gdist_now = ((goal_positions - positions) ** 2).sum(dim=-1).sqrt()  # (E, N)
+
+    # Read "W steps ago" slot from the ring buffer.
+    # Writer stores pos_{t+1} at index (t % buf_size) where t is the pre-step
+    # step_count. After the step, step_count becomes t+1. The oldest valid
+    # entry in a buf_size=W+1 ring is at index (t+1) % buf_size = new_step_count
+    # % buf_size, which contains pos_{t+1-W} (or spawn_pos if t<W, since
+    # all slots are initialised to spawn_pos on reset).
+    read_idx = (step_count % buf_size).long()  # (E,)
+
+    # Gather: pos_history[e, n, read_idx[e], :] -> (E, N, 2)
+    read_idx_pos = read_idx.view(E, 1, 1, 1).expand(E, N, 1, 2)  # (E, N, 1, 2)
+    pos_window = pos_history.gather(dim=2, index=read_idx_pos).squeeze(2)  # (E, N, 2)
+
+    read_idx_gd = read_idx.view(E, 1, 1).expand(E, N, 1)  # (E, N, 1)
+    gdist_window = gdist_history.gather(dim=2, index=read_idx_gd).squeeze(2)  # (E, N)
+
+    # 1. Displacement from spawn / initial goal distance
+    disp_spawn = ((positions - spawn_positions) ** 2).sum(dim=-1).sqrt()
+    safe_init = initial_goal_distances.clamp(min=eps)
+    disp_spawn_norm = disp_spawn / safe_init
+
+    # 2. Cumulative path length / initial goal distance
+    cum_path_norm = cumulative_path_length / safe_init
+
+    # 3. Path efficiency: displacement / cumulative path
+    safe_cum = cumulative_path_length.clamp(min=eps)
+    path_eff = (disp_spawn / safe_cum).clamp(min=0.0, max=1.0)
+
+    # 4. Elapsed fraction (broadcast step_count per env)
+    max_steps = float(max(config.max_steps, 1))
+    elapsed = (step_count.to(positions.dtype).view(E, 1) / max_steps).expand(E, N)
+
+    # 5. Displacement over window, normalised by (v_pref * W * dt)
+    disp_window = ((positions - pos_window) ** 2).sum(dim=-1).sqrt()
+    expected_window = (preferred_speeds * (W * config.dt)).clamp(min=eps)
+    disp_window_norm = disp_window / expected_window
+
+    # 6. Goal progress over window (positive = approaching goal)
+    goal_progress_window = gdist_window - gdist_now
+    goal_progress_window_norm = goal_progress_window / expected_window
+
+    return torch.stack(
+        [
+            disp_spawn_norm,
+            cum_path_norm,
+            path_eff,
+            elapsed,
+            disp_window_norm,
+            goal_progress_window_norm,
+        ],
+        dim=-1,
+    )  # (E, N, 6)
+
 
 def compute_navmesh_signals(
     positions: Tensor,
@@ -28,7 +124,7 @@ def compute_navmesh_signals(
     goal_positions: Tensor,
     config: EnvConfig,
 ) -> Tensor:
-    """Compute blended waypoint direction + path deviation from pre-computed waypoints.
+    """Compute single next-waypoint direction + path deviation from pre-computed waypoints.
 
     All operations are pure tensor ops — no CPU round-trip.
 
@@ -54,37 +150,23 @@ def compute_navmesh_signals(
     cursor = waypoint_cursor.long()  # (E, N)
     n_wp = n_waypoints.long()  # (E, N)
 
-    # Clamp cursor to valid range
+    # Point the policy at the SINGLE current waypoint (the next turning point it
+    # must reach) -- no distance-weighted look-ahead blend. "Next waypoint is all
+    # there is", matching the numpy obs builder (next_waypoint_direction) and
+    # JuPedSim. A blend of the current + next waypoint was a train/deploy
+    # divergence: training saw a blended bearing the deployed single-waypoint
+    # signal never produces.
     max_idx = (n_wp - 1).clamp(min=0)  # (E, N)
     cursor_a = cursor.clamp(min=0, max=MAX_WP - 1).clamp(max=max_idx)
-    cursor_b = (cursor_a + 1).clamp(max=max_idx)  # next waypoint (or same if last)
 
-    # Gather waypoints at cursor_a and cursor_b: (E, N, 2)
     idx_a = cursor_a.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)  # (E, N, 1, 2)
-    idx_b = cursor_b.unsqueeze(-1).unsqueeze(-1).expand(E, N, 1, 2)  # (E, N, 1, 2)
     wp_a = waypoints.gather(2, idx_a).squeeze(2)  # (E, N, 2)
-    wp_b = waypoints.gather(2, idx_b).squeeze(2)  # (E, N, 2)
 
-    # Distances to each waypoint
-    diff_a = wp_a - positions  # (E, N, 2)
-    diff_b = wp_b - positions  # (E, N, 2)
-    d_a = (diff_a**2).sum(dim=-1).sqrt()  # (E, N)
-    d_b = (diff_b**2).sum(dim=-1).sqrt()  # (E, N)
-
-    # Blending: closer waypoint gets LESS influence.
-    # When only one waypoint remains (cursor_a == cursor_b), both point to the
-    # same location and the blend doesn't matter — weight is effectively 1.0.
+    # Unit direction from agent to the current waypoint (world frame)
     eps = 1e-8
-    total = d_a + d_b + eps
-    weight_a = d_a / total  # small when close to wp_a → low influence
-    weight_b = d_b / total
-
-    blended = weight_a.unsqueeze(-1) * wp_a + weight_b.unsqueeze(-1) * wp_b  # (E, N, 2)
-
-    # Direction from agent to blended target (world frame)
-    direction = blended - positions  # (E, N, 2)
-    dir_norm = (direction**2).sum(dim=-1).sqrt().clamp(min=eps)  # (E, N)
-    direction = direction / dir_norm.unsqueeze(-1)  # unit vector
+    diff_a = wp_a - positions  # (E, N, 2)
+    d_a = (diff_a**2).sum(dim=-1).sqrt()  # (E, N)
+    direction = diff_a / d_a.clamp(min=eps).unsqueeze(-1)  # unit vector
 
     # Rotate to ego frame
     dir_ego_x = cos_h * direction[..., 0] - sin_h * direction[..., 1]
@@ -109,6 +191,144 @@ def compute_navmesh_signals(
     return torch.stack([dir_ego_x, dir_ego_y, path_dev], dim=-1)  # (E, N, 3)
 
 
+def compute_neighbor_trajectory_features(
+    neighbor_ids: Tensor,
+    positions: Tensor,
+    goal_positions: Tensor,
+    spawn_positions: Tensor,
+    initial_goal_distances: Tensor,
+    cumulative_path_length: Tensor,
+    pos_history: Tensor,
+    gdist_history: Tensor,
+    preferred_speeds: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the (E, N, K*3) neighbor trajectory-features block.
+
+    For each persistent neighbor slot, emits 3 scalars computed on the
+    neighbor's own Option A temporal-memory state, indexed via
+    ``neighbor_ids``:
+
+        1. path_efficiency  (neighbor's disp_from_spawn / cum_path, clipped)
+        2. disp_window_norm (neighbor's ||pos_now - pos_W_ago|| / (v_pref * W * dt))
+        3. goal_progress    (neighbor's (gdist_W_ago - gdist_now) / (v_pref * W * dt))
+
+    Empty slots (neighbor_ids == -1) emit zeros.
+    """
+    E, N = positions.shape[:2]
+    K = config.k_neighbours
+    W = config.temporal_memory_window
+    buf = W + 1
+    # EnvConfig stores simulation dt as ``dt`` directly (unlike ObsConfig which
+    # carries a redundant temporal_memory_dt). They must match in practice.
+    dt = config.dt
+    eps = _TEMPORAL_EPS
+
+    # Safe indices: clamp -1 to 0 so the gather never indexes out of bounds.
+    nb_ids_safe = neighbor_ids.clamp(min=0).long()  # (E, N, K)
+    valid = (neighbor_ids >= 0).to(positions.dtype)  # (E, N, K)
+
+    # Per-env expansion index for advanced indexing.
+    env_idx = torch.arange(E, device=positions.device).view(E, 1, 1).expand(E, N, K)
+
+    # Gather neighbor-agent temporal state: each shape (E, N, K, ...)
+    spawn_j = spawn_positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    pos_j_now = positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    goal_j = goal_positions[env_idx, nb_ids_safe]  # (E, N, K, 2)
+    cum_j = cumulative_path_length[env_idx, nb_ids_safe]  # (E, N, K)
+    pref_j = preferred_speeds[env_idx, nb_ids_safe]  # (E, N, K)
+    # ``initial_goal_distances`` isn't needed for these three features -- path
+    # efficiency uses cum_j as its denominator, and the window features
+    # normalise by expected walking distance, not initial goal distance.
+
+    # pos_history: (E, N, buf, 2) -> gather neighbor rows -> (E, N, K, buf, 2)
+    # Then pick the oldest slot per-env (index step_count % buf).
+    read_idx = (step_count % buf).long()  # (E,)
+
+    # Gather per-neighbor pos_history: index along agent-dim of pos_history
+    # which is dim=1. We want output shape (E, N, K, buf, 2).
+    # Use advanced indexing on the agent dim.
+    pos_hist_j = pos_history[env_idx, nb_ids_safe]  # (E, N, K, buf, 2)
+    gdist_hist_j = gdist_history[env_idx, nb_ids_safe]  # (E, N, K, buf)
+
+    # Pick the "W steps ago" slot per env: index along buf dim with read_idx.
+    read_idx_exp = read_idx.view(E, 1, 1, 1, 1).expand(E, N, K, 1, 2)
+    pos_j_win = pos_hist_j.gather(dim=3, index=read_idx_exp).squeeze(3)  # (E, N, K, 2)
+    read_idx_gd = read_idx.view(E, 1, 1, 1).expand(E, N, K, 1)
+    gdist_j_win = gdist_hist_j.gather(dim=3, index=read_idx_gd).squeeze(3)  # (E, N, K)
+
+    # 1. Path efficiency
+    disp_j = ((pos_j_now - spawn_j) ** 2).sum(dim=-1).sqrt()  # (E, N, K)
+    path_eff = (disp_j / cum_j.clamp(min=eps)).clamp(min=0.0, max=1.0)
+
+    # 2. Displacement over window / expected
+    pref_safe = pref_j.clamp(min=eps)
+    expected_win = (pref_safe * (W * dt)).clamp(min=eps)
+    disp_win = ((pos_j_now - pos_j_win) ** 2).sum(dim=-1).sqrt()
+    disp_win_norm = disp_win / expected_win
+
+    # 3. Goal progress over window / expected
+    gdist_j_now = ((goal_j - pos_j_now) ** 2).sum(dim=-1).sqrt()
+    goal_progress = (gdist_j_win - gdist_j_now) / expected_win
+
+    feats = torch.stack([path_eff, disp_win_norm, goal_progress], dim=-1)  # (E, N, K, 3)
+    feats = feats * valid.unsqueeze(-1)  # zero empty slots
+    return feats.reshape(E, N, K * 3)
+
+
+def compute_neighbor_vel_history_features(
+    neighbor_ids: Tensor,
+    neighbor_vel_history: Tensor,
+    cos_h: Tensor,
+    sin_h: Tensor,
+    step_count: Tensor,
+    config: EnvConfig,
+) -> Tensor:
+    """Compute the (E, N, K*2) neighbor velocity-history feature block.
+
+    For each of the K persistent slots:
+        diff_global = vel_at_step_now - vel_at_W_steps_ago
+        diff_ego    = rot(-ego_heading) @ diff_global
+    Empty slots (neighbor_ids == -1) are zeroed out.
+
+    The newest ring-buffer slot corresponds to the last write index, and
+    the oldest to the NEXT write index (which currently holds W_n+1
+    steps ago or zeros if the buffer hasn't filled yet). See the numpy
+    reference in crowdrl_core.observation for the same derivation.
+    """
+    E, N, buf_size, K, _ = neighbor_vel_history.shape
+    W_n = config.neighbor_vel_history_window
+    assert buf_size == W_n + 1, "neighbor_vel_history buffer size must equal W_n+1"
+
+    # Indices are per-env scalars: (E,). Cast to long for gather.
+    newest = ((step_count - 1) % buf_size).long()  # (E,)
+    oldest = (step_count % buf_size).long()  # (E,)
+
+    # Gather vel_now at newest index: output (E, N, K, 2)
+    newest_idx = newest.view(E, 1, 1, 1, 1).expand(E, N, 1, K, 2)
+    vel_now = neighbor_vel_history.gather(dim=2, index=newest_idx).squeeze(2)
+
+    oldest_idx = oldest.view(E, 1, 1, 1, 1).expand(E, N, 1, K, 2)
+    vel_old = neighbor_vel_history.gather(dim=2, index=oldest_idx).squeeze(2)
+
+    diff_global = vel_now - vel_old  # (E, N, K, 2)
+
+    # Rotate each diff into the current ego frame. cos_h / sin_h are (E, N).
+    cos_exp = cos_h.unsqueeze(-1)  # (E, N, 1)
+    sin_exp = sin_h.unsqueeze(-1)  # (E, N, 1)
+    diff_ex = cos_exp * diff_global[..., 0] - sin_exp * diff_global[..., 1]
+    diff_ey = sin_exp * diff_global[..., 0] + cos_exp * diff_global[..., 1]
+    diff_ego = torch.stack([diff_ex, diff_ey], dim=-1)  # (E, N, K, 2)
+
+    # Mask empty slots
+    valid = (neighbor_ids >= 0).unsqueeze(-1)  # (E, N, K, 1)
+    diff_ego = torch.where(valid, diff_ego, torch.zeros_like(diff_ego))
+
+    # Flatten slot x feature to K*2
+    return diff_ego.reshape(E, N, K * 2)
+
+
 def build_observations(
     positions: Tensor,
     velocities: Tensor,
@@ -126,6 +346,15 @@ def build_observations(
     n_waypoints: Tensor | None = None,
     waypoint_cursor: Tensor | None = None,
     waypoint_path_lengths: Tensor | None = None,
+    spawn_positions: Tensor | None = None,
+    initial_goal_distances: Tensor | None = None,
+    cumulative_path_length: Tensor | None = None,
+    pos_history: Tensor | None = None,
+    gdist_history: Tensor | None = None,
+    preferred_speeds: Tensor | None = None,
+    step_count: Tensor | None = None,
+    neighbor_ids: Tensor | None = None,
+    neighbor_vel_history: Tensor | None = None,
 ) -> Tensor:
     """Build observations for all agents.
 
@@ -136,6 +365,9 @@ def build_observations(
     n_waypoints : (E, N) int32 — waypoint count per agent (optional)
     waypoint_cursor : (E, N) int32 — current progress index (optional)
     waypoint_path_lengths : (E, N, MAX_WP) — cumulative remaining distance (optional)
+    spawn_positions, initial_goal_distances, cumulative_path_length, pos_history,
+    gdist_history, preferred_speeds, step_count : temporal-memory state; required
+        when ``config.use_temporal_memory`` is True, otherwise ignored.
 
     Returns
     -------
@@ -143,7 +375,7 @@ def build_observations(
     """
     E, N = positions.shape[:2]
 
-    # --- Ego state (E, N, 7) ---
+    # --- Ego state (E, N, 8) ---
     cos_h = torch.cos(-torso_orientations)
     sin_h = torch.sin(-torso_orientations)
 
@@ -159,12 +391,27 @@ def build_observations(
     goal_dir_x = cos_h * goal_unit[..., 0] - sin_h * goal_unit[..., 1]
     goal_dir_y = sin_h * goal_unit[..., 0] + cos_h * goal_unit[..., 1]
 
+    # Ablation: hide the global-goal bearing so the policy navigates using the
+    # navmesh next-waypoint direction alone (see ObsConfig.use_goal_direction).
+    if not config.use_goal_direction:
+        goal_dir_x = torch.zeros_like(goal_dir_x)
+        goal_dir_y = torch.zeros_like(goal_dir_y)
+
     # Velocity in ego frame
     vel_ego_x = cos_h * velocities[..., 0] - sin_h * velocities[..., 1]
     vel_ego_y = sin_h * velocities[..., 0] + cos_h * velocities[..., 1]
 
     # Speed
     speed = (velocities**2).sum(dim=-1).sqrt()
+
+    # Preferred speed (raw m/s, per-agent target). Falls back to Bohannon mean
+    # if not provided -- training always passes the real array via step state.
+    if preferred_speeds is None:
+        preferred_speeds_ego = torch.full(
+            (E, N), 1.34, dtype=positions.dtype, device=positions.device
+        )
+    else:
+        preferred_speeds_ego = preferred_speeds.to(positions.dtype)
 
     # Torso angle in ego frame is 0 by construction
     torso_angle = torch.zeros(E, N, dtype=positions.dtype, device=positions.device)
@@ -173,9 +420,18 @@ def build_observations(
     head_rel_torso = (head_orientations - torso_orientations + math.pi) % (2 * math.pi) - math.pi
 
     ego_state = torch.stack(
-        [goal_dir_x, goal_dir_y, vel_ego_x, vel_ego_y, speed, torso_angle, head_rel_torso],
+        [
+            goal_dir_x,
+            goal_dir_y,
+            vel_ego_x,
+            vel_ego_y,
+            speed,
+            preferred_speeds_ego,
+            torso_angle,
+            head_rel_torso,
+        ],
         dim=-1,
-    )  # (E, N, 7)
+    )  # (E, N, 8)
 
     # --- Social sensing (E, N, K*7) ---
     social = knn_social(
@@ -205,6 +461,7 @@ def build_observations(
     )  # (E, N, R)
 
     # --- Navmesh signals (E, N, 3) ---
+    parts = [ego_state, social_flat, rays]
     if config.use_navmesh:
         nav = compute_navmesh_signals(
             positions,
@@ -217,11 +474,68 @@ def build_observations(
             goal_positions,
             config,
         )
-        obs = torch.cat([ego_state, social_flat, rays, nav], dim=-1)
-    else:
-        obs = torch.cat([ego_state, social_flat, rays], dim=-1)  # (E, N, obs_dim)
+        parts.append(nav)
+
+    # --- Temporal memory (E, N, 6) ---
+    if config.use_temporal_memory:
+        memory = compute_temporal_features(
+            positions,
+            spawn_positions,
+            initial_goal_distances,
+            cumulative_path_length,
+            pos_history,
+            gdist_history,
+            goal_positions,
+            preferred_speeds,
+            step_count,
+            config,
+        )
+        parts.append(memory)
+
+    # --- Neighbor velocity history (E, N, K*2) ---
+    if config.use_neighbor_memory and config.use_neighbor_vel_history:
+        nb_vel_features = compute_neighbor_vel_history_features(
+            neighbor_ids,
+            neighbor_vel_history,
+            cos_h,
+            sin_h,
+            step_count,
+            config,
+        )
+        parts.append(nb_vel_features)
+
+    # --- Neighbor trajectory features (E, N, K*3) ---
+    if (
+        config.use_neighbor_memory
+        and config.use_temporal_memory
+        and config.use_neighbor_trajectory_features
+    ):
+        nb_traj_features = compute_neighbor_trajectory_features(
+            neighbor_ids,
+            positions,
+            goal_positions,
+            spawn_positions,
+            initial_goal_distances,
+            cumulative_path_length,
+            pos_history,
+            gdist_history,
+            preferred_speeds,
+            step_count,
+            config,
+        )
+        parts.append(nb_traj_features)
+
+    obs = torch.cat(parts, dim=-1)  # (E, N, obs_dim)
 
     # Zero out inactive agents
     obs = torch.where(active_mask.unsqueeze(-1), obs, torch.zeros_like(obs))
+
+    # Numerical safety: keep the obs finite. The per-feature clamps above guard
+    # division-by-ZERO, but a NaN/Inf in any INPUT (a degenerate navmesh waypoint,
+    # a history-buffer entry) propagates straight through -- NaN.clamp() == NaN.
+    # A single NaN obs poisons the policy + critic forward -> NaN actions/value ->
+    # corrupted training -> run death (the r355 collapse). Mirrors the velocity
+    # nan_to_num in step.py, but at the obs the policy actually consumes.
+    obs = torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
     return obs

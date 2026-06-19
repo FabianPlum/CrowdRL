@@ -27,6 +27,7 @@ from crowdrl_core.collision import (
     enforce_wall_boundaries,
 )
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
+from crowdrl_core.navmesh import first_waypoint_headings, remaining_path_lengths
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
@@ -84,17 +85,33 @@ class CrowdEnvConfig:
     """Agent-agent velocity-dependent damping (N*s/m). Calibrated so that
     two agents closing at 2 m/s with moderate overlap experience ~12 m/s^2
     damping deceleration (comparable to JuPedSim's friction term)."""
-    velocity_damping: float = 0.8
-    """Velocity damping factor: v_new = damping * v_desired + (1-damping) * v_old."""
+    desired_velocity_weight: float = 0.05
+    """Weight on desired velocity in v_new = w * v_desired + (1-w) * v_old.
+    Higher value = less smoothing (more responsive to policy output);
+    lower value = more inertia.
 
-    max_speed_multiplier: float = 2.0
-    """Velocity magnitude clamp as a multiple of action.max_speed.
+    Layer 1 of plan/agent_dynamics_refactor.md (2026-05-25) lowered the
+    default from 0.8 (tau ~12 ms, effectively no filter at dt=0.01s) to
+    0.05 (tau ~200 ms). Helbing's social force model uses tau ~500 ms;
+    a value of 0.02 here would match that, kept as a future tunable.
+    Historical configs in configs/exp_memory_*.yaml pin
+    ``desired_velocity_weight: 0.8`` explicitly to preserve their
+    pre-Layer-1 behaviour. Formerly named ``velocity_damping`` -- that
+    name was misleading because the formula meant the opposite of what
+    the word suggested."""
 
-    After contact forces are applied, agent speeds are clamped to
-    ``max_speed_multiplier * action.max_speed``.  This prevents contact
-    forces from launching agents at unrealistic velocities while still
-    allowing brief bursts above the desired-speed ceiling (e.g. being
-    pushed by a crowd).
+    max_velocity_magnitude: float = 3.0
+    """Hard clamp on velocity magnitude (m/s).
+
+    After contact forces are applied, agent speeds are clamped to this
+    value. This prevents contact forces from launching agents at
+    unrealistic velocities while still allowing brief bursts above
+    the desired-speed ceiling (e.g. being pushed by a crowd).
+
+    Sits above ``action.max_forward_speed`` so policy-commanded motion
+    is never the binding constraint. Experimental starting point; the
+    literature on transient running and emergency-evacuation
+    pedestrian speeds should refine this value.
     """
 
     # Episode
@@ -162,7 +179,7 @@ class CrowdEnv(gym.Env):
         # implementation in crowdrl_torch.step; see CrowdEnvConfig for the
         # three knobs that control it.
         self._stuck_window_step: NDArray[np.int32] | None = None
-        self._stuck_window_start_dist: NDArray[np.float64] | None = None
+        self._stuck_window_start_nav: NDArray[np.float64] | None = None
 
     @property
     def n_agents(self) -> int:
@@ -195,13 +212,56 @@ class CrowdEnv(gym.Env):
         self._world.active_mask = self._active_mask
         self._step_count = 0
 
-        # Initialise reward state
+        # Initialise reward state. The progress reward and stuck check use the
+        # path-distance metric (navmesh remaining path, straight-line fallback)
+        # so progress is measured along the route, not the bee-line to the goal.
+        # ``goal_distances`` (straight-line) is still used below for the temporal-
+        # memory features, which are intentionally goal-relative.
         goal_distances = np.linalg.norm(world.goal_positions - world.positions, axis=1)
-        self._reward_state.reset(self._n_agents, goal_distances)
+        nav_distances = self._path_distance_metric()
+        self._reward_state.reset(self._n_agents, nav_distances)
 
-        # Initialise stuck-agent tracking (start dist = initial goal dist)
+        # Initialise stuck-agent tracking (start = initial path distance)
         self._stuck_window_step = np.zeros(self._n_agents, dtype=np.int32)
-        self._stuck_window_start_dist = goal_distances.copy()
+        self._stuck_window_start_nav = nav_distances.copy()
+
+        # Initialise temporal-memory state on the WorldState so the obs builder
+        # can read it. Ring buffers are pre-filled with the spawn position /
+        # initial goal distance so early reads return the spawn value.
+        if self.config.obs.use_temporal_memory:
+            W = self.config.obs.temporal_memory_window
+            buf_size = W + 1
+            self._world.spawn_positions = self._world.positions.copy()
+            self._world.initial_goal_distances = goal_distances.copy()
+            self._world.cumulative_path_length = np.zeros(self._n_agents, dtype=np.float64)
+            self._world.pos_history = np.broadcast_to(
+                self._world.positions[:, np.newaxis, :], (self._n_agents, buf_size, 2)
+            ).copy()
+            self._world.gdist_history = np.broadcast_to(
+                goal_distances[:, np.newaxis], (self._n_agents, buf_size)
+            ).copy()
+            self._world.preferred_speeds = self._preferred_speeds.copy()
+            self._world.step_count = 0
+
+        # Initialise persistent neighbor-ID table. Seed with an initial
+        # match so the first observation sees populated slots. Mirrors the
+        # torch path in BatchedTorchEnv.reset_all.
+        if self.config.obs.use_neighbor_memory:
+            from crowdrl_core.sensing import match_persistent_neighbors
+
+            k = self.config.obs.k_neighbours
+            prev = np.full((self._n_agents, k), -1, dtype=np.int32)
+            self._world.neighbor_ids = match_persistent_neighbors(
+                self._world.positions,
+                prev,
+                self._active_mask,
+                sensing_radius=self.config.obs.neighbor_sensing_radius,
+                k=k,
+            )
+            nb_buf = self.config.obs.neighbor_vel_history_window + 1
+            self._world.neighbor_vel_history = np.zeros(
+                (self._n_agents, nb_buf, k, 2), dtype=np.float64
+            )
 
         # Build initial observations
         obs = self._build_all_observations()
@@ -213,6 +273,25 @@ class CrowdEnv(gym.Env):
         }
 
         return obs, info
+
+    def _path_distance_metric(self) -> NDArray[np.float64]:
+        """Per-agent distance metric for the progress reward and stuck check.
+
+        Returns the remaining navmesh path length (straight-line goal-distance
+        fallback per agent) so both signals measure progress ALONG THE ROUTE,
+        not the straight-line bee-line to the goal. Falls back to straight-line
+        goal distance entirely when navmesh signals are disabled. Mirrors the
+        torch ``path_distance_metric``.
+        """
+        if not self.config.obs.use_navmesh or self._world.navmesh is None:
+            return np.linalg.norm(self._world.goal_positions - self._world.positions, axis=1)
+        radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
+        return remaining_path_lengths(
+            self._world.navmesh,
+            self._world.positions,
+            self._world.goal_positions,
+            radii,
+        )
 
     def step(
         self,
@@ -244,6 +323,13 @@ class CrowdEnv(gym.Env):
         self._step_count += 1
         cfg = self.config
 
+        # Snapshot pre-step position + active mask for temporal-memory path
+        # length accumulation. We use the pre-step active mask so that an
+        # agent's final motion step (the one in which it reaches the goal)
+        # still contributes to its cumulative path length.
+        prev_positions_for_memory = self._world.positions.copy()
+        prev_active_for_memory = self._active_mask.copy()
+
         # --- 1. Interpret actions → desired velocities and orientations ---
         batch_result = interpret_actions_batch(
             actions,
@@ -251,16 +337,24 @@ class CrowdEnv(gym.Env):
             self._world.torso_orientations,
             self._world.head_orientations,
             cfg.action,
+            current_speeds=np.linalg.norm(self._world.velocities, axis=1),
         )
 
         # --- 2. Apply velocity update (damped blending) — vectorized ---
         mask = self._active_mask
         self._world.velocities[mask] = (
-            cfg.velocity_damping * batch_result.desired_velocities[mask]
-            + (1.0 - cfg.velocity_damping) * self._world.velocities[mask]
+            cfg.desired_velocity_weight * batch_result.desired_velocities[mask]
+            + (1.0 - cfg.desired_velocity_weight) * self._world.velocities[mask]
         )
         self._world.torso_orientations[mask] = batch_result.new_torso_orientations[mask]
         self._world.head_orientations[mask] = batch_result.new_head_orientations[mask]
+
+        # Snapshot the policy's chosen (pre-contact) velocities so the reward's
+        # optional impact-speed weighting measures the approach speed the policy
+        # controls, not the post-contact bounce. Only materialised when enabled.
+        pre_contact_velocities = (
+            self._world.velocities.copy() if cfg.reward.use_velocity_weighted_collision else None
+        )
 
         # --- 3. Collision detection and contact forces ---
         # Detect collisions once, pass to both force computation and reward
@@ -286,7 +380,7 @@ class CrowdEnv(gym.Env):
         self._world.velocities[mask] += contact_forces[mask] * cfg.dt
 
         # Clamp velocity magnitudes to prevent contact-force blow-up
-        max_vel = cfg.max_speed_multiplier * cfg.action.max_speed
+        max_vel = cfg.max_velocity_magnitude
         speeds = np.linalg.norm(self._world.velocities[mask], axis=1)
         too_fast = speeds > max_vel
         if np.any(too_fast):
@@ -298,8 +392,8 @@ class CrowdEnv(gym.Env):
             self._world.velocities[self._active_mask] * cfg.dt
         )
 
-        # Wall boundary enforcement
-        enforce_wall_boundaries(self._world)
+        # Wall boundary enforcement (returns the hard wall-contact mask)
+        wall_collision_mask = enforce_wall_boundaries(self._world)
 
         # --- 5. Compute rewards ---
         # Distances for proximity penalties (agent-agent pair distances are
@@ -307,6 +401,11 @@ class CrowdEnv(gym.Env):
         # contact distances).
         wall_distances = compute_min_wall_distances(self._world)
         agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
+
+        # Path-distance metric (remaining navmesh path, straight-line fallback),
+        # shared by the progress reward and the stuck check below so both measure
+        # route progress rather than the bee-line to the goal.
+        nav_distances = self._path_distance_metric()
 
         rewards, reached_goal = compute_rewards(
             positions=self._world.positions,
@@ -319,9 +418,12 @@ class CrowdEnv(gym.Env):
             state=self._reward_state,
             config=cfg.reward,
             dt=cfg.dt,
+            current_distances=nav_distances,
             wall_distances=wall_distances,
+            wall_collision_mask=wall_collision_mask,
             agent_radii=agent_radii,
             actions=actions,
+            collision_velocities=pre_contact_velocities,
         )
 
         # --- 6. Update active mask ---
@@ -337,16 +439,17 @@ class CrowdEnv(gym.Env):
         if (
             cfg.stuck_termination_enabled
             and self._stuck_window_step is not None
-            and self._stuck_window_start_dist is not None
+            and self._stuck_window_start_nav is not None
         ):
-            new_goal_distances = np.linalg.norm(
-                self._world.goal_positions - self._world.positions, axis=1
-            )
+            # Progress measured along the navmesh path (reusing nav_distances
+            # from the reward computation above), not the straight-line goal
+            # distance -- so an agent following a route that bends away from the
+            # goal is not falsely flagged as stuck.
             inc_mask = self._active_mask.copy()
             self._stuck_window_step[inc_mask] += 1
 
             window_full = self._stuck_window_step >= cfg.stuck_window_steps
-            progress = self._stuck_window_start_dist - new_goal_distances
+            progress = self._stuck_window_start_nav - nav_distances
             stuck_mask = window_full & inc_mask & (progress < cfg.stuck_progress_threshold)
             reset_mask = window_full & inc_mask & ~stuck_mask
 
@@ -358,7 +461,7 @@ class CrowdEnv(gym.Env):
 
             # Reset window for non-stuck window-full agents
             self._stuck_window_step[window_full & inc_mask] = 0
-            self._stuck_window_start_dist[reset_mask] = new_goal_distances[reset_mask]
+            self._stuck_window_start_nav[reset_mask] = nav_distances[reset_mask]
 
         # --- 7. Termination / truncation ---
         terminated = reached_goal.copy()
@@ -374,6 +477,64 @@ class CrowdEnv(gym.Env):
 
         if not np.any(self._active_mask):
             episode_over = True
+
+        # --- 7b. Update temporal-memory state ---
+        if self.config.obs.use_temporal_memory and self._world.pos_history is not None:
+            W = self.config.obs.temporal_memory_window
+            buf_size = W + 1
+
+            # Cumulative path length: add per-step delta for agents that
+            # were active coming into this step.
+            deltas = np.linalg.norm(self._world.positions - prev_positions_for_memory, axis=1)
+            deltas = np.where(prev_active_for_memory, deltas, 0.0)
+            self._world.cumulative_path_length = self._world.cumulative_path_length + deltas
+
+            # Scatter-write into the ring buffer at index (pre-step step_count % buf_size).
+            write_idx = (self._step_count - 1) % buf_size
+            self._world.pos_history[:, write_idx, :] = self._world.positions
+            new_goal_dists = np.linalg.norm(
+                self._world.goal_positions - self._world.positions, axis=1
+            )
+            self._world.gdist_history[:, write_idx] = new_goal_dists
+
+            self._world.step_count = self._step_count
+
+        # --- 7c. Update persistent neighbor slots + velocity history ---
+        if self.config.obs.use_neighbor_memory and self._world.neighbor_ids is not None:
+            from crowdrl_core.sensing import match_persistent_neighbors
+
+            prev_nids = self._world.neighbor_ids
+            new_nids = match_persistent_neighbors(
+                self._world.positions,
+                prev_nids,
+                self._active_mask,
+                sensing_radius=self.config.obs.neighbor_sensing_radius,
+                k=self.config.obs.k_neighbours,
+            )
+
+            # Zero-reset slot history on reassignment, then scatter-write
+            # current velocities into the ring buffer.
+            nb_buf = self.config.obs.neighbor_vel_history_window + 1
+            hist = self._world.neighbor_vel_history
+            slot_changed = new_nids != prev_nids  # (n_agents, K)
+            if slot_changed.any():
+                # Broadcast (n_agents, K) mask to the full (n_agents, buf, K, 2)
+                # shape of hist. Boolean indexing won't work directly because
+                # numpy tries to match the mask axes against the leading dims
+                # of hist (which include the buf axis before K).
+                preserve = ~slot_changed[:, np.newaxis, :, np.newaxis]
+                hist = np.where(preserve, hist, 0.0)
+
+            # Gather velocities for the assigned neighbors; zero for -1.
+            ids_safe = np.clip(new_nids, 0, self._n_agents - 1)
+            nb_vels = self._world.velocities[ids_safe]  # (n_agents, K, 2)
+            nb_vels = np.where((new_nids >= 0)[:, :, np.newaxis], nb_vels, 0.0)
+
+            write_idx = (self._step_count - 1) % nb_buf
+            hist[:, write_idx, :, :] = nb_vels
+
+            self._world.neighbor_ids = new_nids
+            self._world.neighbor_vel_history = hist
 
         # --- 8. Build observations ---
         obs = self._build_all_observations()
@@ -489,6 +650,17 @@ class CrowdEnv(gym.Env):
 
             if len(positions) == 0:
                 continue
+
+            # Orient agents toward their first navmesh waypoint rather than the
+            # global goal (which may sit behind a wall relative to that waypoint).
+            # Falls back to the goal bearing per-agent when no path exists. When
+            # the navmesh is disabled we keep the spawner's global-goal bearing.
+            if cfg.obs.use_navmesh:
+                radii = np.maximum(shoulder_widths, chest_depths)
+                torso_orientations = first_waypoint_headings(
+                    navmesh, positions, goal_positions, radii
+                )
+                head_orientations = torso_orientations.copy()
 
             world = WorldState(
                 positions=positions,

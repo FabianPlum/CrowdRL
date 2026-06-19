@@ -97,6 +97,79 @@ class WorldState:
     """(n_agents,) — True if agent is active (hasn't reached goal / been removed).
     None means all agents are active."""
 
+    # --- Temporal memory state (optional; populated when ObsConfig.use_temporal_memory is True) ---
+    # See ``crowdrl_core.observation`` for the semantics. Adapters that do not
+    # enable temporal memory can leave these as None.
+
+    spawn_positions: NDArray[np.float64] | None = None
+    """(n_agents, 2) — position at the start of the current episode, frozen
+    after reset. Used to compute displacement-from-spawn and path efficiency.
+    """
+
+    initial_goal_distances: NDArray[np.float64] | None = None
+    """(n_agents,) — ||goal_positions - spawn_positions|| at the start of the
+    episode, used as the normalising constant for spawn-relative features.
+    """
+
+    cumulative_path_length: NDArray[np.float64] | None = None
+    """(n_agents,) — running total of per-step position deltas, accumulated
+    from reset. Used for the path-efficiency ratio and cumulative path length
+    feature.
+    """
+
+    pos_history: NDArray[np.float64] | None = None
+    """(n_agents, W+1, 2) — ring buffer of recent agent positions, where W =
+    ``ObsConfig.temporal_memory_window``. Writes happen at index
+    ``step_count % (W+1)``; reads from ``(step_count + 1) % (W+1)`` return
+    the position W steps ago. Initialised to spawn_positions at reset so
+    early reads (t < W) return the spawn position.
+    """
+
+    gdist_history: NDArray[np.float64] | None = None
+    """(n_agents, W+1) — ring buffer of recent goal distances, indexed the
+    same way as ``pos_history``.
+    """
+
+    preferred_speeds: NDArray[np.float64] | None = None
+    """(n_agents,) — per-agent preferred walking speed, used to normalise
+    the window-based displacement and goal-progress features. Optional: when
+    None the obs builder falls back to a constant 1.3 m/s.
+    """
+
+    step_count: int = 0
+    """Current episode step (same for all agents in an episode). Used to
+    compute elapsed_fraction and to read the correct slot from the
+    ring buffers.
+    """
+
+    # --- Neighbor memory state (optional; populated when ObsConfig.use_neighbor_memory is True) ---
+
+    neighbor_ids: NDArray[np.int32] | None = None
+    """(n_agents, K) -- persistent neighbor slot assignments. Each row holds
+    the global agent indices of the K neighbors currently tracked by ego
+    agent i, or -1 for empty slots. Unlike the per-step KNN used by
+    ``knn_social``, these IDs remain stable across timesteps so long as the
+    assigned neighbor stays within sensing range -- enabling per-neighbor
+    temporal memory lookups (velocity history, trajectory features).
+
+    Updated once per step by ``sensing.match_persistent_neighbors`` after
+    the new positions are computed. See ``plan/neighbor_memory_extension.md``
+    for the greedy matching algorithm and the rationale.
+    """
+
+    neighbor_vel_history: NDArray[np.float64] | None = None
+    """(n_agents, W_n+1, K, 2) -- ring buffer of the **global-frame**
+    velocities of the agents currently assigned to each persistent neighbor
+    slot, where W_n = ``ObsConfig.neighbor_vel_history_window``. Writes
+    happen at index ``step_count % (W_n+1)`` each step; slot k's history
+    is zeroed out whenever ``neighbor_ids[i, k]`` is reassigned so that
+    features never mix the old assignee's history with the new one.
+
+    Global-frame storage keeps the write logic independent of ego
+    rotation; the observation builder rotates into the current ego frame
+    at read time using the same convention as ``knn_social``.
+    """
+
     @property
     def n_agents(self) -> int:
         return self.positions.shape[0]

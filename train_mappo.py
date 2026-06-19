@@ -29,7 +29,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import yaml
-from matplotlib import cm
 
 # -- CrowdRL imports ---------------------------------------------------------
 from crowdrl_core.action import ActionConfig
@@ -61,10 +60,12 @@ from crowdrl_torch.distributed import (
     seed_everything,
     sync_reward_normalizer,
 )
+from crowdrl_torch.reward import REWARD_COMPONENT_NAMES
 from crowdrl_torch.types import EnvConfig
 
-# Non-interactive matplotlib backend -- no display needed for headless training
-matplotlib.use("Agg")
+# Note: matplotlib backend is switched to "Agg" inside main(), not at module
+# import time, so importing helpers from this module (e.g. build_env_config in
+# notebooks) does not silently disable interactive plotting in the caller.
 
 # Suppress harmless torch.compile warning: "skipping cudagraphs due to cpu device".
 # Our EnvConfig is a NamedTuple with plain Python scalars (dt, max_speed, ...) that
@@ -72,6 +73,15 @@ matplotlib.use("Agg")
 # The compiled kernels still run on GPU -- only the graph-capture optimization is
 # skipped, which has negligible impact on throughput.
 logging.getLogger("torch._inductor.cudagraph_utils").setLevel(logging.ERROR)
+
+# Shorten inductor kernel names so triton cache filenames don't exceed the 255-byte
+# filesystem limit. The default ``descriptive_names='original_aten'`` concatenates
+# every fused aten op name into the kernel filename; once we fuse the temporal-memory
+# ring-buffer ops (scatter + ~20 elementwise ops) alongside the existing step kernel
+# the filename grew past 255 bytes and inductor fell back to eager with an ENAMETOOLONG
+# OSError. Setting to ``False`` uses short numeric indices instead and adds no
+# debugging penalty for our workflow.
+torch._inductor.config.triton.descriptive_names = False
 
 
 # ============================================================================
@@ -121,10 +131,33 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             corridor_width_range=tuple(geo.get("corridor_width", (2.0, 4.0))),
             corridor_length_range=tuple(geo.get("corridor_length", (8.0, 18.0))),
         ),
-        obs=ObsConfig(use_navmesh=obs.get("use_navmesh", True)),
+        obs=ObsConfig(
+            use_navmesh=obs.get("use_navmesh", True),
+            navmesh_max_waypoints=obs.get("navmesh_max_waypoints", 1024),
+            use_goal_direction=obs.get("use_goal_direction", True),
+            use_temporal_memory=obs.get("use_temporal_memory", False),
+            temporal_memory_window=obs.get("temporal_memory_window", 50),
+            temporal_memory_max_steps=cfg.get("max_steps", 2000),
+            temporal_memory_dt=cfg.get("dt", 0.01),
+            use_neighbor_memory=obs.get("use_neighbor_memory", False),
+            neighbor_sensing_radius=obs.get("neighbor_sensing_radius", 5.0),
+            neighbor_vel_history_window=obs.get("neighbor_vel_history_window", 5),
+            use_neighbor_vel_history=obs.get("use_neighbor_vel_history", False),
+            use_neighbor_trajectory_features=obs.get("use_neighbor_trajectory_features", False),
+        ),
         action=ActionConfig(
-            max_heading_change=np.radians(act.get("max_heading_change_deg", 15.0)),
-            max_torso_change=np.radians(act.get("max_torso_change_deg", 15.0)),
+            # Layer 1 defaults: 115 / 57 / 172 deg/s at dt=0.01s.
+            # Historical YAMLs set these to 15.0 deg/step explicitly,
+            # giving the pre-Layer-1 1500 deg/s rates.
+            max_forward_speed=act.get("max_forward_speed", 2.0),
+            max_backward_speed=act.get("max_backward_speed", 0.5),
+            max_heading_change=np.radians(act.get("max_heading_change_deg", 1.146)),
+            max_torso_change=np.radians(act.get("max_torso_change_deg", 0.573)),
+            max_head_change=np.radians(act.get("max_head_change_deg", 1.719)),
+            dt=cfg.get("dt", 0.01),
+            speed_turn_coupling=act.get("speed_turn_coupling", False),
+            turn_lat_accel=act.get("turn_lat_accel", 2.0),
+            turn_pivot_rate=np.radians(act.get("turn_pivot_rate_deg", 120.0)),
         ),
         reward=RewardConfig(
             goal_bonus=rew.get("goal_bonus", 20.0),
@@ -137,12 +170,23 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             use_smoothness=rew.get("use_smoothness", True),
             wall_proximity_penalty=rew.get("wall_proximity_penalty", -0.1),
             wall_proximity_threshold=rew.get("wall_proximity_threshold", 1.5),
+            wall_collision_penalty=rew.get("wall_collision_penalty", -1.0),
             agent_proximity_penalty_near=rew.get("agent_proximity_penalty_near", -0.005),
             agent_proximity_penalty_far=rew.get("agent_proximity_penalty_far", -0.0001),
             personal_space_radius=rew.get("personal_space_radius", 1.0),
             action_rate_weight=rew.get("action_rate_weight", -0.01),
+            use_velocity_weighted_collision=rew.get("use_velocity_weighted_collision", False),
+            collision_speed_floor=rew.get("collision_speed_floor", 0.5),
+            collision_speed_scale=rew.get("collision_speed_scale", 0.5),
+            collision_penalty_cap=rew.get("collision_penalty_cap", 0.0),
+            use_velocity_weighted_proximity=rew.get("use_velocity_weighted_proximity", False),
+            proximity_speed_floor=rew.get("proximity_speed_floor", 0.25),
+            proximity_speed_scale=rew.get("proximity_speed_scale", 0.5),
         ),
         max_steps=cfg.get("max_steps", 2000),
+        # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this
+        # to 0.8 to preserve their pre-Layer-1 behaviour.
+        desired_velocity_weight=cfg.get("desired_velocity_weight", 0.05),
         stuck_termination_enabled=ep.get("stuck_termination_enabled", False),
         stuck_window_steps=ep.get("stuck_window_steps", 300),
         stuck_progress_threshold=ep.get("stuck_progress_threshold", 0.2),
@@ -170,6 +214,11 @@ def build_ppo_config(cfg: dict) -> PPOConfig:
         gae_lambda=p.get("gae_lambda", 0.95),
         target_kl=p.get("target_kl", 0.02),
         lr_schedule=p.get("lr_schedule", "cosine"),
+        entropy_coef=p.get("entropy_coef", 0.01),
+        max_grad_norm=p.get("max_grad_norm", 10.0),
+        use_huber_loss=p.get("use_huber_loss", False),
+        huber_delta=p.get("huber_delta", 10.0),
+        use_value_clip=p.get("use_value_clip", False),
     )
 
 
@@ -303,6 +352,49 @@ def save_training_plots(
     print(f"  Training curves -> {results_dir / 'training_curves.png'}")
 
 
+def save_reward_component_plot(history: dict, results_dir: Path) -> None:
+    """Save the per-component reward decomposition over training (collapse aid).
+
+    One smoothed line per reward component (raw, per agent per episode) plus the
+    raw total. Reveals which reward mode drives a collapse -- e.g. existence or
+    timeout dominating progress -- which the std-scaled mean-reward curve hides.
+    Silently skips runs whose history predates the decomposition.
+    """
+    comp_keys = [f"reward_comp_{name}" for name in REWARD_COMPONENT_NAMES]
+    if not any(history.get(k) for k in comp_keys):
+        return
+
+    def smooth(values, window=100):
+        values = np.asarray(values, dtype=np.float64)
+        if len(values) < window or window < 2:
+            return values
+        kernel = np.ones(window) / window
+        return np.convolve(values, kernel, mode="valid")
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    cmap = plt.get_cmap("tab10")
+    total = None
+    for i, name in enumerate(REWARD_COMPONENT_NAMES):
+        series = history.get(f"reward_comp_{name}", [])
+        if not series:
+            continue
+        arr = np.asarray(series, dtype=np.float64)
+        total = arr if total is None else total + arr
+        ax.plot(smooth(arr), color=cmap(i % 10), linewidth=0.9, label=name)
+    if total is not None:
+        ax.plot(smooth(total), color="black", linewidth=1.4, label="TOTAL (raw return)")
+    ax.axhline(0.0, color="gray", linewidth=0.6, alpha=0.6)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Raw reward per agent")
+    ax.set_title("Reward decomposition (rolling 100, raw per-agent contribution)")
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(results_dir / "reward_components.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Reward components -> {results_dir / 'reward_components.png'}")
+
+
 def save_phase_summary(
     history: dict,
     phases: tuple,
@@ -404,7 +496,7 @@ def _collect_eval_episodes_batched(
             )
         actions_gpu = actions.reshape(n_envs, N, action_dim)
 
-        states, obs, rewards, terminated, _truncated = batched_env.step(actions_gpu)
+        states, obs, rewards, terminated, _truncated, _components = batched_env.step(actions_gpu)
 
         rewards_np = rewards.cpu().numpy()
         terminated_np = terminated.cpu().numpy()
@@ -627,7 +719,7 @@ def save_trajectory_plots(
         plot_geometry(polygon, ax=ax)
 
         n_agents = len(trajs)
-        cmap_fn = cm.get_cmap("tab20", n_agents)
+        cmap_fn = plt.get_cmap("tab20", n_agents)
         for i in range(n_agents):
             traj = np.array(trajs[i])
             color = cmap_fn(i % 20)
@@ -795,6 +887,142 @@ def _load_history_and_infer_rollout(
 
 
 # ============================================================================
+# Training-time CPU video renders (optional)
+# ============================================================================
+
+
+def _resolve_render_interval(
+    render_during_training: bool,
+    render_interval: int,
+    checkpoint_interval: int,
+) -> int:
+    """Return the effective render interval in rollouts, or 0 if disabled.
+
+    Renders piggyback on checkpoint writes (the subprocess loads the
+    just-written ``checkpoint_rollout_<N>.pt``), so the interval must be a
+    positive multiple of ``checkpoint_interval``. Defaults to / snaps to
+    ``checkpoint_interval`` when unset or misaligned; returns 0 when rendering
+    is off or checkpoints are disabled.
+    """
+    if not render_during_training or checkpoint_interval <= 0:
+        return 0
+    if render_interval <= 0 or render_interval % checkpoint_interval != 0:
+        return checkpoint_interval
+    return render_interval
+
+
+def _render_command(
+    config_path: Path,
+    checkpoint_path: Path,
+    out_path: Path,
+    label: str,
+) -> list[str]:
+    """Build the argv for a CPU render subprocess (``scripts/render_cpu.py``).
+
+    Pure (no side effects) so the wiring is unit-testable without spawning.
+    Uses ``sys.executable`` so the render runs in the same interpreter/venv.
+    """
+    render_script = Path(__file__).resolve().parent / "scripts" / "render_cpu.py"
+    return [
+        sys.executable,
+        str(render_script),
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--out",
+        str(out_path),
+        "--label",
+        label,
+    ]
+
+
+def _spawn_training_render(
+    active: list[tuple[subprocess.Popen, object]],
+    config_path: Path,
+    checkpoint_path: Path,
+    out_path: Path,
+    label: str,
+) -> list[tuple[subprocess.Popen, object]]:
+    """Fire-and-forget a CPU render of ``checkpoint_path``; never blocks training.
+
+    First reaps any finished renders from ``active`` (closing their log files),
+    then spawns a new ``scripts/render_cpu.py`` subprocess writing ``out_path``.
+    The render runs entirely on CPU so it does not touch the GPUs. Returns the
+    updated list of (process, logfile) for still-running renders.
+    """
+    still = [(p, lf) for (p, lf) in active if p.poll() is None]
+    for p, lf in active:
+        if p.poll() is not None:
+            lf.close()
+    logf = open(out_path.with_suffix(".log"), "w")
+    proc = subprocess.Popen(
+        _render_command(config_path, checkpoint_path, out_path, label),
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    still.append((proc, logf))
+    return still
+
+
+def _scorecard_command(
+    config_path: Path,
+    checkpoint_path: Path,
+    json_out: Path,
+    max_steps: int,
+) -> list[str]:
+    """Build the argv for a CPU scorecard subprocess (``scripts/eval_scorecard.py``).
+
+    Pure (no side effects) so the wiring is unit-testable without spawning.
+    """
+    scorecard_script = Path(__file__).resolve().parent / "scripts" / "eval_scorecard.py"
+    return [
+        sys.executable,
+        str(scorecard_script),
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--json",
+        str(json_out),
+        "--max-steps",
+        str(max_steps),
+    ]
+
+
+def _spawn_training_scorecard(
+    active: list[tuple[subprocess.Popen, object]],
+    config_path: Path,
+    checkpoint_path: Path,
+    json_out: Path,
+    max_steps: int,
+) -> list[tuple[subprocess.Popen, object]]:
+    """Fire-and-forget a CPU scorecard of ``checkpoint_path``; never blocks training.
+
+    Mirrors :func:`_spawn_training_render`: reaps finished scorecards, then spawns
+    ``scripts/eval_scorecard.py`` (CPU-only, never touches the GPUs) which writes
+    the decomposed scorecard JSON to ``json_out`` and the human-readable table to
+    its ``.log`` sibling. The fixed scenario suite spans the moderate AND the
+    60-100 agent high-density regime, so the eval tracks the same difficulty the
+    training GoalRate sees. Returns the updated list of (process, logfile).
+    """
+    still = [(p, lf) for (p, lf) in active if p.poll() is None]
+    for p, lf in active:
+        if p.poll() is not None:
+            lf.close()
+    logf = open(json_out.with_suffix(".log"), "w")
+    proc = subprocess.Popen(
+        _scorecard_command(config_path, checkpoint_path, json_out, max_steps),
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        cwd=str(Path(__file__).resolve().parent),
+    )
+    still.append((proc, logf))
+    return still
+
+
+# ============================================================================
 # Training worker (one per GPU rank)
 # ============================================================================
 
@@ -804,6 +1032,7 @@ def train_worker(
     results_dir: Path,
     resume_training: bool = False,
     start_from_zero: bool = False,
+    init_from: str | Path | None = None,
 ) -> None:
     """Main training loop -- runs on each DDP rank.
 
@@ -820,6 +1049,10 @@ def train_worker(
         Only valid with ``resume_training``. Load weights and normalizer
         statistics from the checkpoint but restart rollout counting, curriculum,
         and history from scratch. Optimizer state is also reset.
+    init_from
+        Path to a checkpoint to initialize weights and normalizer statistics
+        from before a fresh training run. Optimizer, curriculum, and history
+        start from scratch. Mutually exclusive with ``resume_training``.
     """
     rank, world_size, device = init_distributed(cfg.get("ddp_backend", "nccl"))
 
@@ -839,6 +1072,38 @@ def train_worker(
     n_rollouts = cfg.get("n_rollouts", 500)
     log_interval = cfg.get("log_interval", 5)
     compile_step = cfg.get("compile_step", True)
+    checkpoint_interval = cfg.get("checkpoint_interval", 0)
+    # 0 = only save the final checkpoint (legacy behaviour).
+    # >0 = also save ``checkpoint_rollout_<N>.pt`` every N rollouts so we can
+    # diff/replay/eval intermediate policy states for debugging.
+
+    # Optional training-time CPU video renders. When enabled, each periodic
+    # checkpoint write also fires a non-blocking ``scripts/render_cpu.py``
+    # subprocess (CPU-only, never touches the GPUs) that renders a Tier-3B
+    # example episode from that checkpoint. ``render_interval`` defaults to /
+    # snaps to a multiple of ``checkpoint_interval`` since the render loads the
+    # on-disk checkpoint. Disabled by default.
+    render_during_training = cfg.get("render_during_training", False)
+    render_interval_cfg = cfg.get("render_interval", 0)
+    render_interval = _resolve_render_interval(
+        render_during_training, render_interval_cfg, checkpoint_interval
+    )
+    render_label = results_dir.name.removeprefix("results_")
+
+    # Optional training-time CPU scorecard. Same fire-and-forget pattern as
+    # renders (piggybacks on checkpoint writes, CPU-only), but instead of one
+    # video it runs the fixed decomposed behavioural eval -- goal / collision /
+    # wall / freeze / stuck across the moderate AND 60-100 agent high-density
+    # scenarios -- writing ``scorecard_r<N>.json`` (+ a readable .log). Lets us
+    # track real capability over training the way renders track qualitative
+    # behaviour. Disabled by default; experiment configs opt in. The interval
+    # snaps to a multiple of ``checkpoint_interval`` (reuses the render resolver
+    # since both just piggyback the on-disk checkpoint).
+    scorecard_during_training = cfg.get("scorecard_during_training", False)
+    scorecard_interval = _resolve_render_interval(
+        scorecard_during_training, cfg.get("scorecard_interval", 0), checkpoint_interval
+    )
+    scorecard_max_steps = cfg.get("scorecard_max_steps", 1500)
 
     # -- Validate max_agents covers curriculum --------------------------------
     max_phase_agents = max(p.n_agents_range[1] for p in curriculum_config.phases)
@@ -936,6 +1201,31 @@ def train_worker(
                         f"({n_rollouts}); increase n_rollouts in the config to "
                         "continue training."
                     )
+    elif init_from is not None:
+        ckpt_path = Path(init_from)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"--init_from checkpoint not found at {ckpt_path}")
+        # Load weights + normalizer stats only; discard optimizer, curriculum,
+        # and rollout counters. Throwaway objects let load_checkpoint populate
+        # them without polluting our real state.
+        throwaway_updater = MAPPOUpdater(actor_critic, ppo_config, device)
+        throwaway_curriculum = CurriculumManager(curriculum_config)
+        load_checkpoint(
+            ckpt_path,
+            actor_critic,
+            throwaway_updater,
+            obs_normalizer,
+            reward_normalizer,
+            throwaway_curriculum,
+        )
+        if is_main_rank():
+            print(f"--init_from: loaded weights + normalizers from {ckpt_path}")
+            print("Training starts fresh: curriculum at phase 0, rollout 0")
+            history_path = results_dir / "history.json"
+            if history_path.exists():
+                archive = results_dir / "history_previous.json"
+                history_path.replace(archive)
+                print(f"Previous history archived to {archive}")
 
     if is_main_rank():
         n_params = sum(p.numel() for p in actor_critic.parameters())
@@ -944,10 +1234,34 @@ def train_worker(
         print(f"Envs per rank: {n_envs}, steps/collect: {steps_per_collect:,}")
         print(f"Effective batch: {steps_per_collect * world_size:,} agent-steps/update")
         print(f"Curriculum: {' -> '.join(p.name for p in curriculum_config.phases)}")
+        if render_during_training and checkpoint_interval <= 0:
+            print(
+                "Warning: render_during_training needs checkpoint_interval > 0; renders disabled."
+            )
+        elif (
+            render_during_training
+            and render_interval_cfg > 0
+            and render_interval_cfg != render_interval
+        ):
+            print(
+                f"Warning: render_interval ({render_interval_cfg}) must be a multiple of "
+                f"checkpoint_interval ({checkpoint_interval}); using {render_interval}."
+            )
+        if render_interval > 0:
+            print(
+                f"Training-time CPU renders: every {render_interval} rollouts "
+                f"-> {results_dir.name}/viz_r<N>_tier3B.mp4"
+            )
         results_dir.mkdir(parents=True, exist_ok=True)
-        # Save resolved config for reproducibility
+        # Save resolved config for reproducibility, augmented with launch-time
+        # provenance so the file fully describes how this run started. The
+        # init_from path is recorded as absolute so it stays unambiguous if
+        # the results dir is later moved or inspected from elsewhere.
+        cfg_to_dump = dict(cfg)
+        if init_from is not None:
+            cfg_to_dump["_launch"] = {"init_from": str(Path(init_from).resolve())}
         with open(results_dir / "config_resolved.yaml", "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(cfg_to_dump, f, default_flow_style=False, sort_keys=False)
 
     # -- Launch batched env --------------------------------------------------
     cur_env_config = curriculum.make_env_config(env_config)
@@ -1001,6 +1315,10 @@ def train_worker(
     # current session's work, not the sum of all previous runs.
     session_agent_steps = 0
     start_time = time.time()
+
+    # Still-running training-time render subprocesses, as (Popen, logfile) tuples.
+    render_procs: list[tuple[subprocess.Popen, object]] = []
+    scorecard_procs: list[tuple[subprocess.Popen, object]] = []
 
     if is_main_rank():
         sps_header = "SPS (local)" if world_size > 1 else "SPS"
@@ -1089,12 +1407,17 @@ def train_worker(
                 history["n_agents"].append(ep["n_agents"])
                 history["phase_idx"].append(curriculum.current_phase_idx)
                 history["geometry_tier"].append(ep.get("geometry_tier", "unknown"))
+                # Per-episode raw reward decomposition (one series per component).
+                comps = ep.get("reward_components", {})
+                for name in REWARD_COMPONENT_NAMES:
+                    history[f"reward_comp_{name}"].append(comps.get(name, 0.0))
 
             if update_metrics:
                 history["policy_loss"].append(update_metrics.get("policy_loss", 0))
                 history["value_loss"].append(update_metrics.get("value_loss", 0))
                 history["entropy"].append(update_metrics.get("entropy", 0))
                 history["approx_kl"].append(update_metrics.get("approx_kl", 0))
+                history["action_std"].append(update_metrics.get("action_std_mean", 0))
 
             # Logging (rank 0)
             if rollout % log_interval == 0 and episode_stats_list and is_main_rank():
@@ -1115,8 +1438,112 @@ def train_worker(
                     flush=True,
                 )
 
+                # Collapse instrumentation, two extra lines per log interval:
+                #   (1) raw per-agent reward decomposition (windowed mean). Sums
+                #       to the raw return -- distinct from the scaled Reward above.
+                #   (2) PPO diagnostics (entropy/value-loss/KL) for this rollout.
+                short = {
+                    "goal": "goal",
+                    "progress": "prog",
+                    "existence": "exist",
+                    "collision_agent": "coll_ag",
+                    "agent_proximity": "prox_ag",
+                    "wall_proximity": "wall_p",
+                    "wall_collision": "wall_c",
+                    "smoothness": "smooth",
+                    "action_rate": "act",
+                    "timeout": "tout",
+                }
+                comp_means = {
+                    name: float(np.mean(history[f"reward_comp_{name}"][-window:]))
+                    for name in REWARD_COMPONENT_NAMES
+                }
+                raw_total = sum(comp_means.values())
+                decomp = "  ".join(f"{short[name]} {comp_means[name]:+.2f}" for name in short)
+                print(f"        rwd/agent(raw): {decomp}  =  tot {raw_total:+.2f}", flush=True)
+                if update_metrics:
+                    print(
+                        f"        ppo: entropy {update_metrics.get('entropy', 0.0):.3f}  "
+                        f"action_std {update_metrics.get('action_std_mean', 0.0):.3f}  "
+                        f"value_loss {update_metrics.get('value_loss', 0.0):.3f}  "
+                        f"approx_kl {update_metrics.get('approx_kl', 0.0):.4f}",
+                        flush=True,
+                    )
+
+            # Periodic checkpoint (rank 0 only). Each save is independent so
+            # any intermediate policy can be loaded later for eval / replay /
+            # diffing. Disabled when checkpoint_interval == 0.
+            if checkpoint_interval > 0 and rollout % checkpoint_interval == 0 and is_main_rank():
+                ckpt_path = results_dir / f"checkpoint_rollout_{rollout:04d}.pt"
+                save_checkpoint(
+                    ckpt_path,
+                    actor_critic,
+                    updater,
+                    obs_normalizer,
+                    reward_normalizer,
+                    curriculum,
+                    total_agent_steps,
+                    total_episodes,
+                )
+                if render_interval > 0 and rollout % render_interval == 0:
+                    viz_out = results_dir / f"viz_r{rollout:04d}_tier3B.mp4"
+                    # Never let a render-spawn failure crash a long training run:
+                    # the render is a best-effort side artifact, not core training.
+                    try:
+                        render_procs = _spawn_training_render(
+                            render_procs,
+                            results_dir / "config_resolved.yaml",
+                            ckpt_path,
+                            viz_out,
+                            render_label,
+                        )
+                        print(
+                            f"  Spawned CPU render of {ckpt_path.name} -> {viz_out.name} "
+                            f"(log: {viz_out.with_suffix('.log').name})",
+                            flush=True,
+                        )
+                    except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                        print(
+                            f"  Warning: render spawn failed ({type(e).__name__}: {e}); "
+                            "continuing training.",
+                            flush=True,
+                        )
+
+                if scorecard_interval > 0 and rollout % scorecard_interval == 0:
+                    sc_out = results_dir / f"scorecard_r{rollout:04d}.json"
+                    # Best-effort, like renders: a scorecard-spawn failure must
+                    # never crash a long training run.
+                    try:
+                        scorecard_procs = _spawn_training_scorecard(
+                            scorecard_procs,
+                            results_dir / "config_resolved.yaml",
+                            ckpt_path,
+                            sc_out,
+                            scorecard_max_steps,
+                        )
+                        print(
+                            f"  Spawned CPU scorecard of {ckpt_path.name} -> {sc_out.name} "
+                            f"(log: {sc_out.with_suffix('.log').name})",
+                            flush=True,
+                        )
+                    except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                        print(
+                            f"  Warning: scorecard spawn failed ({type(e).__name__}: {e}); "
+                            "continuing training.",
+                            flush=True,
+                        )
+
     finally:
         batched_env.close()
+
+    # Reap finished training-time renders (close their logs); leave any still
+    # running -- they are short and finish on their own during post-training.
+    for _p, _lf in render_procs:
+        if _p.poll() is not None:
+            _lf.close()
+    for _p, _lf in scorecard_procs:
+        if _p.poll() is not None:
+            _lf.close()
 
     elapsed = time.time() - start_time
     if is_main_rank():
@@ -1150,6 +1577,9 @@ def train_worker(
 
         # Training curves
         save_training_plots(history, phase_transitions, curriculum_config.phases, results_dir)
+
+        # Reward decomposition (collapse instrumentation)
+        save_reward_component_plot(history, results_dir)
 
         # Phase summary
         save_phase_summary(history, curriculum_config.phases, results_dir)
@@ -1230,6 +1660,10 @@ def train_worker(
 
 
 def main() -> None:
+    # Non-interactive backend -- no display needed for headless training.
+    # Done here (not at module load) so notebook imports of helpers from this
+    # module don't break interactive plotting.
+    matplotlib.use("Agg")
     parser = argparse.ArgumentParser(description="MAPPO training with automatic multi-GPU support")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument(
@@ -1249,10 +1683,21 @@ def main() -> None:
         "at rollout 0 with a fresh optimizer and fresh history. The old history "
         "file is moved to history_previous.json before training starts.",
     )
+    parser.add_argument(
+        "--init_from",
+        type=str,
+        default=None,
+        help="Path to a checkpoint to initialize weights and normalizer statistics "
+        "from. Optimizer, curriculum, and history start fresh. Cannot be combined "
+        "with --resume_training. Any existing history.json in the results dir is "
+        "archived to history_previous.json.",
+    )
     args = parser.parse_args()
 
     if args.start_from_zero and not args.resume_training:
         parser.error("--start_from_zero requires --resume_training")
+    if args.init_from is not None and args.resume_training:
+        parser.error("--init_from cannot be combined with --resume_training")
 
     cfg = load_config(args.config)
     config_stem = Path(args.config).stem
@@ -1265,6 +1710,7 @@ def main() -> None:
             results_dir,
             resume_training=args.resume_training,
             start_from_zero=args.start_from_zero,
+            init_from=args.init_from,
         )
         return
 
@@ -1292,6 +1738,7 @@ def main() -> None:
             results_dir,
             resume_training=args.resume_training,
             start_from_zero=args.start_from_zero,
+            init_from=args.init_from,
         )
 
 

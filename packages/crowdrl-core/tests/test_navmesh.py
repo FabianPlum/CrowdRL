@@ -331,3 +331,99 @@ class TestIsPassableGeometric:
         goal = np.array([8.0, 3.0])
         # Agent radius 0.3 -> diameter 0.6m > 0.5m gap
         assert not is_passable(nm, start, goal, agent_radius=0.3)
+
+
+class TestFirstWaypointHeadings:
+    """Spawn orientation toward the first funnel waypoint, with goal fallback."""
+
+    def _wall_blocked_navmesh(self):
+        # 10x10 field with a free-floating wall (x in [4,6], y in [3,9]).
+        # A horizontal path at y=5 is blocked; the shorter detour is downward
+        # (3m bottom gap vs 1m top gap), wrapping the wall's bottom-left corner.
+        exterior = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        wall = [(4, 3), (6, 3), (6, 9), (4, 9)]
+        return build_navmesh(Polygon(exterior, [wall]))
+
+    def test_points_to_first_waypoint_not_goal(self):
+        from crowdrl_core.navmesh import first_waypoint_headings
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 5.0]])
+        goals = np.array([[8.0, 5.0]])  # straight-line bearing is due east (0 rad)
+        radii = np.array([0.2])
+
+        headings = first_waypoint_headings(nm, positions, goals, radii)
+
+        # The agent must detour downward around the wall, so its spawn heading
+        # points below due east -- clearly different from the goal bearing (0).
+        assert headings[0] < -0.3
+        assert abs(headings[0] - np.arctan2(0.0, 6.0)) > 0.3
+
+    def test_straight_shot_matches_goal_bearing(self):
+        from crowdrl_core.navmesh import first_waypoint_headings
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 1.0]])  # below the wall: clear path east
+        goals = np.array([[8.0, 1.0]])
+        radii = np.array([0.2])
+
+        headings = first_waypoint_headings(nm, positions, goals, radii)
+        # First waypoint is the goal itself -> heading equals the goal bearing.
+        assert abs(headings[0] - np.arctan2(0.0, 6.0)) < 1e-6
+
+    def test_falls_back_to_goal_bearing_when_unreachable(self):
+        from crowdrl_core.navmesh import first_waypoint_headings
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 5.0]])
+        goals = np.array([[20.0, 5.0]])  # outside the polygon -> no path
+        radii = np.array([0.2])
+
+        headings = first_waypoint_headings(nm, positions, goals, radii)
+        # No path -> fall back to the straight-line bearing to the global goal.
+        assert abs(headings[0] - np.arctan2(0.0, 18.0)) < 1e-6
+
+
+class TestRemainingPathLengths:
+    """Route-aware distance metric: navmesh path length, straight-line fallback."""
+
+    def _wall_blocked_navmesh(self):
+        exterior = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        wall = [(4, 3), (6, 3), (6, 9), (4, 9)]
+        return build_navmesh(Polygon(exterior, [wall]))
+
+    def test_detour_path_longer_than_straight_line(self):
+        from crowdrl_core.navmesh import remaining_path_lengths
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 5.0]])
+        goals = np.array([[8.0, 5.0]])  # straight line blocked -> must detour down
+        radii = np.array([0.2])
+
+        rem = remaining_path_lengths(nm, positions, goals, radii)
+        euclid = np.linalg.norm(goals[0] - positions[0])
+        # The route around the wall is meaningfully longer than the bee-line, so
+        # measuring progress along it is what keeps a detouring agent rewarded.
+        assert rem[0] > euclid + 0.5
+
+    def test_straight_shot_equals_euclidean(self):
+        from crowdrl_core.navmesh import remaining_path_lengths
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 1.0]])  # below the wall: clear path east
+        goals = np.array([[8.0, 1.0]])
+        radii = np.array([0.2])
+
+        rem = remaining_path_lengths(nm, positions, goals, radii)
+        assert abs(rem[0] - np.linalg.norm(goals[0] - positions[0])) < 1e-6
+
+    def test_unreachable_falls_back_to_straight_line(self):
+        from crowdrl_core.navmesh import remaining_path_lengths
+
+        nm = self._wall_blocked_navmesh()
+        positions = np.array([[2.0, 5.0]])
+        goals = np.array([[20.0, 5.0]])  # outside the polygon -> no path
+        radii = np.array([0.2])
+
+        rem = remaining_path_lengths(nm, positions, goals, radii)
+        assert abs(rem[0] - np.linalg.norm(goals[0] - positions[0])) < 1e-6

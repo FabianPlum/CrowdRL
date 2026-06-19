@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from crowdrl_torch.geometry_repr import prepare_reset_data
 from crowdrl_torch.observation import build_observations
+from crowdrl_torch.reward import path_distance_metric
 from crowdrl_torch.step import batched_step
 from crowdrl_torch.types import EnvConfig, TorchWorldState
 
@@ -42,6 +43,11 @@ class BatchedTorchEnv:
     compile_step : bool
         If True, apply ``torch.compile(mode="reduce-overhead")`` to the
         step function for kernel fusion and CUDA graph support.
+    disable_auto_reset : bool
+        If True, finished envs are not auto-reset and ``step`` skips the
+        ``episode_over.nonzero().tolist()`` CPU sync. Intended for
+        evaluation, where each env runs exactly one episode and resets
+        would contaminate per-episode stats.
     """
 
     def __init__(
@@ -53,6 +59,7 @@ class BatchedTorchEnv:
         seed: int = 42,
         n_reset_workers: int = 8,
         compile_step: bool = False,
+        disable_auto_reset: bool = False,
     ):
         self.n_envs = n_envs
         self.config = config
@@ -60,6 +67,7 @@ class BatchedTorchEnv:
         self.device = torch.device(device)
         self.seed = seed
         self._seed_counter = seed
+        self.disable_auto_reset = disable_auto_reset
 
         self._step_fn = batched_step
         self._compiled = False
@@ -93,6 +101,24 @@ class BatchedTorchEnv:
 
         self.states = self._stack_reset_data(all_data)
 
+        # When neighbor memory is on, seed the persistent neighbor-ID table
+        # with a first-step match so the initial observation sees populated
+        # slots rather than all -1. Without this seed, slots would remain
+        # unpopulated until after the first step, giving the policy a stale
+        # all-empty neighbor context on reset (fine for commit 2, but a
+        # clean seed is simpler to reason about for commits 4/5).
+        if self.config.use_neighbor_memory:
+            from crowdrl_torch.sensing import match_persistent_neighbors
+
+            self.states.neighbor_ids = match_persistent_neighbors(
+                self.states.positions,
+                self.states.neighbor_ids,
+                self.states.active_mask,
+                self.states.n_agents,
+                sensing_radius=self.config.neighbor_sensing_radius,
+                config=self.config,
+            )
+
         # No episodes are over right after reset
         self.episode_over = torch.zeros(self.n_envs, dtype=torch.bool, device=self.device)
 
@@ -114,13 +140,29 @@ class BatchedTorchEnv:
             n_waypoints=self.states.n_waypoints,
             waypoint_cursor=self.states.waypoint_cursor,
             waypoint_path_lengths=self.states.waypoint_path_lengths,
+            spawn_positions=self.states.spawn_positions,
+            initial_goal_distances=self.states.initial_goal_distances,
+            cumulative_path_length=self.states.cumulative_path_length,
+            pos_history=self.states.pos_history,
+            gdist_history=self.states.gdist_history,
+            preferred_speeds=self.states.preferred_speeds,
+            step_count=self.states.step_count,
+            neighbor_ids=self.states.neighbor_ids,
+            neighbor_vel_history=self.states.neighbor_vel_history,
         )
 
         return self.states, obs
 
     def step(
         self, actions: torch.Tensor
-    ) -> tuple[TorchWorldState, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        TorchWorldState,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Step all environments.
 
         Parameters
@@ -129,7 +171,11 @@ class BatchedTorchEnv:
 
         Returns
         -------
-        states, observations, rewards, terminated, truncated
+        states, observations, rewards, terminated, truncated, reward_components
+
+        ``reward_components`` is (E, N, C), the per-component reward breakdown
+        (channels ordered by ``crowdrl_torch.reward.REWARD_COMPONENT_NAMES``),
+        used by the collector for per-episode collapse instrumentation.
 
         Notes
         -----
@@ -143,7 +189,7 @@ class BatchedTorchEnv:
 
         if self._compiled:
             torch.compiler.cudagraph_mark_step_begin()
-        self.states, obs, rewards, terminated, truncated = self._step_fn(
+        self.states, obs, rewards, terminated, truncated, reward_components = self._step_fn(
             self.states, actions, self.config
         )
         if self._compiled:
@@ -153,6 +199,11 @@ class BatchedTorchEnv:
         # Envs already idle (waiting for async reset) are NOT flagged.
         any_active = self.states.active_mask.any(dim=-1)  # (E,)
         self.episode_over = had_active & ~any_active
+
+        # Eval mode: skip auto-reset entirely. This avoids the per-step
+        # ``.tolist()`` sync barrier on ``self.episode_over``.
+        if self.disable_auto_reset:
+            return self.states, obs, rewards, terminated, truncated, reward_components
 
         # Initiate async resets for finished envs
         for env_idx in self.episode_over.nonzero(as_tuple=False).flatten().tolist():
@@ -165,6 +216,22 @@ class BatchedTorchEnv:
         # Apply completed resets and rebuild observations for reset envs
         # so callers see the new episode's initial obs instead of stale zeros.
         reset_envs = self._apply_completed_resets()
+        if reset_envs and self.config.use_neighbor_memory:
+            # Re-seed the persistent neighbor slots for envs that just reset.
+            # We just cleared them to -1 in _apply_completed_resets; running
+            # the matcher on the full batch is idempotent for mid-episode
+            # envs (their positions haven't moved since batched_step already
+            # matched them) and populates the cleared reset envs.
+            from crowdrl_torch.sensing import match_persistent_neighbors
+
+            self.states.neighbor_ids = match_persistent_neighbors(
+                self.states.positions,
+                self.states.neighbor_ids,
+                self.states.active_mask,
+                self.states.n_agents,
+                sensing_radius=self.config.neighbor_sensing_radius,
+                config=self.config,
+            )
         if reset_envs:
             r = torch.tensor(reset_envs, device=self.device)
             fresh_obs = build_observations(
@@ -184,10 +251,19 @@ class BatchedTorchEnv:
                 n_waypoints=self.states.n_waypoints[r],
                 waypoint_cursor=self.states.waypoint_cursor[r],
                 waypoint_path_lengths=self.states.waypoint_path_lengths[r],
+                spawn_positions=self.states.spawn_positions[r],
+                initial_goal_distances=self.states.initial_goal_distances[r],
+                cumulative_path_length=self.states.cumulative_path_length[r],
+                pos_history=self.states.pos_history[r],
+                gdist_history=self.states.gdist_history[r],
+                preferred_speeds=self.states.preferred_speeds[r],
+                step_count=self.states.step_count[r],
+                neighbor_ids=self.states.neighbor_ids[r],
+                neighbor_vel_history=self.states.neighbor_vel_history[r],
             )
             obs[r] = fresh_obs
 
-        return self.states, obs, rewards, terminated, truncated
+        return self.states, obs, rewards, terminated, truncated, reward_components
 
     def get_episode_over_mask(self) -> torch.Tensor:
         """Return (E,) bool mask of envs with no active agents."""
@@ -217,7 +293,7 @@ class BatchedTorchEnv:
         try:
             for _ in range(n_steps):
                 torch.compiler.cudagraph_mark_step_begin()
-                self.states, _, _, _, _ = self._step_fn(self.states, actions, self.config)
+                self.states, _, _, _, _, _ = self._step_fn(self.states, actions, self.config)
                 self.states = self.states.clone()
             return True
         except Exception as e:
@@ -265,6 +341,7 @@ class BatchedTorchEnv:
             n_waypoints=raw.get("n_waypoints"),
             waypoint_path_lengths=raw.get("waypoint_path_lengths"),
             max_waypoints=self.config.max_waypoints,
+            memory_window=self.config.temporal_memory_window,
         )
         return data, tier_name
 
@@ -303,6 +380,14 @@ class BatchedTorchEnv:
             "waypoint_path_lengths": torch.tensor(
                 data["waypoint_path_lengths"], dtype=torch.float32, device=dev
             ),
+            "spawn_positions": torch.tensor(
+                data["spawn_positions"], dtype=torch.float32, device=dev
+            ),
+            "initial_goal_distances": torch.tensor(
+                data["initial_goal_distances"], dtype=torch.float32, device=dev
+            ),
+            "pos_history": torch.tensor(data["pos_history"], dtype=torch.float32, device=dev),
+            "gdist_history": torch.tensor(data["gdist_history"], dtype=torch.float32, device=dev),
         }
 
     def _stack_reset_data(self, all_data: list[dict]) -> TorchWorldState:
@@ -313,6 +398,21 @@ class BatchedTorchEnv:
 
         def stack_field(key: str) -> torch.Tensor:
             return torch.stack([t[key] for t in all_tensors])
+
+        # Initial path-distance metric (remaining navmesh path at cursor 0, with
+        # straight-line goal-distance fallback) seeds both the progress baseline
+        # and the stuck-window start, so the first window measures route progress
+        # rather than the bee-line to the goal.
+        cursor0 = torch.zeros((self.n_envs, max_agents), dtype=torch.int32, device=dev)
+        nav0 = path_distance_metric(
+            stack_field("positions"),
+            stack_field("goal_positions"),
+            stack_field("waypoints"),
+            cursor0,
+            stack_field("n_waypoints"),
+            stack_field("waypoint_path_lengths"),
+            self.config.use_navmesh,
+        )
 
         return TorchWorldState(
             positions=stack_field("positions"),
@@ -333,7 +433,7 @@ class BatchedTorchEnv:
             prev_velocities=torch.zeros(
                 (self.n_envs, max_agents, 2), dtype=torch.float32, device=dev
             ),
-            prev_goal_distances=stack_field("goal_distances"),
+            prev_nav_distances=nav0,
             prev_accelerations=torch.zeros(
                 (self.n_envs, max_agents, 2), dtype=torch.float32, device=dev
             ),
@@ -353,7 +453,31 @@ class BatchedTorchEnv:
             stuck_window_step=torch.zeros(
                 (self.n_envs, max_agents), dtype=torch.int32, device=dev
             ),
-            stuck_window_start_dist=stack_field("goal_distances"),
+            stuck_window_start_nav=nav0,
+            spawn_positions=stack_field("spawn_positions"),
+            initial_goal_distances=stack_field("initial_goal_distances"),
+            cumulative_path_length=torch.zeros(
+                (self.n_envs, max_agents), dtype=torch.float32, device=dev
+            ),
+            pos_history=stack_field("pos_history"),
+            gdist_history=stack_field("gdist_history"),
+            neighbor_ids=torch.full(
+                (self.n_envs, max_agents, self.config.k_neighbours),
+                -1,
+                dtype=torch.int32,
+                device=dev,
+            ),
+            neighbor_vel_history=torch.zeros(
+                (
+                    self.n_envs,
+                    max_agents,
+                    self.config.neighbor_vel_history_window + 1,
+                    self.config.k_neighbours,
+                    2,
+                ),
+                dtype=torch.float32,
+                device=dev,
+            ),
         )
 
     def _apply_completed_resets(self) -> list[int]:
@@ -367,6 +491,20 @@ class BatchedTorchEnv:
                 data, tier_name = future.result()
                 self.env_tiers[env_idx] = tier_name
                 tensors = self._data_to_tensors(data)
+
+                # Initial path-distance metric for this env (cursor 0), used to
+                # seed the progress baseline and stuck-window start. Add/strip a
+                # leading env dim so path_distance_metric's (E, N) ops apply.
+                cursor0 = torch.zeros_like(tensors["n_waypoints"])
+                nav0_env = path_distance_metric(
+                    tensors["positions"].unsqueeze(0),
+                    tensors["goal_positions"].unsqueeze(0),
+                    tensors["waypoints"].unsqueeze(0),
+                    cursor0.unsqueeze(0),
+                    tensors["n_waypoints"].unsqueeze(0),
+                    tensors["waypoint_path_lengths"].unsqueeze(0),
+                    self.config.use_navmesh,
+                ).squeeze(0)
 
                 # Direct slice assignment — simpler than JAX's tree.map
                 self.states.positions[env_idx] = tensors["positions"]
@@ -383,7 +521,7 @@ class BatchedTorchEnv:
                 self.states.wall_segments[env_idx] = tensors["wall_segments"]
                 self.states.n_segments[env_idx] = tensors["n_segments"]
                 self.states.prev_velocities[env_idx] = 0.0
-                self.states.prev_goal_distances[env_idx] = tensors["goal_distances"]
+                self.states.prev_nav_distances[env_idx] = nav0_env
                 self.states.prev_accelerations[env_idx] = 0.0
                 self.states.prev_headings[env_idx] = tensors["torso_orientations"]
                 self.states.prev_heading_changes[env_idx] = 0.0
@@ -395,7 +533,14 @@ class BatchedTorchEnv:
                 self.states.n_agents[env_idx] = tensors["n_agents"]
                 self.states.step_count[env_idx] = 0
                 self.states.stuck_window_step[env_idx] = 0
-                self.states.stuck_window_start_dist[env_idx] = tensors["goal_distances"]
+                self.states.stuck_window_start_nav[env_idx] = nav0_env
+                self.states.spawn_positions[env_idx] = tensors["spawn_positions"]
+                self.states.initial_goal_distances[env_idx] = tensors["initial_goal_distances"]
+                self.states.cumulative_path_length[env_idx] = 0.0
+                self.states.pos_history[env_idx] = tensors["pos_history"]
+                self.states.gdist_history[env_idx] = tensors["gdist_history"]
+                self.states.neighbor_ids[env_idx] = -1
+                self.states.neighbor_vel_history[env_idx] = 0.0
 
                 completed.append(env_idx)
 

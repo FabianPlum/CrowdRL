@@ -10,31 +10,100 @@ from conftest import make_world_state
 class TestObsConfig:
     def test_default_dims(self):
         config = ObsConfig()
-        # 7 ego + 56 social (8×7) + 16 rays = 79
-        assert config.obs_dim == 79
+        # 8 ego + 56 social (8x7) + 16 rays = 80
+        assert config.obs_dim == 80
 
     def test_two_channel_dims(self):
         config = ObsConfig(raycast=RaycastConfig(two_channel=True))
-        # 7 + 56 + 32 = 95
-        assert config.obs_dim == 95
+        # 8 + 56 + 32 = 96
+        assert config.obs_dim == 96
 
     def test_navmesh_dims(self):
         config = ObsConfig(use_navmesh=True)
-        # 7 + 56 + 16 + 3 = 82
-        assert config.obs_dim == 82
+        # 8 + 56 + 16 + 3 = 83
+        assert config.obs_dim == 83
 
     def test_full_dims(self):
         config = ObsConfig(
             raycast=RaycastConfig(two_channel=True),
             use_navmesh=True,
         )
-        # 7 + 56 + 32 + 3 = 98
-        assert config.obs_dim == 98
+        # 8 + 56 + 32 + 3 = 99
+        assert config.obs_dim == 99
 
     def test_custom_k(self):
         config = ObsConfig(k_neighbours=4)
-        # 7 + 28 (4×7) + 16 = 51
-        assert config.obs_dim == 51
+        # 8 + 28 (4x7) + 16 = 52
+        assert config.obs_dim == 52
+
+    def test_temporal_memory_dims(self):
+        config = ObsConfig(use_temporal_memory=True)
+        # 8 + 56 + 16 + 6 = 86
+        assert config.obs_dim == 86
+
+    def test_temporal_memory_with_navmesh_dims(self):
+        config = ObsConfig(use_navmesh=True, use_temporal_memory=True)
+        # 8 + 56 + 16 + 3 + 6 = 89
+        assert config.obs_dim == 89
+
+    def test_neighbor_vel_history_dims(self):
+        config = ObsConfig(
+            use_navmesh=True,
+            use_temporal_memory=True,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+        )
+        # 89 + 8*2 = 105
+        assert config.obs_dim == 105
+
+    def test_neighbor_vel_history_requires_memory_flag(self):
+        """Without ``use_neighbor_memory``, the vel history flag alone
+        should NOT add dimensions -- the matcher isn't running so the
+        buffer can't be read."""
+        config = ObsConfig(
+            use_neighbor_memory=False,
+            use_neighbor_vel_history=True,
+        )
+        # Still the base 80 (no navmesh, no temporal memory, no neighbor mem)
+        assert config.obs_dim == 80
+
+    def test_neighbor_trajectory_features_dims(self):
+        """A++ full config: navmesh + ego memory + vel history + traj feats."""
+        config = ObsConfig(
+            use_navmesh=True,
+            use_temporal_memory=True,
+            use_neighbor_memory=True,
+            use_neighbor_vel_history=True,
+            use_neighbor_trajectory_features=True,
+        )
+        # 8 + 56 + 16 + 3 + 6 + 16 + 24 = 129
+        assert config.obs_dim == 129
+
+    def test_neighbor_trajectory_requires_both_memory_flags(self):
+        """Trajectory features need both neighbor_memory AND temporal_memory."""
+        # Only neighbor memory -- no traj features
+        c1 = ObsConfig(
+            use_neighbor_memory=True,
+            use_temporal_memory=False,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c1.obs_dim == 80  # nothing added
+
+        # Only temporal memory -- no traj features
+        c2 = ObsConfig(
+            use_neighbor_memory=False,
+            use_temporal_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c2.obs_dim == 80 + 6  # only temporal memory
+
+        # Both enabled -- traj features active
+        c3 = ObsConfig(
+            use_neighbor_memory=True,
+            use_temporal_memory=True,
+            use_neighbor_trajectory_features=True,
+        )
+        assert c3.obs_dim == 80 + 6 + 24  # +6 temporal +24 traj
 
 
 class TestBuildObservation:
@@ -111,8 +180,9 @@ class TestBuildObservation:
         )
         config = ObsConfig(k_neighbours=0, raycast=RaycastConfig(n_rays=1))
         obs = build_observation(world, 0, config)
-        # head_rel_torso is the last element of ego state (index 6)
-        assert abs(obs[6] - 0.5) < 1e-6
+        # head_rel_torso is the last element of ego state (index 7 now,
+        # since preferred_speed sits at index 5 and shifted everything down).
+        assert abs(obs[7] - 0.5) < 1e-6
 
     def test_two_channel_rays(self):
         config = ObsConfig(raycast=RaycastConfig(n_rays=8, two_channel=True))
@@ -192,3 +262,197 @@ class TestBuildObservationsBatch:
         batch = build_observations_batch(world, config)
         assert batch.shape == (2, config.obs_dim)
         np.testing.assert_array_equal(batch, np.zeros((2, config.obs_dim)))
+
+
+def _attach_memory_state(world, W=50, preferred_speeds=None):
+    """Helper: initialise the temporal-memory state on a WorldState at t=0.
+
+    Ring buffers are pre-filled with the current position / goal distance
+    so reads before the window fills return the spawn value.
+    """
+    n = world.n_agents
+    buf = W + 1
+    goal_d = np.linalg.norm(world.goal_positions - world.positions, axis=1)
+    world.spawn_positions = world.positions.copy()
+    world.initial_goal_distances = goal_d.copy()
+    world.cumulative_path_length = np.zeros(n, dtype=np.float64)
+    world.pos_history = np.broadcast_to(world.positions[:, np.newaxis, :], (n, buf, 2)).copy()
+    world.gdist_history = np.broadcast_to(goal_d[:, np.newaxis], (n, buf)).copy()
+    world.preferred_speeds = (
+        preferred_speeds if preferred_speeds is not None else np.full(n, 1.3, dtype=np.float64)
+    )
+    world.step_count = 0
+    return world
+
+
+class TestTemporalMemory:
+    """Tests for the 6 temporal-memory observation features (Option A)."""
+
+    def _make_config(self, W=4, max_steps=100, dt=0.01):
+        return ObsConfig(
+            k_neighbours=0,
+            raycast=RaycastConfig(n_rays=1),
+            use_temporal_memory=True,
+            temporal_memory_window=W,
+            temporal_memory_max_steps=max_steps,
+            temporal_memory_dt=dt,
+        )
+
+    def test_memory_features_zero_at_spawn(self):
+        """At t=0 (just spawned), all temporal features should be 0 or sensible defaults."""
+        config = self._make_config()
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[2.0, 5.0]]),
+            goal_positions=np.array([[8.0, 5.0]]),
+        )
+        _attach_memory_state(world, W=config.temporal_memory_window)
+
+        obs = build_observation(world, 0, config)
+        memory = obs[-6:]
+        disp_spawn, cum_path, path_eff, elapsed, disp_win, goal_win = memory
+
+        # Spawn == position, so displacement-from-spawn = 0
+        assert disp_spawn == 0.0
+        # Haven't walked any path yet
+        assert cum_path == 0.0
+        # path_eff is 0/eps -> 0 at spawn
+        assert path_eff == 0.0
+        # step_count = 0
+        assert elapsed == 0.0
+        # Ring buffer slots all = spawn_pos, displacement over window = 0
+        assert disp_win == 0.0
+        # gdist_window = initial_gdist, so goal progress = 0
+        assert goal_win == 0.0
+
+    def test_displacement_from_spawn(self):
+        """Moving away from spawn increases displacement_from_spawn."""
+        config = self._make_config()
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[2.0, 5.0]]),
+            goal_positions=np.array([[8.0, 5.0]]),
+        )
+        _attach_memory_state(world, W=config.temporal_memory_window)
+
+        # Initial goal distance = 6.0. Move agent 3m forward (halfway).
+        world.positions[0] = [5.0, 5.0]
+        obs = build_observation(world, 0, config)
+        disp_spawn = obs[-6]
+        # 3.0 / 6.0 = 0.5
+        assert abs(disp_spawn - 0.5) < 1e-9
+
+    def test_path_efficiency_straight_line(self):
+        """Straight-line motion should give path_efficiency near 1.0."""
+        config = self._make_config()
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[0.0, 0.0]]),
+            goal_positions=np.array([[10.0, 0.0]]),
+        )
+        _attach_memory_state(world, W=config.temporal_memory_window)
+
+        # Simulate moving in a straight line: cum_path = displacement
+        world.positions[0] = [5.0, 0.0]
+        world.cumulative_path_length[0] = 5.0
+        obs = build_observation(world, 0, config)
+        path_eff = obs[-4]
+        assert abs(path_eff - 1.0) < 1e-9
+
+    def test_path_efficiency_looping(self):
+        """Looping motion should give path_efficiency much less than 1.0."""
+        config = self._make_config()
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[0.0, 0.0]]),
+            goal_positions=np.array([[10.0, 0.0]]),
+        )
+        _attach_memory_state(world, W=config.temporal_memory_window)
+
+        # Walked 10m but ended up 2m from spawn: efficiency = 0.2
+        world.positions[0] = [2.0, 0.0]
+        world.cumulative_path_length[0] = 10.0
+        obs = build_observation(world, 0, config)
+        path_eff = obs[-4]
+        assert abs(path_eff - 0.2) < 1e-9
+
+    def test_elapsed_fraction(self):
+        """elapsed_fraction = step_count / max_steps."""
+        config = self._make_config(W=4, max_steps=100)
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[0.0, 0.0]]),
+            goal_positions=np.array([[10.0, 0.0]]),
+        )
+        _attach_memory_state(world, W=config.temporal_memory_window)
+        world.step_count = 25
+        obs = build_observation(world, 0, config)
+        elapsed = obs[-3]
+        assert abs(elapsed - 0.25) < 1e-9
+
+    def test_disp_window_after_movement(self):
+        """Manually step the ring buffer: displacement over window reflects motion."""
+        W = 4
+        config = self._make_config(W=W, max_steps=100, dt=0.1)
+        # Use dt=0.1 to make ring-buffer math easy to reason about: v_pref=1
+        # gives expected_window = 1 * 4 * 0.1 = 0.4 m over the W-step window.
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[0.0, 0.0]]),
+            goal_positions=np.array([[10.0, 0.0]]),
+        )
+        _attach_memory_state(
+            world,
+            W=W,
+            preferred_speeds=np.array([1.0], dtype=np.float64),
+        )
+
+        # Simulate 5 steps of forward motion, delta = 0.1m per step
+        buf_size = W + 1  # 5
+        positions_seq = [0.1, 0.2, 0.3, 0.4, 0.5]
+        for step_idx, x in enumerate(positions_seq):
+            world.positions[0] = [x, 0.0]
+            world.cumulative_path_length[0] = x
+            # Write current pos into ring buffer at pre-step cursor
+            write_idx = step_idx % buf_size
+            world.pos_history[0, write_idx] = world.positions[0]
+            world.gdist_history[0, write_idx] = 10.0 - x
+            world.step_count = step_idx + 1
+
+        obs = build_observation(world, 0, config)
+        disp_win = obs[-2]
+        goal_win = obs[-1]
+
+        # After 5 writes, the window reads at index step_count % buf_size = 5%5 = 0
+        # Index 0 contains pos[0] = 0.1 (the oldest entry still in buffer).
+        # So window displacement = |0.5 - 0.1| = 0.4.
+        # Expected window = v_pref * W * dt = 1 * 4 * 0.1 = 0.4.
+        # Normalised = 0.4 / 0.4 = 1.0.
+        assert abs(disp_win - 1.0) < 1e-9
+        # Goal progress: gdist[0] was (10 - 0.1) = 9.9 at step 0. Now 9.5.
+        # progress = 9.9 - 9.5 = 0.4, normalised = 1.0
+        assert abs(goal_win - 1.0) < 1e-9
+
+    def test_memory_features_batched_matches_per_agent(self):
+        """build_observations_batch should produce the same memory features as build_observation."""
+        W = 4
+        config = self._make_config(W=W, max_steps=100)
+        n = 3
+        world = make_world_state(
+            n_agents=n,
+            positions=np.array([[0.0, 0.0], [5.0, 5.0], [2.0, 8.0]]),
+            goal_positions=np.array([[10.0, 0.0], [5.0, 0.0], [2.0, 0.0]]),
+        )
+        _attach_memory_state(world, W=W)
+
+        # Simulate some motion and state manipulation
+        world.step_count = 10
+        world.positions[0] = [3.0, 0.0]
+        world.cumulative_path_length[0] = 3.5
+        world.pos_history[0, 10 % (W + 1)] = [3.0, 0.0]
+        world.gdist_history[0, 10 % (W + 1)] = 7.0
+
+        batch = build_observations_batch(world, config)
+        for i in range(n):
+            individual = build_observation(world, i, config)
+            np.testing.assert_allclose(batch[i], individual, atol=1e-12)

@@ -59,10 +59,16 @@ def prepare_reset_data(
     n_waypoints: NDArray | None = None,
     waypoint_path_lengths: NDArray | None = None,
     max_waypoints: int = 16,
+    memory_window: int = 50,
 ) -> dict[str, NDArray[np.float32]]:
     """Prepare CPU-generated episode data for GPU transfer.
 
     Pads all agent arrays to MAX_AGENTS and wall segments to MAX_SEGMENTS.
+
+    ``memory_window`` sets the temporal-memory ring buffer size to
+    ``memory_window + 1``. The buffers are pre-filled with the spawn position
+    (resp. initial goal distance) so that reads before the buffer fills
+    return a sensible default.
 
     Returns
     -------
@@ -106,6 +112,15 @@ def prepare_reset_data(
             np.float32
         )
 
+    # Temporal-memory ring buffers. Pre-fill all W+1 slots with the spawn
+    # position / initial goal distance so that reads before the buffer fills
+    # return the spawn value (equivalent to "we haven't moved from here yet").
+    buf_size = memory_window + 1
+    padded_pos_history = np.zeros((max_agents, buf_size, 2), dtype=np.float32)
+    padded_pos_history[:n_agents] = positions[:n_agents, np.newaxis, :].astype(np.float32)
+    padded_gdist_history = np.zeros((max_agents, buf_size), dtype=np.float32)
+    padded_gdist_history[:n_agents] = goal_dists[:, np.newaxis]
+
     return {
         "positions": pad_2d(positions, max_agents),
         "velocities": pad_2d(velocities, max_agents),
@@ -126,4 +141,8 @@ def prepare_reset_data(
         "waypoints": padded_wp,
         "n_waypoints": padded_n_wp,
         "waypoint_path_lengths": padded_wp_pl,
+        "spawn_positions": pad_2d(positions, max_agents),
+        "initial_goal_distances": padded_goal_dists.copy(),
+        "pos_history": padded_pos_history,
+        "gdist_history": padded_gdist_history,
     }

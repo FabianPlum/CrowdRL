@@ -48,8 +48,8 @@ class TestCollectAndUpdate:
 
     def test_collect_episode(self, tiny_env: CrowdEnv, tiny_actor_critic: ActorCritic):
         """Collect one full episode and verify stats."""
-        buffer = RolloutBuffer(79, 4, torch.device("cpu"))
-        normalizer = RunningNormalizer(shape=(79,))
+        buffer = RolloutBuffer(80, 4, torch.device("cpu"))
+        normalizer = RunningNormalizer(shape=(80,))
 
         ep_stats = collect_episode(
             tiny_env, tiny_actor_critic, buffer, normalizer, None, torch.device("cpu")
@@ -79,11 +79,11 @@ class TestCollectAndUpdate:
                 spawn=SpawnConfig(n_agents_range=(3, 5)), max_steps=20,
             )
             env = CrowdEnv(config=cfg, seed=42)
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
-            buf = RolloutBuffer(79, 4, torch.device('cpu'))
-            norm = RunningNormalizer(shape=(79,))
+            buf = RolloutBuffer(80, 4, torch.device('cpu'))
+            norm = RunningNormalizer(shape=(80,))
             updater = MAPPOUpdater(ac, PPOConfig(n_epochs=2, n_minibatches=1), torch.device('cpu'))
 
             stats = collect_episode(env, ac, buf, norm, None, torch.device('cpu'))
@@ -120,11 +120,11 @@ class TestCollectAndUpdate:
                 spawn=SpawnConfig(n_agents_range=(3, 5)), max_steps=20,
             )
             env = CrowdEnv(config=cfg, seed=42)
-            nc = NetworkConfig(obs_dim=79, action_dim=4,
+            nc = NetworkConfig(obs_dim=80, action_dim=4,
                                actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32))
             ac = ActorCritic(nc)
-            buf = RolloutBuffer(79, 4, torch.device('cpu'))
-            norm = RunningNormalizer(shape=(79,))
+            buf = RolloutBuffer(80, 4, torch.device('cpu'))
+            norm = RunningNormalizer(shape=(80,))
             updater = MAPPOUpdater(ac, PPOConfig(n_epochs=2), torch.device('cpu'))
 
             for cycle in range(3):
@@ -152,11 +152,11 @@ class TestCheckpointing:
         from crowdrl_train.config import CurriculumConfig
 
         updater = MAPPOUpdater(tiny_actor_critic, PPOConfig(), torch.device("cpu"))
-        normalizer = RunningNormalizer(shape=(79,))
+        normalizer = RunningNormalizer(shape=(80,))
         curriculum = CurriculumManager(CurriculumConfig())
 
         # Feed some data to normalizer
-        normalizer.update(np.random.randn(50, 79))
+        normalizer.update(np.random.randn(50, 80))
 
         # Save
         path = tmp_path / "test_ckpt.pt"
@@ -167,11 +167,11 @@ class TestCheckpointing:
 
         fresh_ac = ActorCritic(
             NetworkConfig(
-                obs_dim=79, action_dim=4, actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32)
+                obs_dim=80, action_dim=4, actor_hidden_sizes=(32, 32), critic_hidden_sizes=(32, 32)
             )
         )
         fresh_updater = MAPPOUpdater(fresh_ac, PPOConfig(), torch.device("cpu"))
-        fresh_normalizer = RunningNormalizer(shape=(79,))
+        fresh_normalizer = RunningNormalizer(shape=(80,))
         fresh_curriculum = CurriculumManager(CurriculumConfig())
 
         total_steps, rollout_count = load_checkpoint(

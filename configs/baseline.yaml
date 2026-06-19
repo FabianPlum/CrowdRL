@@ -1,0 +1,150 @@
+# =============================================================================
+# CrowdRL MAPPO -- BASELINE (agent_dynamics_refactor)
+# =============================================================================
+# The canonical training baseline. Promoted from the density lineage's surviving
+# config (formerly exp_nogoaldir_stable_bigrooms_density_v4). Full lineage and the
+# rationale for every choice below: plan/agent_dynamics_refactor_merge_review.md.
+#
+# COMPOSITION
+#   Stability (the deep fixes): tanh-squashed policy, truncation-aware GAE, robust
+#     waypoint cursor, and BOTH running-normalizer count caps (obs 624d8e3 -> r355;
+#     reward/return 481011c -> r360). The two overflow caps are what let a full DDP
+#     run survive past the old ~r355/r360 death zone.
+#   Observation (89D): ego(8, incl. preferred_speed) + social(56) + rays(16) +
+#     navmesh(3) + Option-A temporal memory(6). Neighbor memory OFF (A+/A++ deferred).
+#     Waypoint-only nav: use_goal_direction = false.
+#   Dynamics: speed-turn coupling ON (turn_pivot_rate_deg 240 is the real turn knob;
+#     max_heading/torso_change_deg are inert under coupling). Asymmetric speed
+#     envelope (forward 2.0 / backward 0.5).
+#   Reward: density arc -- progress_weight 2.0, hard wall-contact penalty, entropy
+#     0.003, smoothness OFF, personal_space 0.75. Velocity-weighted collision AND
+#     proximity, CAPPED to discount-only (collision_penalty_cap -2.0): the weighting
+#     may cheapen slow contact but can no longer amplify fast contact (the pileup
+#     explosion precursor). NO yielding convention -- avoidance stays emergent.
+#
+# Warm-start from the density r500 peak (curriculum resets to phase 0):
+#   --init_from results_exp_nogoaldir_stable_bigrooms_density/checkpoint_rollout_0500.pt
+# Both GPUs (DDP). Output -> results_baseline/.
+# Watch: coll_ag magnitude (bounded), GoalRate in full phase, no NaN past r360.
+# =============================================================================
+
+seed: 42
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 4000
+log_interval: 5
+compile_step: true
+checkpoint_interval: 50
+render_during_training: true
+render_interval: 0
+scorecard_during_training: true
+scorecard_max_steps: 1500
+
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 500
+  phases:
+    - name: easy
+      tiers: [TIER_0]
+      agents: [5, 10]
+      threshold: 0.70
+    - name: medium
+      tiers: [TIER_0, TIER_1]
+      agents: [8, 20]
+      threshold: 0.60
+    - name: hard
+      tiers: [TIER_1, TIER_2]
+      agents: [15, 30]
+      threshold: 0.50
+    - name: rooms
+      tiers: [TIER_2, TIER_3A]
+      agents: [15, 60]
+      threshold: 0.50
+    - name: composed
+      tiers: [TIER_3A, TIER_3B]
+      agents: [20, 60]
+      threshold: 0.40
+    - name: full
+      tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
+      agents: [10, 100]
+      threshold: 0.0
+      tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
+
+geometry:
+  min_side: 12.0
+  max_side: 22.0
+  corridor_width: [2.0, 4.0]
+  corridor_length: [8.0, 18.0]
+
+observation:
+  use_navmesh: true
+  use_goal_direction: false
+  use_temporal_memory: true
+  temporal_memory_window: 50
+
+action:
+  # max_forward_speed / max_backward_speed left at defaults (2.0 / 0.5) -- v3 speed.
+  max_heading_change_deg: 4.8
+  max_torso_change_deg: 4.8
+  speed_turn_coupling: true
+  turn_lat_accel: 2.0
+  turn_pivot_rate_deg: 240.0
+
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -2.0
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 2.0
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: false
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5
+  wall_collision_penalty: -0.5
+  agent_proximity_penalty_near: -0.025
+  agent_proximity_penalty_far: -0.001
+  personal_space_radius: 0.75
+  action_rate_weight: -0.001
+  # --- velocity-weighted collision (P1), now CAPPED to discount-only ---
+  use_velocity_weighted_collision: true
+  collision_speed_floor: 0.25
+  collision_speed_scale: 0.5
+  collision_penalty_cap: -2.0       # v4: NEW -- floor per-step collision at the base -2.0
+  # --- velocity-weighted proximity ---
+  use_velocity_weighted_proximity: true
+  proximity_speed_floor: 0.0
+  proximity_speed_scale: 0.5
+
+max_steps: 3000
+desired_velocity_weight: 0.8
+
+episode:
+  stuck_termination_enabled: false
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+
+network:
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
+
+ppo:
+  lr_actor: 5.0e-4
+  lr_critic: 5.0e-4
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+  entropy_coef: 0.003
+  max_grad_norm: 1.0
+  use_huber_loss: true
+  huber_delta: 10.0
+
+eval:
+  n_episodes: 10
+  agent_range: [8, 25]
+  render_video: true
+  video_scenario: 7

@@ -27,6 +27,7 @@ def interpret_actions(
     current_torsos: Tensor,
     current_heads: Tensor,
     config: EnvConfig,
+    current_speeds: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Interpret raw actions for all agents (vectorized).
 
@@ -47,14 +48,23 @@ def interpret_actions(
     """
     actions = torch.clamp(raw_actions, -1.0, 1.0)
 
-    # 1. Desired speed: map [-1, 1] -> [0, max_speed]
-    desired_speeds = (actions[..., 0] + 1.0) / 2.0 * config.max_speed
+    # 1. Desired speed: linear remap [-1, 1] -> [-max_backward_speed, +max_forward_speed].
+    # Negative values mean motion opposite to heading (backing up).
+    speed_range = config.max_forward_speed + config.max_backward_speed
+    desired_speeds = -config.max_backward_speed + (actions[..., 0] + 1.0) / 2.0 * speed_range
 
-    # 2. Heading change
-    new_headings = current_headings + actions[..., 1] * config.max_heading_change
-
-    # 3. Torso orientation change
-    new_torsos = current_torsos + actions[..., 2] * config.max_torso_change
+    # 2. Heading + torso change, optionally clamped by the speed-turn
+    #    coupling envelope so agents must slow down to turn sharply.
+    heading_delta = actions[..., 1] * config.max_heading_change
+    torso_delta = actions[..., 2] * config.max_torso_change
+    if config.speed_turn_coupling and current_speeds is not None:
+        v = current_speeds.abs().clamp(min=1e-3)
+        omega_max = (config.turn_lat_accel / v).clamp(max=config.turn_pivot_rate)
+        max_delta = omega_max * config.dt
+        heading_delta = torch.minimum(torch.maximum(heading_delta, -max_delta), max_delta)
+        torso_delta = torch.minimum(torch.maximum(torso_delta, -max_delta), max_delta)
+    new_headings = current_headings + heading_delta
+    new_torsos = current_torsos + torso_delta
 
     # 4. Head orientation change relative to torso
     new_heads = current_heads + actions[..., 3] * config.max_head_change

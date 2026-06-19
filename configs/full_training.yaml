@@ -21,7 +21,7 @@ seed: 42
 n_envs: 64                  # GPU-batched environments per rank (no subprocess IPC)
 max_agents: 100              # padded agent dimension (>= largest curriculum phase)
 steps_per_collect: 1280000   # agent-steps per PPO update  (n_envs * 20000)
-n_rollouts: 500              # number of collect-update cycles
+n_rollouts: 5000              # number of collect-update cycles
 log_interval: 5              # print progress every N rollouts
 compile_step: true           # torch.compile for CUDA graph fusion (~30-60s warmup)
 
@@ -64,12 +64,12 @@ curriculum:
 
     - name: composed
       tiers: [TIER_3A, TIER_3B]
-      agents: [20, 60]
+      agents: [20, 100]
       threshold: 0.40
 
     - name: full
       tiers: [TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B]
-      agents: [20, 100]
+      agents: [40, 100]
       threshold: 0.0            # terminal phase
       tier_weights: [0.05, 0.05, 0.1, 0.35, 0.45]
 
@@ -79,7 +79,7 @@ curriculum:
 # ---------------------------------------------------------------------------
 geometry:
   min_side: 8.0              # field polygon min side length (m)
-  max_side: 15.0             # field polygon max side length (m)
+  max_side: 25.0             # field polygon max side length (m)
   corridor_width: [2.0, 4.0]       # (min, max) corridor width (m)
   corridor_length: [8.0, 18.0]     # (min, max) corridor length (m)
 
@@ -89,6 +89,14 @@ geometry:
 # ---------------------------------------------------------------------------
 observation:
   use_navmesh: true          # adds funnel-algorithm waypoints (79D -> 82D)
+
+  # Option A agent-memory experiment: 6 temporal scalar features derived from
+  # the agent's own trajectory (displacement from spawn, cumulative path,
+  # path efficiency, elapsed fraction, window displacement, window goal
+  # progress). See plan/agent_memory_research.md for design rationale and
+  # alternatives considered. When enabled, obs_dim becomes 82 + 6 = 88.
+  use_temporal_memory: true
+  temporal_memory_window: 200   # rolling window in simulation steps (~0.5s at dt=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +117,7 @@ reward:
   timeout_penalty: -10.0         # episode timeout
 
   # Existence penalty: small cost per alive step, pressures goal-seeking
-  existence_penalty: -0.01
+  existence_penalty: -0.002
 
   # Tier 2 -- progress shaping (potential-based)
   progress_weight: 1.5           # delta(goal_distance) per step
@@ -146,7 +154,8 @@ reward:
 # ---------------------------------------------------------------------------
 # Episode
 # ---------------------------------------------------------------------------
-max_steps: 2000              # simulation steps per episode (dt=0.01 -> 20s)
+max_steps: 3000              # simulation steps per episode (dt=0.01 -> 20s)
+desired_velocity_weight: 0.8  # pin to pre-Layer-1 value (Layer 1 default is 0.05)
 
 # Stuck-agent termination: diagnosed via scripts/diagnose_stuck_agents.py
 # that ~11% of TIER_3B agents become permanently frozen in local minima
@@ -164,8 +173,8 @@ episode:
 # Network architecture
 # ---------------------------------------------------------------------------
 network:
-  actor_hidden: [256, 256]
-  critic_hidden: [256, 256]
+  actor_hidden: [512, 512]
+  critic_hidden: [512, 512]
 
 
 # ---------------------------------------------------------------------------

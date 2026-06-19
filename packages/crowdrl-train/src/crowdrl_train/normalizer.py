@@ -15,6 +15,17 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+# Cap the running sample count. The DDP reward-normalizer sync
+# (``crowdrl_torch.distributed.sync_reward_normalizer``) re-sums the *already
+# merged* count every rollout, so without a cap the count grows geometrically
+# (~doubles per rollout) and overflows float64 within a few hundred rollouts --
+# then ``m_a = var * count`` becomes ``inf``, ``var`` becomes ``NaN``, and every
+# normalized reward is ``NaN`` (the deterministic r360 collapse). This is the twin
+# of the observation-normalizer overflow capped in ``crowdrl_torch.normalizer``
+# (``_MAX_COUNT`` there). Capping bounds ``m_a`` while leaving a stable
+# large-window estimator -- the intended near-frozen running-statistics behaviour.
+_MAX_COUNT = 1e8
+
 
 class RunningNormalizer:
     """Welford's online algorithm for running mean and variance.
@@ -43,6 +54,15 @@ class RunningNormalizer:
         # Reshape to (N, *shape) for batch processing
         batch = batch.reshape(-1, *self.mean.shape)
 
+        # Drop non-finite samples (mirror TorchRunningNormalizer): a single NaN/Inf
+        # sample must never permanently poison the running mean/var, which would
+        # NaN every future normalized value and unrecoverably kill the run.
+        finite_rows = np.isfinite(batch).all(axis=tuple(range(1, batch.ndim)))
+        if not finite_rows.all():
+            batch = batch[finite_rows]
+        if batch.shape[0] == 0:
+            return
+
         batch_mean = batch.mean(axis=0)
         batch_var = batch.var(axis=0)
         batch_count = batch.shape[0]
@@ -63,7 +83,7 @@ class RunningNormalizer:
 
         self.mean = new_mean
         self.var = m2 / total_count
-        self.count = total_count
+        self.count = min(total_count, _MAX_COUNT)
 
     def normalize(self, x: NDArray) -> NDArray:
         """Normalize input using current statistics.
@@ -88,7 +108,10 @@ class RunningNormalizer:
         """Restore from checkpoint."""
         self.mean = state["mean"].copy()
         self.var = state["var"].copy()
-        self.count = state["count"]
+        # Cap a possibly-overflowed count from a checkpoint trained before the cap
+        # existed (the runaway-count bug inflated it past 1e300), so the first
+        # update's m_a = var * count cannot overflow.
+        self.count = min(float(state["count"]), _MAX_COUNT)
 
 
 class RewardNormalizer:

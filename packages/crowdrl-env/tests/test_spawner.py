@@ -137,3 +137,28 @@ class TestSpawnAgents:
 
         np.testing.assert_array_equal(r1.positions, r2.positions)
         np.testing.assert_array_equal(r1.goal_positions, r2.goal_positions)
+
+
+class TestMinSpawnGoalDistance:
+    def test_enforced_when_regions_overlap(self, rng):
+        """Goals must be >= min_spawn_goal_distance from their OWN spawn even when
+        spawn and goal regions are the SAME polygon (the degenerate case that let
+        a goal land on a spawn -> initial_goal_distance ~= 0)."""
+        region = [box(0, 0, 20, 20)]  # spawn AND goal sampled from one area
+        cfg = SpawnConfig(n_agents_range=(60, 60), min_spawn_goal_distance=3.0)
+        result = spawn_agents(
+            rng, region, region, config=cfg, n_agents=60, walkable=box(0, 0, 20, 20)
+        )
+        d = np.linalg.norm(result.goal_positions - result.positions, axis=1)
+        assert d.min() >= 3.0 - 1e-6, f"min spawn-goal distance {d.min():.4f} < 3.0"
+
+    def test_fallback_when_geometry_too_small(self, rng):
+        """A geometry too small to satisfy the distance must terminate (keep the
+        farthest candidate), not hang or error."""
+        tiny = [box(0, 0, 2.0, 2.0)]  # diameter ~2.83m < 3.0m -> impossible
+        cfg = SpawnConfig(n_agents_range=(4, 4), min_spawn_goal_distance=3.0, max_goal_attempts=16)
+        result = spawn_agents(
+            rng, tiny, tiny, config=cfg, n_agents=4, walkable=box(0, 0, 2.0, 2.0)
+        )
+        assert result.goal_positions.shape[0] == result.n_agents
+        assert np.isfinite(result.goal_positions).all()

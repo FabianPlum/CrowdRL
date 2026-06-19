@@ -183,7 +183,7 @@ def enforce_wall_boundaries(
     wall_segments: Tensor,
     n_segments: Tensor,
     config: EnvConfig,
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     """Project agents to stay inside the walkable polygon.
 
     Parameters
@@ -195,6 +195,9 @@ def enforce_wall_boundaries(
     -------
     new_positions : (E, N, 2)
     new_velocities : (E, N, 2)
+    wall_collision_mask : (E, N) bool -- True for active agents the boundary
+        had to correct this step (penetrating / pushed back). Used as the
+        hard wall-contact reward signal, analogous to agent ``collision_mask``.
     """
     S = wall_segments.shape[1]
     seg_starts = wall_segments[:, :, 0, :]  # (E, S, 2)
@@ -243,4 +246,4 @@ def enforce_wall_boundaries(
     corrected_vel = velocities + vel_correction
     new_velocities = torch.where(needs_fix.unsqueeze(-1), corrected_vel, velocities)
 
-    return new_positions, new_velocities
+    return new_positions, new_velocities, needs_fix
