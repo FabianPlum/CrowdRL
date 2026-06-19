@@ -29,7 +29,7 @@ import torch
 import torch.distributed as dist
 from torch import Tensor, nn
 
-from crowdrl_train.normalizer import RewardNormalizer
+from crowdrl_train.normalizer import _MAX_COUNT, RewardNormalizer
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +189,13 @@ def sync_reward_normalizer(
     dist.all_reduce(running_ret, op=dist.ReduceOp.SUM)
     running_ret.div_(dist.get_world_size())
 
-    # Write back to CPU numpy arrays
+    # Write back to CPU numpy arrays. Cap the re-summed count: this all_reduce(SUM)
+    # re-sums the already-merged total every rollout, so an uncapped count grows
+    # geometrically and overflows float64 (-> var*count = inf -> var = NaN -> every
+    # normalized reward NaN). Same cap as the obs-normalizer sync.
     rn.mean = new_mean.cpu().numpy()
     rn.var = new_var.cpu().numpy()
-    rn.count = total_count.item()
+    rn.count = min(total_count.item(), _MAX_COUNT)
     reward_normalizer._running_return = running_ret.item()
 
 
