@@ -71,6 +71,14 @@ class RewardConfig:
     """Extra penalty multiplier per m/s of impact speed (closing speed for
     agent-agent contact, own speed for wall contact)."""
 
+    collision_penalty_cap: float = 0.0
+    """Per-step floor (NEGATIVE, e.g. -2.0; 0.0 disables) on the agent collision
+    penalty. Caps how negative the per-step term can get so the velocity
+    weighting can DISCOUNT slow contact but never AMPLIFY fast contact below this
+    floor. The slow60 experiment showed amplification-by-closing-speed makes
+    dense pileups WORSE (coll_ag -> -1086, gridlock); capping at the base
+    collision_penalty turns the weighting into discount-only."""
+
     # Velocity weighting for the agent-PROXIMITY penalty (optional, default OFF).
     # The distance-only proximity ramp penalises an agent for merely BEING near a
     # neighbour, so in a crowd the cheapest policy is to stop at the edge and not
@@ -316,9 +324,15 @@ def compute_rewards(
         speed_scale = np.maximum(
             config.collision_speed_floor + config.collision_speed_scale * impact_speed, 0.0
         )
-        rewards[coll_active] += config.collision_penalty * speed_scale[coll_active]
+        coll_pen = config.collision_penalty * speed_scale[coll_active]
     else:
-        rewards[coll_active] += config.collision_penalty
+        coll_pen = config.collision_penalty
+    # Cap the per-step collision penalty at a floor: velocity weighting may
+    # DISCOUNT slow contact but not AMPLIFY fast contact below the cap (mirrors
+    # crowdrl_torch.reward). cap=0.0 disables.
+    if config.collision_penalty_cap < 0.0:
+        coll_pen = np.maximum(coll_pen, config.collision_penalty_cap)
+    rewards[coll_active] += coll_pen
 
     # Wall proximity penalty (smooth, distance-based)
     if (

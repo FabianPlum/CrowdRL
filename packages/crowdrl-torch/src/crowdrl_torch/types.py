@@ -204,6 +204,7 @@ class EnvConfig(NamedTuple):
     use_velocity_weighted_collision: bool = False
     collision_speed_floor: float = 0.5
     collision_speed_scale: float = 0.5
+    collision_penalty_cap: float = 0.0  # per-step floor on the collision penalty (0 = off)
 
     # Velocity-weighted agent-proximity penalty (option 1). Scales the proximity
     # ramp by closing speed so coexisting / threading slowly is cheap and only
@@ -295,6 +296,7 @@ class EnvConfig(NamedTuple):
             use_velocity_weighted_collision=cfg.reward.use_velocity_weighted_collision,
             collision_speed_floor=cfg.reward.collision_speed_floor,
             collision_speed_scale=cfg.reward.collision_speed_scale,
+            collision_penalty_cap=cfg.reward.collision_penalty_cap,
             use_velocity_weighted_proximity=cfg.reward.use_velocity_weighted_proximity,
             proximity_speed_floor=cfg.reward.proximity_speed_floor,
             proximity_speed_scale=cfg.reward.proximity_speed_scale,

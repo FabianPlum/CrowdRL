@@ -178,6 +178,7 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             use_velocity_weighted_collision=rew.get("use_velocity_weighted_collision", False),
             collision_speed_floor=rew.get("collision_speed_floor", 0.5),
             collision_speed_scale=rew.get("collision_speed_scale", 0.5),
+            collision_penalty_cap=rew.get("collision_penalty_cap", 0.0),
             use_velocity_weighted_proximity=rew.get("use_velocity_weighted_proximity", False),
             proximity_speed_floor=rew.get("proximity_speed_floor", 0.25),
             proximity_speed_scale=rew.get("proximity_speed_scale", 0.5),

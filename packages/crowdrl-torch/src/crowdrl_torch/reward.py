@@ -222,6 +222,11 @@ def compute_rewards(
             torch.full_like(rewards, config.collision_penalty),
             zero,
         )
+    # Cap the per-step collision penalty at a floor: velocity weighting may
+    # DISCOUNT slow contact but not AMPLIFY fast contact below the cap (mirrors
+    # crowdrl_env.reward). cap=0.0 disables. Static branch -> torch.compile-safe.
+    if config.collision_penalty_cap < 0.0:
+        comp_collision = comp_collision.clamp(min=config.collision_penalty_cap)
     rewards = rewards + comp_collision
 
     # Wall proximity penalty (smooth, distance-based)
