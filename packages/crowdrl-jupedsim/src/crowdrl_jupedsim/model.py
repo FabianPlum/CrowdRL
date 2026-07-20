@@ -1,0 +1,263 @@
+"""LearnedPolicyModel -- a CrowdRL policy as a JuPedSim 2.0 operational model.
+
+JuPedSim 2.0 lets an operational model be written in pure Python by subclassing
+``CustomOperationalModel``. The framework calls ``compute_next_state`` once per
+agent per iteration, in a compute-then-apply pass, and applies the position on
+the returned state **verbatim**.
+
+That makes the division of labour sharp (see Project Plan v8, Section 3.6):
+
+* JuPedSim supplies the walkable geometry and wall segments, the route waypoint
+  ``ped.target`` (its strategical + tactical systems run *before* the
+  operational step), a neighbourhood-search grid, and agent lifecycle.
+* JuPedSim performs **no** velocity integration, **no** boundary clamping and
+  **no** collision resolution for the operational layer. ``GenericAgent`` has no
+  velocity or orientation field at all.
+
+So this class owns the entire state transition: sensing, WorldState assembly,
+observation construction (via the *same* crowdrl-core builder used in training),
+policy inference, action interpretation, and integration to a new position.
+Everything an agent can do lives here.
+
+Per-agent state is an arbitrary immutable Python object, which is what lets the
+policy's torso/head orientation and body dimensions be first-class -- no
+side-channel bookkeeping and no JuPedSim core changes.
+
+Raycasting is wired, and matters -- every policy trained so far uses it. Wall
+segments come from the JuPedSim geometry and neighbouring agents are present in
+the assembled WorldState, so rays intersect both, exactly as in training. The
+query radii are derived from ``ObsConfig.raycast.max_range`` so nothing inside
+ray range is ever missing from the world the policy sees.
+
+Scope note (walking skeleton): contact forces, navmesh waypoint signals and the
+temporal/neighbour-memory observation blocks are not yet wired. Observation
+parity with training is therefore only guaranteed for an ``ObsConfig`` that
+leaves those disabled; see the obs-parity harness.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+import numpy as np
+from numpy.typing import NDArray
+
+from crowdrl_core.action import ActionConfig, interpret_action
+from crowdrl_core.observation import ObsConfig, build_observation
+from crowdrl_core.world_state import WorldState
+
+from .policy import Policy
+
+try:  # pragma: no cover - import shape depends on how jupedsim 2.0 is provided
+    from jupedsim.models.custom_model import CustomOperationalModel
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "crowdrl-jupedsim requires JuPedSim 2.0 (the CustomOperationalModel layer). "
+        "It is not published to PyPI; build it from source and put the built "
+        "extension and python_modules/jupedsim on sys.path. See this package's "
+        "pyproject.toml for the wiring."
+    ) from exc
+
+
+@dataclass(frozen=True, kw_only=True)
+class CrowdRLAgentState:
+    """Per-agent state for a CrowdRL-driven JuPedSim agent.
+
+    Satisfies JuPedSim's ``CustomModelAgentState`` protocol by exposing
+    ``position``. Everything else is state JuPedSim does not model but the
+    learned policy requires.
+
+    Frozen on purpose: JuPedSim shares this object live with the running
+    simulation during the compute phase, so in-place mutation would corrupt the
+    compute-then-apply ordering. Updates must go through
+    ``dataclasses.replace``.
+    """
+
+    position: tuple[float, float]
+    velocity: tuple[float, float] = (0.0, 0.0)
+
+    heading: float = 0.0
+    """Direction of travel (radians). Distinct from torso_angle."""
+
+    torso_angle: float = 0.0
+    """Torso orientation (radians); sets the collision-ellipse axis."""
+
+    head_angle: float = 0.0
+    """Absolute head orientation (radians). Raycasts follow the head."""
+
+    shoulder_width: float = 0.225
+    """Half-width of the collision ellipse, torso-perpendicular (m)."""
+
+    chest_depth: float = 0.15
+    """Half-depth of the collision ellipse, torso-forward (m)."""
+
+    mass: float = 80.0
+    preferred_speed: float = 1.34
+
+
+class LearnedPolicyModel(CustomOperationalModel):
+    """Drives JuPedSim agents with an exported CrowdRL policy."""
+
+    def __init__(
+        self,
+        policy: Policy,
+        *,
+        obs_config: ObsConfig | None = None,
+        action_config: ActionConfig | None = None,
+        desired_velocity_weight: float = 0.05,
+        max_velocity_magnitude: float = 5.0,
+        neighbor_radius: float | None = None,
+        wall_query_radius: float | None = None,
+        keep_inside_geometry: bool = True,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        policy
+            Maps one observation vector to a raw 4D action in [-1, 1].
+        obs_config
+            **Must match the config the checkpoint was trained with.** A
+            mismatch (e.g. the ``use_goal_direction`` ablation) silently
+            produces a differently-shaped world and wrong actions, so prefer
+            loading this from the run's ``config_resolved.yaml``.
+        action_config
+            Action limits used during training.
+        desired_velocity_weight
+            First-order velocity filter weight, mirroring
+            ``CrowdEnvConfig.desired_velocity_weight``:
+            ``v_new = w * v_desired + (1 - w) * v_old``.
+        neighbor_radius
+            Radius for the neighbour query. Defaults to the larger of
+            ``obs_config.neighbor_sensing_radius`` and the raycast range, because
+            rays intersect agents as well as walls. Must be >= the horizon used
+            in training, or the K-nearest set differs.
+        wall_query_radius
+            Radius for the wall-segment query. Defaults to the raycast range.
+        keep_inside_geometry
+            If the integrated position leaves the walkable area, hold position
+            instead. JuPedSim applies the returned position verbatim and a
+            point outside the walkable area crashes the next iteration, so the
+            model is responsible for containment. This is a coarse placeholder
+            for proper wall handling.
+        """
+        super().__init__()
+        self.policy = policy
+        self.obs_config = obs_config if obs_config is not None else ObsConfig()
+        self.action_config = action_config if action_config is not None else ActionConfig()
+        self.desired_velocity_weight = float(desired_velocity_weight)
+        self.max_velocity_magnitude = float(max_velocity_magnitude)
+        # Rays intersect walls *and* other agents, so the neighbour query has to
+        # cover the raycast horizon as well as the social one. If it did not,
+        # an agent sitting beyond the social radius but inside ray range would
+        # be missing from the WorldState and its rays would report phantom-clear
+        # space.
+        ray_range = float(self.obs_config.raycast.max_range)
+        self.neighbor_radius = (
+            float(neighbor_radius)
+            if neighbor_radius is not None
+            else max(float(self.obs_config.neighbor_sensing_radius), ray_range)
+        )
+        # A wall segment farther from the agent than the ray length cannot be
+        # hit by any ray, so the ray range is exactly the right query radius.
+        self.wall_query_radius = (
+            float(wall_query_radius) if wall_query_radius is not None else ray_range
+        )
+        self.keep_inside_geometry = keep_inside_geometry
+
+        self._walkable_polygon = None  # lazily built from the JuPedSim geometry
+
+    # -- observation assembly -------------------------------------------------
+
+    def _walls(self, geometry, position: tuple[float, float]) -> NDArray[np.float64]:
+        """Wall segments near ``position`` as a crowdrl-core (S, 2, 2) array."""
+        segments = geometry.get_walls_in_distance_to(position, self.wall_query_radius)
+        if not segments:
+            return np.zeros((0, 2, 2), dtype=np.float64)
+        return np.array([[ls.p1, ls.p2] for ls in segments], dtype=np.float64)
+
+    def _polygon(self, geometry):
+        """Shapely walkable polygon, cached (the geometry is fixed per simulation)."""
+        if self._walkable_polygon is None:
+            import shapely
+
+            self._walkable_polygon = shapely.Polygon(geometry.boundary(), holes=geometry.holes())
+        return self._walkable_polygon
+
+    def build_world_state(self, ped, geometry, neighborhood_search) -> WorldState:
+        """Assemble a WorldState with the ego agent at index 0.
+
+        This is the deployment half of the transfer guarantee: the observation
+        builder consumes only WorldState and never learns which engine filled
+        it in.
+        """
+        state = ped.model
+        neighbors = [
+            n
+            for n in neighborhood_search.get_neighboring_agents(ped.position, self.neighbor_radius)
+            if n.id != ped.id
+        ]
+
+        agents = [state] + [n.model for n in neighbors]
+        goals = [ped.target] + [n.target for n in neighbors]
+
+        return WorldState(
+            positions=np.array([a.position for a in agents], dtype=np.float64),
+            velocities=np.array([a.velocity for a in agents], dtype=np.float64),
+            torso_orientations=np.array([a.torso_angle for a in agents], dtype=np.float64),
+            head_orientations=np.array([a.head_angle for a in agents], dtype=np.float64),
+            shoulder_widths=np.array([a.shoulder_width for a in agents], dtype=np.float64),
+            chest_depths=np.array([a.chest_depth for a in agents], dtype=np.float64),
+            masses=np.array([a.mass for a in agents], dtype=np.float64),
+            goal_positions=np.array(goals, dtype=np.float64),
+            preferred_speeds=np.array([a.preferred_speed for a in agents], dtype=np.float64),
+            wall_segments=self._walls(geometry, ped.position),
+        )
+
+    # -- JuPedSim operational-model interface ---------------------------------
+
+    def compute_next_state(self, dt, ped, geometry, neighborhood_search) -> CrowdRLAgentState:
+        state = ped.model
+
+        world = self.build_world_state(ped, geometry, neighborhood_search)
+        obs = build_observation(world, 0, self.obs_config)
+        raw_action = self.policy(obs)
+
+        velocity = np.asarray(state.velocity, dtype=np.float64)
+        result = interpret_action(
+            np.asarray(raw_action, dtype=np.float64),
+            current_heading=state.heading,
+            current_torso=state.torso_angle,
+            current_head=state.head_angle,
+            config=self.action_config,
+            current_speed=float(np.linalg.norm(velocity)),
+        )
+
+        # Integration mirrors CrowdEnv.step: first-order velocity filter, then a
+        # magnitude clamp, then semi-implicit Euler. Contact forces are absent
+        # here (skeleton) -- JuPedSim contributes none either, so agents can
+        # currently interpenetrate.
+        w = self.desired_velocity_weight
+        new_velocity = w * result.desired_velocity + (1.0 - w) * velocity
+
+        speed = float(np.linalg.norm(new_velocity))
+        if speed > self.max_velocity_magnitude:
+            new_velocity = new_velocity * (self.max_velocity_magnitude / max(speed, 1e-10))
+
+        position = np.asarray(state.position, dtype=np.float64)
+        new_position = position + new_velocity * dt
+
+        if self.keep_inside_geometry:
+            import shapely
+
+            if not self._polygon(geometry).contains(shapely.Point(new_position)):
+                new_position = position
+                new_velocity = np.zeros(2, dtype=np.float64)
+
+        return replace(
+            state,
+            position=(float(new_position[0]), float(new_position[1])),
+            velocity=(float(new_velocity[0]), float(new_velocity[1])),
+            heading=result.new_heading,
+            torso_angle=result.new_torso_orientation,
+            head_angle=result.new_head_orientation,
+        )
