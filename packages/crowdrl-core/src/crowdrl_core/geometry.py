@@ -7,12 +7,17 @@ Triangulation uses Shewchuk's Triangle library (``triangle`` package) for true
 constrained Delaunay triangulation (CDT) that respects all boundary edges.
 This guarantees full coverage of the walkable area -- matching the CGAL CDT
 approach used by JuPedSim's RoutingEngine.
+
+``triangle`` is an optional dependency (``crowdrl-core[geometry]``), imported
+lazily inside :func:`triangulate_polygon` -- its only consumer. Deployment
+builds a WorldState from an existing geometry rather than triangulating one, so
+keeping this module importable without it lets crowdrl-jupedsim ship without a
+compiled triangulation library. See Project Plan v8, Section 3.6.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import triangle as tr
 from numpy.typing import NDArray
 from shapely.geometry import Point, Polygon
 
@@ -117,7 +122,20 @@ def triangulate_polygon(polygon: Polygon) -> list[NDArray[np.float64]]:
     -------
     triangles : list of (3, 2) arrays
         Vertex coordinates for each valid triangle.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``triangle`` dependency is missing.
     """
+    try:
+        import triangle as tr
+    except ImportError as exc:  # pragma: no cover - depends on install extras
+        raise ImportError(
+            "triangulate_polygon requires the optional 'triangle' dependency. "
+            "Install it with: pip install 'crowdrl-core[geometry]'"
+        ) from exc
+
     exterior_coords = np.array(polygon.exterior.coords[:-1], dtype=np.float64)
     if len(exterior_coords) < 3:
         return []
