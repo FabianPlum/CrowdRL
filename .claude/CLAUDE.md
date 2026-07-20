@@ -130,7 +130,7 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 - **Linting / formatting**: ruff (config in root `pyproject.toml`). Pre-commit hooks run ruff check + ruff format on every commit.
 - **Pre-commit**: Installed automatically by `make dev`. Manual: `uv run pre-commit install`. Config in `.pre-commit-config.yaml`.
 - **Testing**: `make test` or `uv run pytest`. Configured in root `pyproject.toml`.
-- **CI**: GitHub Actions (`.github/workflows/ci.yml`) -- ruff lint + pytest on Python 3.12/3.13.
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`) -- ruff lint + pytest on Python 3.12.
 
 ## Known issues
 
