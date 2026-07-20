@@ -35,7 +35,13 @@ def _room() -> shapely.Polygon:
     return shapely.Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
 
 
-def _sim(model, dt: float = 0.05):
+def _sim(model, dt: float = 0.01):
+    # dt must match CrowdEnvConfig.dt (0.01), which is also JuPedSim's default.
+    # The action limits are applied per *step*, not per second -- e.g.
+    # max_heading_change is 0.020 rad/step, which is 115 deg/s at dt=0.01 but
+    # only 23 deg/s at dt=0.05. Running the adapter at a different dt therefore
+    # silently rescales the whole motion envelope away from what the policy was
+    # trained under.
     sim = jps.Simulation(model=model, geometry=_room(), dt=dt)
     exit_id = sim.add_exit_stage([(19, 9), (19, 11), (20, 11), (20, 9)])
     journey_id = sim.add_journey(jps.JourneyDescription([exit_id]))
