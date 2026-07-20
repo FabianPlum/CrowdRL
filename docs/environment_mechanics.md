@@ -547,7 +547,7 @@ meaningful depth regardless of agent size.
   hand-crafted model. Instead, CrowdRL provides this as a reward signal,
   giving the policy gradient information to learn spacing behaviour without
   prescribing the mechanism. The policy is free to discover its own avoidance
-  strategies. See Project Plan v7, Section 3.2.
+  strategies. See Project Plan v8, Section 3.2.
 - **Why a ramp and not a threshold?** The previous threshold-based form
   ("flat -0.3 if within 2x radius") has zero gradient outside the zone and
   a discontinuity at the boundary. The ramp gives the policy a continuous

@@ -120,7 +120,7 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 
 - **Active**: Building crowdrl-core (WorldState, geometry, navmesh) and crowdrl-env (procedural generator Tiers 0–2)
 - **Not started**: crowdrl-train, crowdrl-jupedsim, Tier 3 reward
-- **Reference doc**: CrowdRL_Project_Plan_v7.md (full design rationale, milestones, risks)
+- **Reference doc**: CrowdRL_Project_Plan_v8.md (full design rationale, milestones, risks)
 
 ## Development tooling
 

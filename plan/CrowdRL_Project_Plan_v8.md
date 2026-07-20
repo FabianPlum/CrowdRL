@@ -4,7 +4,7 @@ Learning Crowd Navigation Policies via
 
 Multi-Agent Reinforcement Learning on Synthetic Arenas
 
-Project Plan v7 — Draft for Internal Discussion
+Project Plan v8 — Draft for Internal Discussion
 
 Dr. Fabian Plum
 
@@ -12,7 +12,7 @@ IAS-7 — Zivile Sicherheitsforschung
 
 Forschungszentrum Jülich
 
-June 2026
+July 2026
 
 # 1. Executive Summary
 
@@ -162,7 +162,7 @@ Validation follows a held-out scenario protocol:
 
 ## 3.6 Software Architecture and JuPedSim Integration
 
-The most consequential architectural decision is not which RL algorithm to use—it is where the boundary sits between code that is specific to training and code that must be shared with deployment inside JuPedSim. If the observation construction logic, the raycast engine, or the action interpretation code exists in two separate implementations, they will inevitably drift, and the transfer from training environment to JuPedSim will silently break. The architecture is therefore organised as four Python packages with a shared foundation.
+The most consequential architectural decision is not which RL algorithm to use—it is where the boundary sits between code that is specific to training and code that must be shared with deployment inside JuPedSim. If the observation construction logic, the raycast engine, or the action interpretation code exists in two separate implementations, they will inevitably drift, and the transfer from training environment to JuPedSim will silently break. The architecture is therefore organised as four logical Python packages with a shared foundation (plus a fifth, crowdrl-torch -- a GPU-batched, training-only reimplementation of the environment step that mirrors crowdrl-core / crowdrl-env for throughput. It is not part of the deployment path and is held numerically in step with core by parity tests; see the progress log).
 
 **Package 1: crowdrl-core (shared foundation)**
 
@@ -173,7 +173,7 @@ This package contains everything that must be identical between training and dep
 - **sensing:** Raycast engine (N rays, configurable FOV, head-anchored). K-nearest-neighbour query for social sensing. Both operate on a generic WorldState dataclass containing agent positions, velocities, orientations, and wall segments—agnostic to whether this state comes from the training environment or from JuPedSim.
 - **observation:** Assembles the full observation vector from ego state, social sensing, raycasts, and optional navmesh signals. Takes a WorldState and an agent index, returns a numpy array. This is the single function that must be identical between training and deployment—any discrepancy here means the policy sees a different world and produces wrong actions.
 - **action:** Maps the 4D policy output (desired speed, heading change, torso orientation change, head orientation change) to kinematic quantities: a desired velocity vector, a new torso angle, and a new head angle. Enforces the ±90° head-to-torso constraint. During training, these feed back into the physics step. During deployment, the desired velocity feeds into JuPedSim’s simulation loop.
-- **collision:** Elliptical agent collision detection and contact force computation. Used only by the training environment (JuPedSim handles its own collision resolution during deployment). Included in core because the raycast engine needs to intersect rays with agent collision boundaries.
+- **collision:** Elliptical agent collision detection, contact-force computation, and ray-vs-ellipse intersection for the raycast engine. Used by the training environment and -- because JuPedSim performs *no* collision resolution or overlap handling for the operational layer (its custom-model contract applies the model's returned position verbatim; see Section 3.6) -- also available to the deployment adapter whenever contact-force parity with training is required.
 
 **Package 2: crowdrl-env (training environment)**
 
@@ -185,7 +185,7 @@ Depends on crowdrl-env, PyTorch, and an MARL library (CleanRL or PettingZoo). Co
 
 **Package 4: crowdrl-jupedsim (deployment adapter)**
 
-Depends on crowdrl-core, JuPedSim, and ONNX Runtime. This is the integration layer. Its central class is LearnedPolicyModel, which implements JuPedSim’s operational model interface. At each simulation timestep, LearnedPolicyModel performs four steps: (1) reads JuPedSim agent states (positions, velocities, goals) and constructs a WorldState dataclass; (2) calls crowdrl-core’s observation builder to construct per-agent observation vectors—this is the exact same function call that runs during training; (3) runs batch ONNX inference on all observation vectors to produce 4D action outputs; (4) calls crowdrl-core’s action interpreter to map actions to desired velocities and orientations, which JuPedSim’s simulation loop then integrates.
+Depends on crowdrl-core, JuPedSim (2.0 line), and ONNX Runtime. This is the integration layer. Its central class is LearnedPolicyModel, a subclass of JuPedSim 2.0's `CustomOperationalModel` -- the pure-Python operational-model layer (see "The operational-model contract" below). JuPedSim invokes the model **per agent** via `compute_next_state(dt, ped, geometry, neighborhood_search)`, in a compute-then-apply pass over the whole population. For each agent, LearnedPolicyModel: (1) reads the agent's current state -- position and the route waypoint `ped.target` that JuPedSim's routing has already set, plus its own per-agent custom state (velocity, torso/head angle, preferred speed, body dimensions, memory); (2) senses the world -- walls from `geometry`, neighbours from `neighborhood_search` (reading each neighbour's custom state for velocity/orientation/body-dims) -- and populates a crowdrl-core WorldState; (3) calls crowdrl-core's observation builder -- the exact same function that runs during training; (4) runs ONNX inference on that observation to produce the 4D action (per-agent by default; optionally a single batched inference over all agents is run once per step and cached, keyed on agent id, since the compute pass visits every agent before any is applied); (5) calls crowdrl-core's action interpreter and integrates the result into a **new position** (velocity filter + semi-implicit Euler, staying inside the walkable area, optionally applying contact forces for training parity), and returns a new immutable custom-state object carrying that position and the updated velocity/orientation/memory. JuPedSim applies the returned position verbatim -- it performs no integration, boundary projection, or collision resolution of its own.
 
 Critically, this package does not depend on PyTorch or on crowdrl-env or crowdrl-train. The only artefact it needs from the training side is the exported .onnx file. A JuPedSim user installs crowdrl-jupedsim and crowdrl-core, loads a policy file, and uses it exactly like any other JuPedSim model. This also contains the benchmark runner: a harness that runs the same scenario with LearnedPolicyModel and with JuPedSim’s existing models (CollisionFreeSpeedModel, SocialForceModel, etc.) and compares trajectory-level and macroscopic metrics.
 
@@ -195,14 +195,19 @@ The key abstraction in crowdrl-core is the WorldState dataclass: a flat represen
 
 This is the architectural invariant that guarantees transfer: if WorldState is populated correctly from JuPedSim’s agent states, the observation vector will be numerically identical to what the policy saw during training for the same physical configuration. Any drift between the two population paths (training vs. deployment) is a bug that will produce subtle policy failures—so integration tests that compare observations from both paths on identical configurations are a first-class part of the test suite.
 
-**Handling the representation gap: torso and head orientation in JuPedSim**
+**The operational-model contract: what JuPedSim provides vs. what LearnedPolicyModel owns**
 
-JuPedSim’s current agent model does not track torso or head orientation—agents have a position, a velocity, and a desired direction, but no body angle. The learned policy requires these. There are two strategies to resolve this:
+JuPedSim 2.0 exposes operational models as pure-Python subclasses of `CustomOperationalModel`, invoked per agent as `compute_next_state(dt, ped, geometry, neighborhood_search)` and required to return a *new* immutable per-agent state object (a frozen dataclass -- returning the same instance raises). The simulation advances in a strict compute-then-apply pass: it computes every agent's next state from the frozen current generation, then swaps the new generation in wholesale. The only field the framework reads back out of the returned state is `position`, which it applies verbatim.
 
-- **Strategy A: Adapter-side state tracking.** LearnedPolicyModel maintains its own torso and head orientation state per agent as side-channel data, updated each timestep by the policy’s action output. JuPedSim does not need to know about these angles—it receives a desired velocity vector and handles movement as usual. The orientation state is private to the adapter and only affects observation construction and raycast direction. This is the zero-modification path: JuPedSim’s codebase is untouched.
-- **Strategy B: JuPedSim agent state extension.** Extend JuPedSim’s agent model to include torso and head orientation as first-class state variables. This is the cleaner long-term solution—it means the orientation state participates in JuPedSim’s collision resolution and trajectory output—but it requires a pull request to JuPedSim and agreement from the modelling team.
+This makes the boundary between JuPedSim and our code sharp -- and it is *not* where earlier drafts of this plan assumed it was. Verified against the 2.0 source (`OperationalDecisionSystem`, `Simulation::Iterate`, `GenericAgent`), the split is:
 
-Recommendation: start with Strategy A for the initial integration (Milestone M9). It gets a working system without blocking on JuPedSim core changes. Once the learned policy demonstrates value, propose Strategy B as a JuPedSim feature request backed by concrete results. The transition from A to B is straightforward: move the orientation state from the adapter’s side channel into JuPedSim’s agent struct, and update the WorldState population code in crowdrl-jupedsim to read from there instead of from its own bookkeeping.
+- **JuPedSim provides:** (a) the walkable-area geometry and wall segments, with containment / intersection queries (`InsideGeometry`, `IntersectsAny`, `get_walls_in_distance_to`); (b) the route waypoint -- the strategical (journey) and tactical (routing-engine) systems run *before* the operational step each iteration and write each agent's next `target`; (c) a neighborhood-search grid (`get_neighboring_agents(pos, radius)`); (d) agent lifecycle, the simulation clock, and trajectory serialisation.
+- **JuPedSim does NOT provide** (contrary to earlier drafts): any velocity integration, any boundary clamping, and *any collision resolution or overlap handling whatsoever*. `GenericAgent` carries no velocity and no orientation field at all -- position is owned by the model state; velocity and orientation exist only if a model chooses to store them. Built-in models implement their own avoidance inside `compute_next_state`; there is no separate collision system to inherit. A returned position outside the walkable area is applied as-is and crashes the next iteration.
+- **LearnedPolicyModel therefore owns the entire state transition:** read the current state and `ped.target`; sense walls and neighbours; build the WorldState and observation (shared crowdrl-core code); run ONNX inference; interpret the 4D action and integrate it into a new position (velocity filter + semi-implicit Euler); keep the agent inside the walkable area; optionally apply contact forces for training parity; and return the new state. Everything an agent can do, how it perceives the world, and how a policy output becomes the next state lives in this one class.
+
+**The orientation gap dissolves.** Earlier drafts weighed two strategies for JuPedSim not tracking torso / head angle -- Strategy A (the adapter keeps a private side-channel dict) and Strategy B (submit a C++ PR extending JuPedSim's agent struct). The custom-model layer supersedes both: per-agent state is an arbitrary immutable Python object, so torso angle, head angle, preferred speed, full shoulder / chest body dimensions, and the temporal / neighbour-memory buffers simply become fields on the frozen state dataclass. A neighbour's state is readable during the callback, so these attributes are available for social sensing too -- the deployment observation can be reconstructed *faithfully*, not approximated. No side-channel bookkeeping (A) and no JuPedSim core change (B) are required: Strategy B is retired, and Strategy A is subsumed by the sanctioned custom state.
+
+**Availability caveat.** `CustomOperationalModel` is a JuPedSim 2.0 feature -- a deliberate breaking change from 1.x, which removes the `ModelType` enum and the `XModelAgentParameters` classes. At the time of writing it lives on upstream `main` and is not yet in a tagged release (latest tag v1.3.1). Integration therefore targets the moving 2.0 branch, and crowdrl-jupedsim's dependency pin must be updated from the current stale `jupedsim>=1.0` accordingly. The trained policy itself is an external `.onnx` file loaded by path (baseline weights live off-repo), so the adapter never bundles a policy.
 
 **Incremental build path**
 
@@ -211,7 +216,7 @@ The packages are built in dependency order, with each stage producing a usable a
 - **Step 1: crowdrl-core.** Build geometry, navmesh, sensing, observation, and action modules. Write unit tests with hand-constructed WorldState instances. This is testable in complete isolation before any RL code exists. Deliverable: a library that, given a polygon and a set of agent states, produces observation vectors and interprets actions.
 - **Step 2: crowdrl-env.** Build the Gymnasium wrapper, procedural generator (start with Tiers 0–2), solvability verifier, and Tier 1–2 reward modules. Verify with a random-policy baseline (agents take random actions; confirm observations look correct, rewards are distributed as expected, episodes terminate properly). Deliverable: a Gymnasium environment that produces episodes with procedural or imported geometries.
 - **Step 3: crowdrl-train.** Implement the MAPPO training loop, curriculum manager, and policy export. Train initial policies on Tier 0–2 environments. Deliverable: trained .onnx policy files and training logs.
-- **Step 4: crowdrl-jupedsim.** Build the LearnedPolicyModel adapter and the benchmark runner. Write integration tests that verify observation consistency between the training environment and the JuPedSim adapter on identical configurations. Deliverable: a JuPedSim-compatible model that loads a .onnx file and runs as a drop-in replacement for CollisionFreeSpeedModel.
+- **Step 4: crowdrl-jupedsim.** Build the LearnedPolicyModel adapter as a `CustomOperationalModel` subclass (JuPedSim 2.0) and the benchmark runner. Write the obs-parity test that asserts the observation built by the adapter is numerically identical to the training-env observation for an identical physical configuration -- this is the transfer guardrail, not an afterthought. Deliverable: a JuPedSim-compatible operational model that loads a .onnx policy by path and runs alongside CollisionFreeSpeedModel, SocialForceModel, etc.
 
 This ordering means that papers can be written after Step 3 (the RL results stand alone), and the JuPedSim integration (Step 4) is a separate deliverable that can proceed in parallel with later training experiments (Tier 3 reward, higher-tier geometries, ablation studies).
 
@@ -1133,4 +1138,114 @@ ever-looser caps.
 
 **Medium-term / Deployment:** unchanged from the 2026-04-11 entry (Tiers 4-5,
 IAS-7 importer, Tier 3 reward; crowdrl-jupedsim adapter + obs-parity tests).
+
+## 2026-07-20 -- Progress reconciliation + JuPedSim 2.0 integration surface
+
+This entry reconciles the plan with ~8 weeks of undocumented work (the log had
+stalled at 2026-05-26 while development continued to the 2026-06-19 master
+merges) and records a source-level study of JuPedSim 2.0's new pure-Python
+operational-model layer, which reshapes the Section 3.6 integration design
+(Section 3.6 has been rewritten accordingly). Work begins on branch
+`feat/jupedsim-integration`.
+
+### Undocumented work since 2026-05-26 (consolidated from git history)
+
+| Area | What landed | Location |
+|------|-------------|----------|
+| Trajectory export | Kinora / pedpy-compatible HDF5 trajectory exporter (PR #5) -- first bridge into the JuPedSim analysis ecosystem and a down-payment on Module D | `crowdrl-env/kinora_export.py`, `test_kinora_export.py` |
+| Validation | Fixed-scenario behavioural scorecard (goal / collision / wall / freeze-deadlock / stuck / speed / path-efficiency) + periodic in-training scorecard | `crowdrl-train/scorecard.py`, `scripts/eval_scorecard.py`, `scripts/diagnose_stuck_agents.py`, `scripts/analyze_run.py` |
+| Reward | Impact-speed (velocity-weighted) collision and proximity penalties; `collision_penalty_cap` | `crowdrl-env/reward.py`, `crowdrl-torch/reward.py` |
+| Stability | Large NaN-hardening campaign from big runs: running-count caps on obs / reward normalisers, `nan_to_num` on the obs builder, `log_std` clamp, NaN-grad skip, gated tripwires | normalizer / mappo / obs paths |
+| Action model | Speed-turn coupling wired through core / env / torch action interpreters | action modules |
+| Training | tanh policy + truncation-aware GAE stabilisation; minimum spawn-goal distance in the spawner | `crowdrl-train`, `crowdrl-env/spawner.py` |
+| Ablation | `nogoaldir` line -- single next-waypoint nav signal + path-aware reward / stuck, agents navigating on waypoints alone; a stable big-rooms / density run produced 36 ONNX checkpoints | `configs/`, `results_exp_nogoaldir_*` |
+| HPC | JURECA setup (`sc_uv_crowdrl/`, sbatch scripts, `fix_cuda_libs.py`) | repo root |
+
+Net effect: Module D (validation) and the trajectory-data pipeline are further
+along than the pre-2026-05-26 plan implies, but spread across crowdrl-train /
+crowdrl-env / scripts rather than framed as a validation package.
+
+### Repository reality vs. the four-package architecture
+
+- **Five packages, not four.** `crowdrl-torch` (GPU-batched env) is the real
+  training path and drives the root `train_mappo.py` (a ~72 KB experiment / CLI
+  driver -- the actual entry point, not `crowdrl-train/train.py`). Design
+  principle #1 ("one observation builder used everywhere") is upheld by
+  `crowdrl-torch/tests/test_equivalence.py` parity, not by a literally single
+  implementation.
+- **crowdrl-jupedsim is still a bare stub** -- one docstring, no
+  `LearnedPolicyModel`, no ONNX runtime loop, no tests. This is the work this
+  branch begins.
+- Trained `.onnx` policies and `results_*` runs exist locally but are export
+  artefacts, not committed baselines; the intended baseline weights live
+  off-repo.
+
+### JuPedSim 2.0 operational-model contract (source study)
+
+Integration targets `jupedsim.models.custom_model.CustomOperationalModel`
+(upstream `main`; JuPedSim 2.0, a breaking change from 1.x, not yet tagged).
+Verified against the 2.0 C++ / bindings source:
+
+- The model is a Python subclass invoked **per agent** as
+  `compute_next_state(dt, ped, geometry, neighborhood_search)`, returning a
+  *new* frozen per-agent state. Stepping is compute-then-apply; the framework
+  reads only `position` from the returned state and applies it verbatim
+  (`OperationalDecisionSystem::Run` -> `agents.swap`).
+- **JuPedSim provides:** walkable-area geometry + wall queries (`InsideGeometry`,
+  `IntersectsAny`, `get_walls_in_distance_to`); the route waypoint `ped.target`
+  (set by the strategical + tactical systems before the operational step); the
+  neighborhood grid (`get_neighboring_agents`); lifecycle / clock / serialisation.
+- **JuPedSim does NOT provide** velocity integration, boundary clamping, or *any*
+  collision / overlap resolution. `GenericAgent` has no velocity or orientation
+  field; position is owned by the model state.
+- **Consequence:** `LearnedPolicyModel` owns the whole state transition --
+  sensing, WorldState, observation (shared crowdrl-core), ONNX inference, action
+  interpretation, integration to a new position, staying in-bounds, and any
+  contact forces. Per-agent custom state (a frozen dataclass) carries velocity,
+  torso / head angle, preferred speed, body dims, and memory, so the old
+  Strategy A / B "orientation gap" is moot (both retired; see Section 3.6).
+
+This corrects two errors in earlier drafts: JuPedSim does *not* "handle its own
+collision resolution during deployment", and it does *not* integrate the model's
+output -- it applies the returned position directly.
+
+### Decisions taken (this session)
+
+- Target **JuPedSim 2.0 `main`** (accept the moving pre-release branch to get the
+  custom-model layer).
+- **Reconcile the plan first** (this entry + the Section 3.6 rewrite) before
+  writing adapter code.
+- The local `C:\Users\Fabian\dev\jupedsim` `origin` is a personal fork; upstream
+  `main` is the source of the 2.0 layer.
+
+### Milestone status (updated)
+
+- **M1-M3 (env / baseline / MARL pipeline):** COMPLETE as infrastructure; the M3
+  quality bar (collision-free goal-reaching) remains the open behavioural target
+  from the agent-dynamics campaign.
+- **M4 (emergent phenomena):** IN PROGRESS / blocked on collision-clean
+  behaviour, as before.
+- **Module D (validation):** partially materialised early (scorecard + Kinora
+  HDF5 export) but not yet framed or packaged as validation.
+- **M9 (JuPedSim integration):** STARTED (this branch). De-risked by the
+  custom-model layer and the existing exporter; a walking-skeleton adapter is now
+  cheap and no longer needs to wait until Months 14-18.
+
+### What remains / next steps
+
+- [ ] Update `crowdrl-jupedsim/pyproject.toml` dependency from `jupedsim>=1.0` to
+      the 2.0 line.
+- [ ] Walking-skeleton `LearnedPolicyModel(CustomOperationalModel)`: single
+      agent, disc body, `ped.target` as goal, per-agent ONNX, no raycasts --
+      prove the loop runs.
+- [ ] Obs-parity harness: identical physical config through the training obs
+      builder and the adapter WorldState, asserted numerically identical
+      (promote `crowdrl-env/tests/test_integration.py` to a real cross-engine
+      test).
+- [ ] Full obs (raycasts from `geometry`, faithful neighbour body / orientation),
+      then batched-inference cache, then the benchmark runner (LearnedPolicyModel
+      vs. CollisionFreeSpeedModel / SocialForceModel, trajectory-level +
+      macroscopic metrics via the Kinora / pedpy export).
+- Medium-term / deployment items from prior entries unchanged (Tiers 4-5, IAS-7
+  importer, Tier 3 reward).
 
