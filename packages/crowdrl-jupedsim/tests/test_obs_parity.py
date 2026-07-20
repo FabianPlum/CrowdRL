@@ -111,7 +111,8 @@ def parity(obs_config: ObsConfig | None = None):
     config = obs_config or ObsConfig()
     model = _RecordingModel(ConstantPolicy(HOLD), obs_config=config)
 
-    sim = jps.Simulation(model=model, geometry=ROOM, dt=0.05)
+    # dt=0.01 matches CrowdEnvConfig.dt; see the note in test_model.py::_sim.
+    sim = jps.Simulation(model=model, geometry=ROOM, dt=0.01)
     exit_id = sim.add_exit_stage([(19, 9), (19, 11), (20, 11), (20, 9)])
     journey_id = sim.add_journey(jps.JourneyDescription([exit_id]))
 
