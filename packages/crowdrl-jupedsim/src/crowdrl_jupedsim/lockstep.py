@@ -30,9 +30,9 @@ Requirements and caveats:
 * ``walkable_geometry`` and ``exit_geometries`` are required -- the model
   builds the navmesh (needs the ``crowdrl-core[geometry]`` extra) and owns
   removal semantics.
-* Dynamics parameters (``desired_velocity_weight``, contact constants) must
-  match the reference run by hand -- they do not travel in the ONNX metadata
-  (schema v1 covers obs/action configs only).
+* Dynamics parameters (``desired_velocity_weight``, speed clamp, contact
+  constants) self-configure from schema-v2 artefacts; for v1 artefacts they
+  must match the reference run by hand.
 * Byte-identity is machine-scoped: it additionally relies on ONNX Runtime
   producing identical results for the same session on the same hardware
   (measured exact here, including batch-vs-single-row).

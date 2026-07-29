@@ -92,9 +92,11 @@ segment (funnel corners + wall projection), both compared with
    here, including batch-vs-single). Cross-machine runs should expect
    ULP-level drift.
 2. Dynamics parameters (`desired_velocity_weight`, contact constants,
-   `max_velocity_magnitude`) must match the reference by hand -- metadata
-   schema v1 carries only obs/action configs. **Schema v2 with a dynamics
-   block remains the standing follow-up.**
+   `max_velocity_magnitude`): **resolved -- metadata schema v2 records them**
+   (`crowdrl.dynamics`) and both models self-configure, raising on
+   explicit-vs-recorded disagreement. En route we found deployment had been
+   clamping at 5.0 m/s vs the training default 3.0 (the YAML schema cannot
+   express these fields at all). v1 artefacts still require hand-matching.
 3. Fixed per-agent final goals are assumed (single exit-stage journeys).
 4. Cost: ~2 navmesh path queries per agent per step (funnel waypoint +
    path deviation), like the native numpy env. Fine for validation scales;

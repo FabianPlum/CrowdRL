@@ -34,6 +34,7 @@ from crowdrl_jupedsim import (  # noqa: E402
     LockstepPolicyModel,
     OnnxPolicy,
     native_batch_step,
+    resolve_dynamics,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +43,6 @@ pytestmark = pytest.mark.skipif(
     not EXAMPLE_MODEL.is_file(), reason="shipped example model missing"
 )
 
-W = 0.8  # the run's trained desired_velocity_weight
 DT = 0.01
 
 
@@ -50,6 +50,9 @@ def run_native_reference(area, exit_polygon, spawns, goal, max_steps):
     """CrowdRL-native loop on the shared step function; native removal."""
     policy = OnnxPolicy(EXAMPLE_MODEL)
     oc, ac = policy.metadata.obs_config, policy.metadata.action_config
+    # Schema v2: the reference runs the artefact's recorded dynamics, exactly
+    # like the self-configuring lockstep model -- nothing matched by hand.
+    dynamics = resolve_dynamics(policy, {})
     buf = oc.temporal_memory_window + 1
     session = policy._session
     exit_poly = shapely.Polygon(exit_polygon)
@@ -106,11 +109,8 @@ def run_native_reference(area, exit_polygon, spawns, goal, max_steps):
             policy_batch,
             oc,
             ac,
-            desired_velocity_weight=W,
-            max_velocity_magnitude=5.0,
-            contact_stiffness=30000.0,
-            contact_damping=500.0,
             dt=DT,
+            **dynamics,
         )
 
         wi = (step - 1) % buf
@@ -143,8 +143,7 @@ def run_lockstep_jupedsim(area, exit_polygon, spawns, max_steps):
         policy,
         walkable_geometry=area,
         exit_geometries=[exit_polygon],
-        desired_velocity_weight=W,
-    )
+    )  # dynamics self-configure from the schema-v2 artefact
     sim = jps.Simulation(model=model, geometry=area, dt=DT)
     exit_id = sim.add_exit_stage(exit_polygon)
     journey = sim.add_journey(jps.JourneyDescription([exit_id]))
