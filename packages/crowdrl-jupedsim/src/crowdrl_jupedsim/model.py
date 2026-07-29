@@ -208,6 +208,13 @@ class LearnedPolicyModel(CustomOperationalModel):
             goal_positions=np.array(goals, dtype=np.float64),
             preferred_speeds=np.array([a.preferred_speed for a in agents], dtype=np.float64),
             wall_segments=self._walls(env_query, ped.position),
+            # The router's next waypoint drives the navmesh observation block
+            # (waypoint direction + path_deviation=0.0, the single-waypoint
+            # contract). Populated for every agent so the block is available
+            # regardless of which index is queried.
+            route_next_waypoints=np.array(
+                [ped.next_target] + [n.next_target for n in neighbors], dtype=np.float64
+            ),
         )
 
     # -- JuPedSim operational-model interface ---------------------------------

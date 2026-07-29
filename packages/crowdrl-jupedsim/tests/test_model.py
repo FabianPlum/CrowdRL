@@ -301,6 +301,22 @@ class TestRaycasting:
         assert np.allclose(alone, 1.0)
         assert blocked.min() < 1.0, "an agent 1 m ahead must occlude at least one ray"
 
+    def test_next_target_feeds_the_nav_block_not_the_final_goal(self):
+        """The nav block must follow the ROUTED waypoint. Pointing at the
+        final goal instead sends agents through walls -- the exact failure
+        we filed as jupedsim#1625."""
+        cfg = ObsConfig(use_navmesh=True)
+        model = _model(obs_config=cfg)
+        ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 5.0)), target=(19.0, 5.0))
+        ego.next_target = (5.0, 9.0)  # router says: around the corner, +y
+
+        world = model.build_world_state(ego, _StubEnvQuery())
+        obs = build_observation(world, 0, cfg)
+
+        # Ego heading 0 (+x): waypoint due +y must read (0, 1) in ego frame,
+        # with path_deviation 0.0 (single-waypoint contract).
+        np.testing.assert_allclose(obs[-3:], [0.0, 1.0, 0.0], atol=1e-12)
+
     def test_query_radii_follow_the_raycast_range(self):
         """Regression guard: hardcoding the radii would make walls and agents
         beyond 5 m invisible for a policy trained with longer rays."""

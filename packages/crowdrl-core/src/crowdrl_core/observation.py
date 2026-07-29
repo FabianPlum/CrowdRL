@@ -373,7 +373,20 @@ def build_observation(
     # --- Navmesh signals (optional, 3D) ---
     parts = [ego_state, social_flat, rays_flat]
 
-    if config.use_navmesh and world.navmesh is not None:
+    if config.use_navmesh and world.route_next_waypoints is not None:
+        # Router-supplied waypoint (deployment: JuPedSim's tactical layer).
+        # path_deviation is 0.0 by the single-waypoint contract -- see the
+        # WorldState.route_next_waypoints docstring.
+        wp_diff = world.route_next_waypoints[agent_idx] - ego_pos
+        wp_dist = np.linalg.norm(wp_diff)
+        if wp_dist > 1e-10:
+            wp_dir_ego = rot @ (wp_diff / wp_dist)
+            nav_signal = np.array([wp_dir_ego[0], wp_dir_ego[1], 0.0], dtype=np.float64)
+        else:
+            nav_signal = np.zeros(3, dtype=np.float64)
+
+        parts.append(nav_signal)
+    elif config.use_navmesh and world.navmesh is not None:
         # Use the larger body half-dimension as the clearance radius so the
         # path stays clear of wall corners.
         agent_radius = float(
@@ -581,7 +594,19 @@ def build_observations_batch(
     offset += ray_dim
 
     # --- Navmesh signals (still per-agent for now as navmesh queries are complex) ---
-    if config.use_navmesh and world.navmesh is not None:
+    if config.use_navmesh and world.route_next_waypoints is not None:
+        # Router-supplied waypoints; p_dev stays 0.0 (single-waypoint contract).
+        wp_diff = world.route_next_waypoints[active_idx] - world.positions[active_idx]  # (M, 2)
+        wp_dist = np.linalg.norm(wp_diff, axis=-1)  # (M,)
+        safe = wp_dist > 1e-10
+        wp_unit = np.zeros_like(wp_diff)
+        wp_unit[safe] = wp_diff[safe] / wp_dist[safe, None]
+        wp_ego_x = cos_h * wp_unit[:, 0] - sin_h * wp_unit[:, 1]
+        wp_ego_y = sin_h * wp_unit[:, 0] + cos_h * wp_unit[:, 1]
+        obs[active_idx, offset] = wp_ego_x
+        obs[active_idx, offset + 1] = wp_ego_y
+        offset += 3
+    elif config.use_navmesh and world.navmesh is not None:
         for idx_pos, i in enumerate(active_idx):
             agent_radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
             wp_dir = next_waypoint_direction(

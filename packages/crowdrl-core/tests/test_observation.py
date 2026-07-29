@@ -456,3 +456,69 @@ class TestTemporalMemory:
         for i in range(n):
             individual = build_observation(world, i, config)
             np.testing.assert_allclose(batch[i], individual, atol=1e-12)
+
+
+class TestRouteWaypointOverride:
+    """WorldState.route_next_waypoints: an external router (JuPedSim's
+    tactical layer) supplies the next waypoint directly, replacing the navmesh
+    query. path_deviation is 0.0 by the single-waypoint contract."""
+
+    @staticmethod
+    def _with_route(world, waypoints):
+        from dataclasses import replace
+
+        return replace(world, route_next_waypoints=np.asarray(waypoints, dtype=np.float64))
+
+    def test_route_supplies_the_nav_block_without_a_navmesh(self):
+        """With use_navmesh=True and no navmesh, the 3 nav dims used to be
+        silently DROPPED (width mismatch at deployment). A route fills them."""
+        config = ObsConfig(use_navmesh=True)
+        world = self._with_route(make_world_state(), [[2.0, 8.0], [8.0, 8.0]])
+        obs = build_observation(world, 0, config)
+        assert obs.shape == (config.obs_dim,)
+
+    def test_waypoint_direction_is_ego_frame_with_zero_p_dev(self):
+        config = ObsConfig(use_navmesh=True)
+        # Ego at (2,5) heading 0 (+x); waypoint due +y -> ego-frame (0, 1).
+        world = self._with_route(make_world_state(), [[2.0, 8.0], [8.0, 8.0]])
+        obs = build_observation(world, 0, config)
+        np.testing.assert_allclose(obs[-3:], [0.0, 1.0, 0.0], atol=1e-12)
+
+    def test_waypoint_direction_respects_heading(self):
+        config = ObsConfig(use_navmesh=True)
+        # Ego heading +y and waypoint due +y -> straight ahead in ego frame.
+        world = self._with_route(
+            make_world_state(torso_orientations=np.array([np.pi / 2, 0.0])),
+            [[2.0, 8.0], [8.0, 8.0]],
+        )
+        obs = build_observation(world, 0, config)
+        np.testing.assert_allclose(obs[-3:], [1.0, 0.0, 0.0], atol=1e-12)
+
+    def test_route_takes_precedence_over_navmesh(self):
+        config = ObsConfig(use_navmesh=True)
+        base = make_world_state(build_nav=True)
+        routed = self._with_route(base, [[2.0, 8.0], [8.0, 8.0]])
+
+        obs_routed = build_observation(routed, 0, config)
+        obs_navmesh = build_observation(base, 0, config)
+
+        np.testing.assert_allclose(obs_routed[-3:], [0.0, 1.0, 0.0], atol=1e-12)
+        assert not np.allclose(obs_routed[-3:-1], obs_navmesh[-3:-1]), (
+            "navmesh points at the goal (+x); the route deliberately points +y"
+        )
+
+    def test_standing_on_the_waypoint_reads_zero(self):
+        config = ObsConfig(use_navmesh=True)
+        world = self._with_route(make_world_state(), [[2.0, 5.0], [8.0, 8.0]])
+        obs = build_observation(world, 0, config)
+        np.testing.assert_allclose(obs[-3:], [0.0, 0.0, 0.0], atol=1e-12)
+
+    def test_batch_matches_single_agent_builder(self):
+        config = ObsConfig(use_navmesh=True)
+        world = self._with_route(
+            make_world_state(torso_orientations=np.array([0.3, -1.1])),
+            [[3.0, 7.5], [6.0, 2.0]],
+        )
+        batch = build_observations_batch(world, config)
+        for i in range(2):
+            np.testing.assert_allclose(batch[i], build_observation(world, i, config), atol=1e-12)
