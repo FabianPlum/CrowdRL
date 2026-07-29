@@ -154,6 +154,7 @@ class LearnedPolicyModel(CustomOperationalModel):
         max_velocity_magnitude: float = 5.0,
         contact_stiffness: float = 30000.0,
         contact_damping: float = 500.0,
+        waypoint_clearance: bool = False,
         neighbor_radius: float | None = None,
         wall_query_radius: float | None = None,
         keep_inside_geometry: bool = True,
@@ -186,6 +187,17 @@ class LearnedPolicyModel(CustomOperationalModel):
             First-order velocity filter weight, mirroring
             ``CrowdEnvConfig.desired_velocity_weight``:
             ``v_new = w * v_desired + (1 - w) * v_old``.
+        waypoint_clearance
+            Push routed waypoints (``ped.next_target``) off walls/corners to
+            the agent's body radius before they enter the observation,
+            restoring the training funnel's portal-inset semantics
+            (``navmesh._inset_portal``). JuPedSim's router targets sharp
+            corners directly -- a waypoint the policy never saw in training
+            and crashes into. Off by default while outcome-level parity work
+            is ongoing: correcting the waypoint reshuffles which marginal
+            agent falls into the checkpoint's freeze/absorbing state (see
+            plan/handover_2026-07-29.md), so flipping it is a scenario-level
+            decision for now.
         neighbor_radius
             Radius for the neighbour query. Defaults to the larger of
             ``obs_config.neighbor_sensing_radius`` and the raycast range, because
@@ -222,6 +234,7 @@ class LearnedPolicyModel(CustomOperationalModel):
         self.max_velocity_magnitude = float(max_velocity_magnitude)
         self.contact_stiffness = float(contact_stiffness)
         self.contact_damping = float(contact_damping)
+        self.waypoint_clearance = bool(waypoint_clearance)
         # Rays intersect walls *and* other agents, so the neighbour query has to
         # cover the raycast horizon as well as the social one. If it did not,
         # an agent sitting beyond the social radius but inside ray range would
@@ -288,6 +301,54 @@ class LearnedPolicyModel(CustomOperationalModel):
         )
 
     # -- observation assembly -------------------------------------------------
+
+    @staticmethod
+    def _nearest_on_segment(
+        point: NDArray[np.float64], seg_a: NDArray[np.float64], seg_b: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        ab = seg_b - seg_a
+        t = float(np.dot(point - seg_a, ab) / max(float(np.dot(ab, ab)), 1e-12))
+        return seg_a + min(1.0, max(0.0, t)) * ab
+
+    def _cleared_waypoint(
+        self, env_query, waypoint, agent_position, radius: float
+    ) -> NDArray[np.float64]:
+        """Push a router waypoint off walls/corners to ``radius`` clearance.
+
+        JuPedSim's router targets portal endpoints -- sharp corners included:
+        a routed waypoint can sit INSIDE one body radius of a corner vertex,
+        a point the agent's body cannot occupy. Training's funnel never
+        produces such waypoints (``navmesh._inset_portal`` insets every
+        portal endpoint by the agent radius), so the policy has never seen
+        one and crashes into the corner instead of rounding it. This
+        restores the funnel's clearance semantics at deployment.
+
+        Iterative because corner pockets have two walls sharing the vertex:
+        pushing off one can land within clearance of the other. When the
+        waypoint lies exactly ON a wall, the push direction falls back to
+        "toward the agent" (the agent's side is walkable by construction).
+        """
+        wp = np.asarray(waypoint, dtype=np.float64)
+        for _ in range(3):
+            segments = env_query.line_segments_in_range((float(wp[0]), float(wp[1])), radius)
+            best_d, best_p = np.inf, None
+            for ls in segments:
+                p = self._nearest_on_segment(
+                    wp, np.asarray(ls.p1, dtype=np.float64), np.asarray(ls.p2, dtype=np.float64)
+                )
+                d = float(np.linalg.norm(wp - p))
+                if d < best_d:
+                    best_d, best_p = d, p
+            if best_p is None or best_d >= radius:
+                break
+            if best_d > 1e-9:
+                direction = (wp - best_p) / best_d
+            else:
+                away = np.asarray(agent_position, dtype=np.float64) - wp
+                norm = float(np.linalg.norm(away))
+                direction = away / norm if norm > 1e-9 else np.array([1.0, 0.0])
+            wp = best_p + direction * radius
+        return wp
 
     def _walls(self, env_query, position: tuple[float, float]) -> NDArray[np.float64]:
         """Wall segments near ``position`` as a crowdrl-core (S, 2, 2) array."""
@@ -360,13 +421,26 @@ class LearnedPolicyModel(CustomOperationalModel):
             wall_segments=self._walls(env_query, ped.position),
             # The router's next waypoint drives the navmesh observation block
             # (waypoint direction + path_deviation=0.0, the single-waypoint
-            # contract). Populated for every agent so the block is available
-            # regardless of which index is queried.
+            # contract), pushed to body-radius wall clearance to match the
+            # training funnel's portal-inset semantics. Populated for every
+            # agent so the block is available regardless of which index is
+            # queried.
             route_next_waypoints=np.array(
-                [ped.next_target] + [n.next_target for n in neighbors], dtype=np.float64
+                [
+                    self._route_waypoint(env_query, agent, agent_state)
+                    for agent, agent_state in zip([ped] + neighbors, agents)
+                ],
+                dtype=np.float64,
             ),
             **extra,
         )
+
+    def _route_waypoint(self, env_query, agent, state) -> NDArray[np.float64]:
+        """One agent's routed waypoint, clearance-adjusted when enabled."""
+        if not self.waypoint_clearance:
+            return np.asarray(agent.next_target, dtype=np.float64)
+        radius = float(max(state.shoulder_width, state.chest_depth))
+        return self._cleared_waypoint(env_query, agent.next_target, agent.position, radius)
 
     # -- JuPedSim operational-model interface ---------------------------------
 

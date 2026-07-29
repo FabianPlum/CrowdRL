@@ -249,6 +249,72 @@ class TestSimulationIntegration:
                 )
 
 
+class _StubWall:
+    """Stand-in for a JuPedSim LineSegment (exposes p1 / p2 endpoints)."""
+
+    def __init__(self, p1, p2):
+        self.p1 = p1
+        self.p2 = p2
+
+
+class TestWaypointClearance:
+    """Routed waypoints are pushed to body-radius wall clearance before they
+    enter the observation, restoring the training funnel's portal-inset
+    semantics (jupedsim's router targets sharp corners directly)."""
+
+    # The corner walls of the #1625 geometry around the inner vertex (10, 2).
+    CORNER_WALLS = [_StubWall((0.0, 2.0), (10.0, 2.0)), _StubWall((10.0, 2.0), (10.0, 12.0))]
+
+    @staticmethod
+    def _min_wall_distance(point, walls):
+        import shapely
+
+        return min(shapely.LineString([w.p1, w.p2]).distance(shapely.Point(point)) for w in walls)
+
+    def test_corner_pocket_waypoint_is_pushed_to_clearance(self):
+        """The measured failure case: the router's waypoint (10.14, 1.86)
+        sits 0.20 m from the corner vertex, inside the 0.225 m body radius."""
+        model = _model(waypoint_clearance=True)
+        ego = _StubAgent(0, CrowdRLAgentState(position=(8.0, 1.0)), target=(11.0, 11.5))
+        ego.next_target = (10.14, 1.86)
+
+        world = model.build_world_state(ego, _StubEnvQuery(walls=self.CORNER_WALLS))
+        cleared = world.route_next_waypoints[0]
+
+        assert self._min_wall_distance(cleared, self.CORNER_WALLS) >= 0.225 - 1e-9, (
+            f"cleared waypoint {cleared} still inside body radius of a wall"
+        )
+        # Still on the lower-corridor side of the corner, not teleported.
+        assert np.linalg.norm(cleared - np.array([10.14, 1.86])) < 0.5
+
+    def test_clear_waypoint_passes_through_unchanged(self):
+        model = _model(waypoint_clearance=True)
+        ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 1.0)), target=(11.0, 11.5))
+        ego.next_target = (5.0, 1.5)  # 0.5 m off the nearest wall: already clear
+
+        world = model.build_world_state(ego, _StubEnvQuery(walls=self.CORNER_WALLS))
+        np.testing.assert_allclose(world.route_next_waypoints[0], [5.0, 1.5], atol=1e-12)
+
+    def test_on_wall_waypoint_is_pushed_toward_the_agent_side(self):
+        model = _model(waypoint_clearance=True)
+        ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 1.0)), target=(11.0, 11.5))
+        ego.next_target = (5.0, 2.0)  # exactly on the corridor's top wall
+
+        world = model.build_world_state(ego, _StubEnvQuery(walls=self.CORNER_WALLS))
+        cleared = world.route_next_waypoints[0]
+
+        assert cleared[1] < 2.0, "must be pushed to the agent's (walkable) side"
+        assert self._min_wall_distance(cleared, self.CORNER_WALLS) >= 0.225 - 1e-9
+
+    def test_default_leaves_the_raw_router_waypoint(self):
+        model = _model()
+        ego = _StubAgent(0, CrowdRLAgentState(position=(8.0, 1.0)), target=(11.0, 11.5))
+        ego.next_target = (10.14, 1.86)
+
+        world = model.build_world_state(ego, _StubEnvQuery(walls=self.CORNER_WALLS))
+        np.testing.assert_allclose(world.route_next_waypoints[0], [10.14, 1.86], atol=1e-12)
+
+
 class TestContactPhysics:
     """Training-parity contact physics: the crowd_env step's contact forces +
     body-clearance wall projection, active when walkable_geometry is given."""
@@ -388,14 +454,6 @@ class TestTemporalMemory:
 
         assert cfg.obs_dim == 89
         assert obs.shape == (89,)
-
-
-class _StubWall:
-    """Stand-in for a JuPedSim LineSegment (exposes p1 / p2 endpoints)."""
-
-    def __init__(self, p1, p2):
-        self.p1 = p1
-        self.p2 = p2
 
 
 class TestRaycasting:
