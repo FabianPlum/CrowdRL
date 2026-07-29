@@ -279,6 +279,21 @@ def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
     }
 
 
+def _git_rev() -> str:
+    """Short git revision of the working tree, or "unknown" outside a repo."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def build_net_config(cfg: dict, env_config: CrowdEnvConfig) -> NetworkConfig:
     net = cfg.get("network", {})
     return NetworkConfig(
@@ -1732,7 +1747,18 @@ def train_worker(
         # means any regression cannot corrupt earlier evaluation steps.
         print("  Exporting ONNX policy...", flush=True)
         onnx_path = results_dir / "policy.onnx"
-        export_onnx(actor_critic.actor, obs_normalizer, onnx_path)
+        export_onnx(
+            actor_critic.actor,
+            obs_normalizer,
+            onnx_path,
+            obs_config=env_config.obs,
+            action_config=env_config.action,
+            provenance={
+                "run": results_dir.name,
+                "git_rev": _git_rev(),
+                "source": "train_mappo",
+            },
+        )
         print(f"  ONNX policy -> {onnx_path} ({onnx_path.stat().st_size / 1024:.1f} KB)")
 
         print(f"\nAll results saved to: {results_dir}/")
