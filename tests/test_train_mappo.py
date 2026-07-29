@@ -24,6 +24,7 @@ from train_mappo import (  # noqa: E402
     _resolve_render_interval,
     _scorecard_command,
     build_env_config,
+    cfg_dict_from_env_config,
 )
 
 
@@ -49,6 +50,110 @@ class TestBuildEnvConfigSpeed:
         tc = self._torch_cfg({})
         assert tc.max_forward_speed == 2.0
         assert tc.max_backward_speed == 0.5
+
+
+class TestCfgDictRoundTrip:
+    """``cfg_dict_from_env_config`` is the exact inverse of ``build_env_config``.
+
+    Producers that build their config in code (the training notebooks) rely on
+    this to emit a ``config_resolved.yaml`` next to the exported policy that
+    re-parses to the identical env config -- the contract that lets eval /
+    scorecard / the validation notebooks be config-driven instead of hardcoding
+    an ObsConfig. The dump goes through real YAML (dump -> safe_load) so any
+    non-serialisable leakage (e.g. numpy scalars) would fail the test too.
+    """
+
+    # A source config exercising the non-default knobs that recent runs use:
+    # the no-goal-direction ablation, temporal memory, speed/turn coupling, and
+    # velocity-weighted collision/proximity rewards.
+    SOURCE_CFG = {
+        "geometry": {
+            "min_side": 10.0,
+            "max_side": 18.0,
+            "corridor_width": [2.0, 4.0],
+            "corridor_length": [8.0, 18.0],
+        },
+        "observation": {
+            "use_navmesh": True,
+            "use_goal_direction": False,
+            "use_temporal_memory": True,
+            "temporal_memory_window": 50,
+        },
+        "action": {
+            "max_heading_change_deg": 4.8,
+            "max_torso_change_deg": 4.8,
+            "speed_turn_coupling": True,
+            "turn_lat_accel": 2.0,
+            "turn_pivot_rate_deg": 240.0,
+        },
+        "reward": {
+            "goal_bonus": 20.0,
+            "collision_penalty": -2.0,
+            "progress_weight": 2.0,
+            "use_velocity_weighted_collision": True,
+            "collision_penalty_cap": -2.0,
+            "use_velocity_weighted_proximity": True,
+        },
+        "episode": {"stuck_termination_enabled": False},
+        "max_steps": 3000,
+        "desired_velocity_weight": 0.8,
+    }
+
+    def _assert_dataclass_close(self, c0, c1, tol=1e-9):
+        import dataclasses
+
+        d0, d1 = dataclasses.asdict(c0), dataclasses.asdict(c1)
+        assert d0.keys() == d1.keys()
+        for k in d0:
+            v0, v1 = d0[k], d1[k]
+            if isinstance(v0, float):
+                assert abs(v0 - v1) <= tol, f"{type(c0).__name__}.{k}: {v0} != {v1}"
+            else:
+                assert v0 == v1, f"{type(c0).__name__}.{k}: {v0!r} != {v1!r}"
+
+    def _round_trip(self, source_cfg):
+        import yaml
+
+        ec0 = build_env_config(source_cfg)
+        # Serialise -> real YAML text -> reload -> rebuild, mirroring how the
+        # notebooks write config_resolved.yaml and how eval reads it back.
+        dumped = yaml.safe_load(yaml.dump(cfg_dict_from_env_config(ec0)))
+        ec1 = build_env_config(dumped)
+        return ec0, ec1
+
+    def test_obs_action_reward_geometry_round_trip(self):
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        self._assert_dataclass_close(ec0.obs, ec1.obs)
+        self._assert_dataclass_close(ec0.action, ec1.action)
+        self._assert_dataclass_close(ec0.reward, ec1.reward)
+        self._assert_dataclass_close(ec0.geometry, ec1.geometry)
+
+    def test_top_level_fields_round_trip(self):
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        assert ec0.max_steps == ec1.max_steps
+        assert ec0.dt == ec1.dt
+        assert ec0.desired_velocity_weight == ec1.desired_velocity_weight
+        assert ec0.stuck_termination_enabled == ec1.stuck_termination_enabled
+
+    def test_obs_dim_preserved(self):
+        """The whole point: the re-parsed config rebuilds the same obs width."""
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        assert ec0.obs.obs_dim == ec1.obs.obs_dim == 89
+
+    def test_temporal_memory_normalisers_track_top_level(self):
+        """temporal_memory_max_steps/dt are derived from top-level max_steps/dt,
+        not stored under observation: -- the serialiser must keep them in sync."""
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        assert ec1.obs.temporal_memory_max_steps == ec1.max_steps == 3000
+        assert ec1.obs.temporal_memory_dt == ec1.dt
+
+    def test_defaults_only_config_round_trips(self):
+        """A config that relies entirely on defaults must also round-trip."""
+        ec0, ec1 = self._round_trip({})
+        self._assert_dataclass_close(ec0.obs, ec1.obs)
+        self._assert_dataclass_close(ec0.action, ec1.action)
+        self._assert_dataclass_close(ec0.reward, ec1.reward)
+        assert ec0.obs.obs_dim == ec1.obs.obs_dim
 
 
 # A minimal stand-in for CurriculumPhase -- the helper only reads `.name`.

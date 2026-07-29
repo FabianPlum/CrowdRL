@@ -193,6 +193,92 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
     )
 
 
+def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
+    """Inverse of :func:`build_env_config`.
+
+    Serialise a ``CrowdEnvConfig`` back into the flat YAML-style dict that
+    ``build_env_config`` parses, so producers that build their config in code
+    (e.g. the training notebooks) can emit a ``config_resolved.yaml`` next to
+    their exported policy. That makes ``(config_resolved.yaml, policy_*.onnx)``
+    a universal pairing -- every results dir carries a re-parseable config,
+    regardless of whether it came from this script or a notebook, and downstream
+    consumers (eval, scorecard, the validation notebooks) never have to hardcode
+    an ``ObsConfig``.
+
+    Only the fields ``build_env_config`` consumes are emitted; any geometry/
+    action fields outside that schema (which the script itself cannot express)
+    fall back to their dataclass defaults on re-parse. Round-tripping
+    ``build_env_config(cfg_dict_from_env_config(ec))`` reproduces ``ec`` exactly,
+    modulo the deg<->rad float conversion on the orientation caps (a few ULP).
+    The top-level ``dt`` is taken from ``action.dt`` because that is the value
+    ``build_env_config`` propagates into ``action.dt`` and
+    ``obs.temporal_memory_dt``.
+    """
+    o, a, r, g = env_config.obs, env_config.action, env_config.reward, env_config.geometry
+    return {
+        "geometry": {
+            "min_side": g.min_side,
+            "max_side": g.max_side,
+            "corridor_width": list(g.corridor_width_range),
+            "corridor_length": list(g.corridor_length_range),
+        },
+        "observation": {
+            "use_navmesh": o.use_navmesh,
+            "navmesh_max_waypoints": o.navmesh_max_waypoints,
+            "use_goal_direction": o.use_goal_direction,
+            "use_temporal_memory": o.use_temporal_memory,
+            "temporal_memory_window": o.temporal_memory_window,
+            "use_neighbor_memory": o.use_neighbor_memory,
+            "neighbor_sensing_radius": o.neighbor_sensing_radius,
+            "neighbor_vel_history_window": o.neighbor_vel_history_window,
+            "use_neighbor_vel_history": o.use_neighbor_vel_history,
+            "use_neighbor_trajectory_features": o.use_neighbor_trajectory_features,
+        },
+        "action": {
+            "max_forward_speed": a.max_forward_speed,
+            "max_backward_speed": a.max_backward_speed,
+            "max_heading_change_deg": float(np.degrees(a.max_heading_change)),
+            "max_torso_change_deg": float(np.degrees(a.max_torso_change)),
+            "max_head_change_deg": float(np.degrees(a.max_head_change)),
+            "speed_turn_coupling": a.speed_turn_coupling,
+            "turn_lat_accel": a.turn_lat_accel,
+            "turn_pivot_rate_deg": float(np.degrees(a.turn_pivot_rate)),
+        },
+        "reward": {
+            "goal_bonus": r.goal_bonus,
+            "collision_penalty": r.collision_penalty,
+            "timeout_penalty": r.timeout_penalty,
+            "existence_penalty": r.existence_penalty,
+            "progress_weight": r.progress_weight,
+            "inverse_distance_weight": r.inverse_distance_weight,
+            "speed_deviation_weight": r.speed_deviation_weight,
+            "use_smoothness": r.use_smoothness,
+            "wall_proximity_penalty": r.wall_proximity_penalty,
+            "wall_proximity_threshold": r.wall_proximity_threshold,
+            "wall_collision_penalty": r.wall_collision_penalty,
+            "agent_proximity_penalty_near": r.agent_proximity_penalty_near,
+            "agent_proximity_penalty_far": r.agent_proximity_penalty_far,
+            "personal_space_radius": r.personal_space_radius,
+            "action_rate_weight": r.action_rate_weight,
+            "use_velocity_weighted_collision": r.use_velocity_weighted_collision,
+            "collision_speed_floor": r.collision_speed_floor,
+            "collision_speed_scale": r.collision_speed_scale,
+            "collision_penalty_cap": r.collision_penalty_cap,
+            "use_velocity_weighted_proximity": r.use_velocity_weighted_proximity,
+            "proximity_speed_floor": r.proximity_speed_floor,
+            "proximity_speed_scale": r.proximity_speed_scale,
+        },
+        "episode": {
+            "stuck_termination_enabled": env_config.stuck_termination_enabled,
+            "stuck_window_steps": env_config.stuck_window_steps,
+            "stuck_progress_threshold": env_config.stuck_progress_threshold,
+        },
+        "max_steps": env_config.max_steps,
+        "dt": a.dt,
+        "desired_velocity_weight": env_config.desired_velocity_weight,
+    }
+
+
 def build_net_config(cfg: dict, env_config: CrowdEnvConfig) -> NetworkConfig:
     net = cfg.get("network", {})
     return NetworkConfig(
