@@ -202,3 +202,101 @@ class warnings_as_errors:
 
     def __exit__(self, *exc):
         return self._ctx.__exit__(*exc)
+
+
+class TestSchemaV2Dynamics:
+    """Schema v2: the dynamics block rides along; v1 artefacts stay readable."""
+
+    def test_v1_artefact_still_parses_with_no_dynamics(self, tmp_path):
+        policy = OnnxPolicy(_write_policy(tmp_path / "v1.onnx", props=_valid_props()))
+        assert policy.metadata.schema_version == "1"
+        assert policy.metadata.dynamics is None
+
+    def test_v2_dynamics_parse(self, tmp_path):
+        from crowdrl_core.config_io import META_DYNAMICS_KEY
+
+        props = _valid_props(
+            **{
+                META_SCHEMA_KEY: "2",
+                META_DYNAMICS_KEY: json.dumps(
+                    {"desired_velocity_weight": 0.8, "max_velocity_magnitude": 3.0}
+                ),
+            }
+        )
+        policy = OnnxPolicy(_write_policy(tmp_path / "v2.onnx", props=props))
+        assert policy.metadata.dynamics == {
+            "desired_velocity_weight": 0.8,
+            "max_velocity_magnitude": 3.0,
+        }
+
+    def test_unknown_dynamics_field_raises(self, tmp_path):
+        from crowdrl_core.config_io import META_DYNAMICS_KEY
+
+        props = _valid_props(
+            **{META_SCHEMA_KEY: "2", META_DYNAMICS_KEY: json.dumps({"warp_factor": 9.0})}
+        )
+        with pytest.raises(ValueError, match="warp_factor"):
+            OnnxPolicy(_write_policy(tmp_path / "v2.onnx", props=props))
+
+
+class TestResolveDynamics:
+    @staticmethod
+    def _policy_with(dynamics):
+        from crowdrl_jupedsim.policy import PolicyMetadata
+
+        return _MetaPolicy(
+            metadata=PolicyMetadata(
+                obs_config=OBS,
+                action_config=ACTION,
+                obs_dim=OBS.obs_dim,
+                action_dim=4,
+                provenance=None,
+                schema_version="2",
+                dynamics=dynamics,
+            ),
+            obs_dim=OBS.obs_dim,
+            metadata_capable=True,
+        )
+
+    def test_self_configures_from_recorded_dynamics(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        resolved = resolve_dynamics(
+            self._policy_with({"desired_velocity_weight": 0.8, "max_velocity_magnitude": 3.0}),
+            {"desired_velocity_weight": None, "max_velocity_magnitude": None},
+        )
+        assert resolved["desired_velocity_weight"] == 0.8
+        assert resolved["max_velocity_magnitude"] == 3.0
+        assert resolved["contact_stiffness"] == 30000.0  # unrecorded -> default
+
+    def test_agreeing_explicit_value_passes(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        resolved = resolve_dynamics(
+            self._policy_with({"desired_velocity_weight": 0.8}),
+            {"desired_velocity_weight": 0.8},
+        )
+        assert resolved["desired_velocity_weight"] == 0.8
+
+    def test_disagreeing_explicit_value_raises(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        with pytest.raises(ValueError, match="desired_velocity_weight"):
+            resolve_dynamics(
+                self._policy_with({"desired_velocity_weight": 0.8}),
+                {"desired_velocity_weight": 0.05},
+            )
+
+    def test_unrecorded_uses_explicit_then_default(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        legacy = ConstantPolicy([0, 0, 0, 0])
+        resolved = resolve_dynamics(legacy, {"desired_velocity_weight": 0.8})
+        assert resolved["desired_velocity_weight"] == 0.8
+        assert resolved["max_velocity_magnitude"] == 5.0  # adapter legacy default
+
+    def test_unknown_override_key_raises(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        with pytest.raises(ValueError, match="warp_factor"):
+            resolve_dynamics(ConstantPolicy([0, 0, 0, 0]), {"warp_factor": 9.0})

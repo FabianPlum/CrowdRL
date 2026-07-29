@@ -57,7 +57,7 @@ from crowdrl_core.collision import compute_contact_forces, enforce_wall_boundari
 from crowdrl_core.observation import ObsConfig, build_observation
 from crowdrl_core.world_state import WorldState
 
-from .policy import Policy, resolve_configs
+from .policy import Policy, resolve_configs, resolve_dynamics
 
 if TYPE_CHECKING:  # pragma: no cover
     from shapely import Polygon
@@ -150,10 +150,10 @@ class LearnedPolicyModel(CustomOperationalModel):
         obs_config: ObsConfig | None = None,
         action_config: ActionConfig | None = None,
         walkable_geometry: Polygon | None = None,
-        desired_velocity_weight: float = 0.05,
-        max_velocity_magnitude: float = 5.0,
-        contact_stiffness: float = 30000.0,
-        contact_damping: float = 500.0,
+        desired_velocity_weight: float | None = None,
+        max_velocity_magnitude: float | None = None,
+        contact_stiffness: float | None = None,
+        contact_damping: float | None = None,
         waypoint_clearance: bool = False,
         neighbor_radius: float | None = None,
         wall_query_radius: float | None = None,
@@ -186,7 +186,12 @@ class LearnedPolicyModel(CustomOperationalModel):
         desired_velocity_weight
             First-order velocity filter weight, mirroring
             ``CrowdEnvConfig.desired_velocity_weight``:
-            ``v_new = w * v_desired + (1 - w) * v_old``.
+            ``v_new = w * v_desired + (1 - w) * v_old``. Like the other
+            dynamics parameters (speed clamp, contact constants), normally
+            omitted: schema-v2 artefacts embed the trained values and the
+            model self-configures; an explicit value that disagrees with the
+            embedded record raises. Unrecorded (v1 artefacts): explicit value
+            or the crowdrl default (0.05).
         waypoint_clearance
             Push routed waypoints (``ped.next_target``) off walls/corners to
             the agent's body radius before they enter the observation,
@@ -230,10 +235,19 @@ class LearnedPolicyModel(CustomOperationalModel):
                 UserWarning,
                 stacklevel=2,
             )
-        self.desired_velocity_weight = float(desired_velocity_weight)
-        self.max_velocity_magnitude = float(max_velocity_magnitude)
-        self.contact_stiffness = float(contact_stiffness)
-        self.contact_damping = float(contact_damping)
+        dynamics = resolve_dynamics(
+            policy,
+            {
+                "desired_velocity_weight": desired_velocity_weight,
+                "max_velocity_magnitude": max_velocity_magnitude,
+                "contact_stiffness": contact_stiffness,
+                "contact_damping": contact_damping,
+            },
+        )
+        self.desired_velocity_weight = dynamics["desired_velocity_weight"]
+        self.max_velocity_magnitude = dynamics["max_velocity_magnitude"]
+        self.contact_stiffness = dynamics["contact_stiffness"]
+        self.contact_damping = dynamics["contact_damping"]
         self.waypoint_clearance = bool(waypoint_clearance)
         # Rays intersect walls *and* other agents, so the neighbour query has to
         # cover the raycast horizon as well as the social one. If it did not,

@@ -14,6 +14,7 @@ from crowdrl_jupedsim.policy import (
     Policy,
     PolicyMetadata,
     resolve_configs,
+    resolve_dynamics,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -31,6 +32,7 @@ __all__ = [
     "TemporalMemory",
     "native_batch_step",
     "resolve_configs",
+    "resolve_dynamics",
 ]
 
 _MODEL_EXPORTS = {"CrowdRLAgentState", "LearnedPolicyModel", "TemporalMemory"}

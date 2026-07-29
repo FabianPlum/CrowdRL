@@ -20,7 +20,7 @@ import pytest
 from crowdrl_core.action import ActionConfig
 from crowdrl_core.observation import ObsConfig
 
-from crowdrl_jupedsim.policy import OnnxPolicy, resolve_configs
+from crowdrl_jupedsim.policy import OnnxPolicy, resolve_configs, resolve_dynamics
 from crowdrl_train.config import NetworkConfig
 from crowdrl_train.export import export_onnx
 from crowdrl_train.networks import Actor
@@ -44,6 +44,7 @@ def exported_policy(tmp_path_factory):
         output_path=path,
         obs_config=OBS,
         action_config=ACTION,
+        dynamics={"desired_velocity_weight": 0.8, "max_velocity_magnitude": 3.0},
         provenance={"run": "roundtrip-test", "git_rev": "cafe123"},
     )
     return path
@@ -83,3 +84,20 @@ class TestRoundTrip:
         with pytest.warns(UserWarning, match="cannot be verified"):
             resolved_obs, _ = resolve_configs(policy, OBS, ACTION)
         assert resolved_obs == OBS
+
+
+class TestDynamicsRoundTrip:
+    def test_deployment_self_configures_dynamics(self, exported_policy):
+        """Schema v2: the trained physics travel with the artefact -- the
+        desired_velocity_weight filter and the speed clamp the run actually
+        used, instead of adapter defaults."""
+        policy = OnnxPolicy(exported_policy)
+        resolved = resolve_dynamics(policy, {})
+        assert resolved["desired_velocity_weight"] == 0.8
+        assert resolved["max_velocity_magnitude"] == 3.0
+        assert resolved["contact_stiffness"] == 30000.0  # unrecorded -> default
+
+    def test_disagreeing_explicit_dynamics_raise(self, exported_policy):
+        policy = OnnxPolicy(exported_policy)
+        with pytest.raises(ValueError, match="desired_velocity_weight"):
+            resolve_dynamics(policy, {"desired_velocity_weight": 0.05})

@@ -36,17 +36,21 @@ from crowdrl_core.observation import ObsConfig
 from crowdrl_core.sensing import RaycastConfig
 
 __all__ = [
+    "DYNAMICS_FIELDS",
     "META_ACTION_CONFIG_KEY",
     "META_ACTION_DIM_KEY",
+    "META_DYNAMICS_KEY",
     "META_OBS_CONFIG_KEY",
     "META_OBS_DIM_KEY",
     "META_PROVENANCE_KEY",
     "META_SCHEMA_KEY",
     "METADATA_SCHEMA_VERSION",
+    "SUPPORTED_SCHEMA_VERSIONS",
     "action_config_from_dict",
     "action_config_to_dict",
     "obs_config_from_dict",
     "obs_config_to_dict",
+    "validate_dynamics_dict",
 ]
 
 # ONNX metadata_props keys for the embedded training configuration (issue #7).
@@ -54,13 +58,53 @@ __all__ = [
 # import the names from here so they cannot disagree. Bump
 # METADATA_SCHEMA_VERSION when the payload semantics change -- readers refuse
 # versions they do not know.
-METADATA_SCHEMA_VERSION = "1"
+#
+# Schema history:
+#   "1": obs/action configs, dims, provenance.
+#   "2": adds the OPTIONAL crowdrl.dynamics block -- the env-level dynamics
+#        the policy was trained under (velocity-filter weight, speed clamp,
+#        contact constants). Readers accept both; a v2 file without the
+#        dynamics key is valid (dynamics simply unrecorded).
+METADATA_SCHEMA_VERSION = "2"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1", "2"})
 META_SCHEMA_KEY = "crowdrl.schema_version"
 META_OBS_CONFIG_KEY = "crowdrl.obs_config"
 META_ACTION_CONFIG_KEY = "crowdrl.action_config"
 META_OBS_DIM_KEY = "crowdrl.obs_dim"
 META_ACTION_DIM_KEY = "crowdrl.action_dim"
 META_PROVENANCE_KEY = "crowdrl.provenance"
+META_DYNAMICS_KEY = "crowdrl.dynamics"
+
+DYNAMICS_FIELDS = frozenset(
+    {
+        "desired_velocity_weight",
+        "max_velocity_magnitude",
+        "contact_stiffness",
+        "contact_damping",
+    }
+)
+"""The env-level dynamics parameters that shape the trained motion but live
+outside ObsConfig/ActionConfig (they are CrowdEnvConfig fields). A policy
+deployed under different values runs different physics than it was trained
+under -- the desired_velocity_weight filter alone changes the response time
+constant by more than an order of magnitude between the historical 0.8 runs
+and the Layer-1 0.05 default."""
+
+
+def validate_dynamics_dict(data: Mapping[str, Any]) -> dict[str, float]:
+    """Validate a dynamics block: known keys only, float values.
+
+    Missing keys are allowed (unrecorded parameters fall back to defaults on
+    the read side); unknown keys raise, same asymmetry as the configs.
+    """
+    unknown = sorted(set(data) - DYNAMICS_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"dynamics block carries unknown field(s) {unknown}: the artefact "
+            "was exported by a newer crowdrl than this one. Upgrade crowdrl "
+            "to at least the version that exported it."
+        )
+    return {key: float(value) for key, value in data.items()}
 
 
 def _checked_kwargs(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:

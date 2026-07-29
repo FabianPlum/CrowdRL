@@ -13,6 +13,8 @@ from crowdrl_core.action import ActionConfig
 from crowdrl_core.config_io import action_config_from_dict, obs_config_from_dict
 from crowdrl_core.observation import ObsConfig
 
+from crowdrl_core.config_io import META_DYNAMICS_KEY
+
 from crowdrl_train.export import (
     META_ACTION_CONFIG_KEY,
     META_ACTION_DIM_KEY,
@@ -136,7 +138,7 @@ class TestEmbeddedMetadata:
         import onnx
 
         props = {p.key: p.value for p in onnx.load(str(path)).metadata_props}
-        assert props[META_SCHEMA_KEY] == "1"
+        assert props[META_SCHEMA_KEY] == "2"
         assert obs_config_from_dict(json.loads(props[META_OBS_CONFIG_KEY])) == ObsConfig()
         assert action_config_from_dict(json.loads(props[META_ACTION_CONFIG_KEY])) == self.ACTION
         assert props[META_OBS_DIM_KEY] == "80"
@@ -197,4 +199,44 @@ class TestEmbeddedMetadata:
                 normalizer=None,
                 output_path=tmp_path / "policy.onnx",
                 obs_config=ObsConfig(),
+            )
+
+    def test_dynamics_block_embeds(self, tiny_actor: Actor, tmp_path: Path):
+        """Schema v2: env-level dynamics travel with the artefact."""
+        path = tmp_path / "policy.onnx"
+        export_onnx(
+            tiny_actor,
+            normalizer=None,
+            output_path=path,
+            obs_config=ObsConfig(),
+            action_config=self.ACTION,
+            dynamics={"desired_velocity_weight": 0.8, "max_velocity_magnitude": 3.0},
+        )
+
+        import onnx
+
+        props = {p.key: p.value for p in onnx.load(str(path)).metadata_props}
+        assert json.loads(props[META_DYNAMICS_KEY]) == {
+            "desired_velocity_weight": 0.8,
+            "max_velocity_magnitude": 3.0,
+        }
+
+    def test_unknown_dynamics_key_refuses_export(self, tiny_actor: Actor, tmp_path: Path):
+        with pytest.raises(ValueError, match="warp_factor"):
+            export_onnx(
+                tiny_actor,
+                normalizer=None,
+                output_path=tmp_path / "policy.onnx",
+                obs_config=ObsConfig(),
+                action_config=self.ACTION,
+                dynamics={"warp_factor": 9.0},
+            )
+
+    def test_dynamics_without_configs_refuses(self, tiny_actor: Actor, tmp_path: Path):
+        with pytest.raises(ValueError, match="dynamics"):
+            export_onnx(
+                tiny_actor,
+                normalizer=None,
+                output_path=tmp_path / "policy.onnx",
+                dynamics={"desired_velocity_weight": 0.8},
             )

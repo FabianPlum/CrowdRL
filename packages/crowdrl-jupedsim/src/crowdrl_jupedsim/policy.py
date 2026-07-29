@@ -27,15 +27,17 @@ from crowdrl_core.action import ActionConfig
 from crowdrl_core.config_io import (
     META_ACTION_CONFIG_KEY,
     META_ACTION_DIM_KEY,
+    META_DYNAMICS_KEY,
     META_OBS_CONFIG_KEY,
     META_OBS_DIM_KEY,
     META_PROVENANCE_KEY,
     META_SCHEMA_KEY,
-    METADATA_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     action_config_from_dict,
     action_config_to_dict,
     obs_config_from_dict,
     obs_config_to_dict,
+    validate_dynamics_dict,
 )
 from crowdrl_core.observation import ObsConfig
 
@@ -57,6 +59,10 @@ class PolicyMetadata:
     action_dim: int | None
     provenance: dict | None
     schema_version: str
+    dynamics: dict | None = None
+    """Env-level dynamics the policy was trained under (schema v2): any of
+    desired_velocity_weight, max_velocity_magnitude, contact_stiffness,
+    contact_damping. None on v1 artefacts (unrecorded)."""
 
 
 def _parse_metadata(raw: Mapping[str, str], source: str) -> PolicyMetadata | None:
@@ -72,13 +78,13 @@ def _parse_metadata(raw: Mapping[str, str], source: str) -> PolicyMetadata | Non
     if not crowdrl_keys:
         return None
 
-    schema_version = raw.get(META_SCHEMA_KEY, METADATA_SCHEMA_VERSION)
-    if schema_version != METADATA_SCHEMA_VERSION:
+    schema_version = raw.get(META_SCHEMA_KEY, "1")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(
             f"{source}: embedded config metadata has schema version "
             f"{schema_version!r} but this reader understands "
-            f"{METADATA_SCHEMA_VERSION!r}. Upgrade crowdrl to deploy this "
-            "artefact."
+            f"{sorted(SUPPORTED_SCHEMA_VERSIONS)}. Upgrade crowdrl to deploy "
+            "this artefact."
         )
     if META_OBS_CONFIG_KEY not in raw or META_ACTION_CONFIG_KEY not in raw:
         raise ValueError(
@@ -95,6 +101,12 @@ def _parse_metadata(raw: Mapping[str, str], source: str) -> PolicyMetadata | Non
     obs_dim = int(raw[META_OBS_DIM_KEY]) if META_OBS_DIM_KEY in raw else None
     action_dim = int(raw[META_ACTION_DIM_KEY]) if META_ACTION_DIM_KEY in raw else None
     provenance = json.loads(raw[META_PROVENANCE_KEY]) if META_PROVENANCE_KEY in raw else None
+    dynamics = None
+    if META_DYNAMICS_KEY in raw:
+        try:
+            dynamics = validate_dynamics_dict(json.loads(raw[META_DYNAMICS_KEY]))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{source}: embedded dynamics metadata is unreadable: {exc}") from exc
 
     if obs_dim is not None and obs_config.obs_dim != obs_dim:
         raise ValueError(
@@ -111,6 +123,7 @@ def _parse_metadata(raw: Mapping[str, str], source: str) -> PolicyMetadata | Non
         action_dim=action_dim,
         provenance=provenance,
         schema_version=schema_version,
+        dynamics=dynamics,
     )
 
 
@@ -287,3 +300,52 @@ class ConstantPolicy:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"ConstantPolicy(action={self._action.tolist()})"
+
+
+_DYNAMICS_DEFAULTS = {
+    "desired_velocity_weight": 0.05,
+    "max_velocity_magnitude": 5.0,
+    "contact_stiffness": 30000.0,
+    "contact_damping": 500.0,
+}
+
+
+def resolve_dynamics(policy: Policy, overrides: Mapping[str, float | None]) -> dict[str, float]:
+    """Decide the env-level dynamics a model built on ``policy`` runs with.
+
+    Same philosophy as :func:`resolve_configs`, per parameter:
+
+    * artefact records it (schema v2 dynamics block) and nothing explicit is
+      given: self-configure from the artefact;
+    * artefact records it AND an explicit value is given: they must agree, or
+      this raises rather than silently preferring either;
+    * unrecorded: the explicit value, else the crowdrl default.
+
+    ``overrides`` maps dynamics field names to explicit values or None.
+    """
+    unknown = sorted(set(overrides) - set(_DYNAMICS_DEFAULTS))
+    if unknown:
+        raise ValueError(f"unknown dynamics parameter(s): {unknown}")
+
+    metadata = getattr(policy, "metadata", None)
+    recorded = metadata.dynamics if metadata is not None and metadata.dynamics else {}
+
+    resolved: dict[str, float] = {}
+    mismatches = []
+    for field_name, default in _DYNAMICS_DEFAULTS.items():
+        explicit = overrides.get(field_name)
+        stored = recorded.get(field_name)
+        if explicit is not None and stored is not None and abs(explicit - stored) > 1e-12:
+            mismatches.append(f"{field_name}: explicit {explicit!r} != embedded {stored!r}")
+        if explicit is not None:
+            resolved[field_name] = float(explicit)
+        elif stored is not None:
+            resolved[field_name] = float(stored)
+        else:
+            resolved[field_name] = default
+    if mismatches:
+        raise ValueError(
+            "explicit dynamics disagree with the artefact's embedded training "
+            "dynamics -- refusing to silently prefer either. " + "; ".join(mismatches)
+        )
+    return resolved

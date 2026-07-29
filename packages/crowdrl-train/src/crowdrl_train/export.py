@@ -25,6 +25,7 @@ from crowdrl_core.action import ActionConfig
 from crowdrl_core.config_io import (
     META_ACTION_CONFIG_KEY,
     META_ACTION_DIM_KEY,
+    META_DYNAMICS_KEY,
     META_OBS_CONFIG_KEY,
     META_OBS_DIM_KEY,
     META_PROVENANCE_KEY,
@@ -32,6 +33,7 @@ from crowdrl_core.config_io import (
     METADATA_SCHEMA_VERSION,
     action_config_to_dict,
     obs_config_to_dict,
+    validate_dynamics_dict,
 )
 from crowdrl_core.observation import ObsConfig
 
@@ -113,6 +115,7 @@ def export_onnx(
     *,
     obs_config: ObsConfig | None = None,
     action_config: ActionConfig | None = None,
+    dynamics: dict | None = None,
     provenance: dict | None = None,
 ) -> Path:
     """Export the policy to ONNX format.
@@ -135,6 +138,10 @@ def export_onnx(
         ``obs_dim`` must match the actor's input width -- a mismatch raises
         before anything is written, the earliest loud failure point.
     action_config : the resolved ActionConfig the policy was trained with
+    dynamics : env-level dynamics the policy was trained under (schema v2):
+        any of desired_velocity_weight, max_velocity_magnitude,
+        contact_stiffness, contact_damping. Deployment self-configures its
+        physics from these; unknown keys raise at export.
     provenance : free-form JSON-compatible dict recording where the artefact
         came from (run id, git rev, rollout, ...)
 
@@ -185,9 +192,13 @@ def export_onnx(
             META_OBS_DIM_KEY: str(obs_config.obs_dim),
             META_ACTION_DIM_KEY: str(actor.config.action_dim),
         }
+        if dynamics is not None:
+            props[META_DYNAMICS_KEY] = json.dumps(validate_dynamics_dict(dynamics))
         if provenance is not None:
             props[META_PROVENANCE_KEY] = json.dumps(provenance)
         _embed_metadata(output_path, props)
+    elif dynamics is not None:
+        raise ValueError("dynamics metadata requires obs_config and action_config as well.")
 
     return output_path
 

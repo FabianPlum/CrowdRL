@@ -1753,6 +1753,12 @@ def train_worker(
             onnx_path,
             obs_config=env_config.obs,
             action_config=env_config.action,
+            dynamics={
+                "desired_velocity_weight": env_config.desired_velocity_weight,
+                "max_velocity_magnitude": env_config.max_velocity_magnitude,
+                "contact_stiffness": env_config.contact_stiffness,
+                "contact_damping": env_config.contact_damping,
+            },
             provenance={
                 "run": results_dir.name,
                 "git_rev": _git_rev(),

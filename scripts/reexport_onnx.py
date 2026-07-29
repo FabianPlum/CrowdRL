@@ -66,6 +66,12 @@ def main() -> None:
         args.output,
         obs_config=env_config.obs,
         action_config=env_config.action,
+        dynamics={
+            "desired_velocity_weight": env_config.desired_velocity_weight,
+            "max_velocity_magnitude": env_config.max_velocity_magnitude,
+            "contact_stiffness": env_config.contact_stiffness,
+            "contact_damping": env_config.contact_damping,
+        },
         provenance={
             "run": args.results_dir.name,
             "checkpoint": args.checkpoint,

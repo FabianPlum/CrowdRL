@@ -60,7 +60,7 @@ from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
 from .model import CrowdRLAgentState, CustomOperationalModel
-from .policy import Policy, resolve_configs
+from .policy import Policy, resolve_configs, resolve_dynamics
 
 if TYPE_CHECKING:  # pragma: no cover
     from shapely import Polygon
@@ -187,10 +187,10 @@ class LockstepPolicyModel(CustomOperationalModel):
         exit_geometries,
         obs_config: ObsConfig | None = None,
         action_config: ActionConfig | None = None,
-        desired_velocity_weight: float = 0.05,
-        max_velocity_magnitude: float = 5.0,
-        contact_stiffness: float = 30000.0,
-        contact_damping: float = 500.0,
+        desired_velocity_weight: float | None = None,
+        max_velocity_magnitude: float | None = None,
+        contact_stiffness: float | None = None,
+        contact_damping: float | None = None,
     ) -> None:
         """
         Parameters
@@ -208,18 +208,28 @@ class LockstepPolicyModel(CustomOperationalModel):
             (native semantics); JuPedSim's own removal lags 2 iterations.
         desired_velocity_weight, max_velocity_magnitude, contact_stiffness,
         contact_damping
-            Must match the native reference run's values. Not carried by the
-            ONNX metadata (schema v1) -- match them by hand.
+            Must match the native reference run's values. Schema-v2 artefacts
+            embed them (self-configured, mismatching explicit values raise);
+            for v1 artefacts pass them by hand.
         """
         super().__init__()
         import shapely
 
         self.policy = policy
         self.obs_config, self.action_config = resolve_configs(policy, obs_config, action_config)
-        self.desired_velocity_weight = float(desired_velocity_weight)
-        self.max_velocity_magnitude = float(max_velocity_magnitude)
-        self.contact_stiffness = float(contact_stiffness)
-        self.contact_damping = float(contact_damping)
+        dynamics = resolve_dynamics(
+            policy,
+            {
+                "desired_velocity_weight": desired_velocity_weight,
+                "max_velocity_magnitude": max_velocity_magnitude,
+                "contact_stiffness": contact_stiffness,
+                "contact_damping": contact_damping,
+            },
+        )
+        self.desired_velocity_weight = dynamics["desired_velocity_weight"]
+        self.max_velocity_magnitude = dynamics["max_velocity_magnitude"]
+        self.contact_stiffness = dynamics["contact_stiffness"]
+        self.contact_damping = dynamics["contact_damping"]
 
         self.walkable_geometry = walkable_geometry
         self.wall_segments = extract_wall_segments(walkable_geometry)

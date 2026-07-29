@@ -118,3 +118,23 @@ class TestActionConfigRoundTrip:
         data["max_jetpack_thrust"] = 9000.0
         with pytest.raises(ValueError, match="max_jetpack_thrust"):
             action_config_from_dict(data)
+
+
+class TestDynamicsBlock:
+    def test_valid_block_passes_and_coerces_floats(self):
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        out = validate_dynamics_dict({"desired_velocity_weight": 0.8, "contact_damping": 500})
+        assert out == {"desired_velocity_weight": 0.8, "contact_damping": 500.0}
+        assert isinstance(out["contact_damping"], float)
+
+    def test_missing_keys_are_allowed(self):
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        assert validate_dynamics_dict({}) == {}
+
+    def test_unknown_key_raises(self):
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        with pytest.raises(ValueError, match="warp_factor"):
+            validate_dynamics_dict({"warp_factor": 9.0})
