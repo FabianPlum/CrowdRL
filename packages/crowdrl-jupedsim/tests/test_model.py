@@ -67,24 +67,33 @@ class _StubAgent:
     def __init__(self, agent_id, state, target):
         self.id = agent_id
         self.model = state
-        self.target = target
+        self.final_target = target
+        self.next_target = target  # open room: the routed waypoint IS the goal
 
     @property
     def position(self):
         return self.model.position
 
 
-class _StubNeighborhood:
-    def __init__(self, agents):
-        self._agents = agents
+class _StubEnvQuery:
+    """Stand-in for jupedsim's per-step EnvironmentQuery.
 
-    def get_neighboring_agents(self, position, radius):
-        return self._agents
+    Mirrors the 2.0 contract: ``other_agents_in_range`` excludes the querying
+    agent itself.
+    """
 
+    def __init__(self, agents=(), walls=()):
+        self._agents = list(agents)
+        self._walls = list(walls)
 
-class _StubGeometry:
-    def get_walls_in_distance_to(self, point, distance):
-        return []
+    def other_agents_in_range(self, agent, radius):
+        return [a for a in self._agents if a.id != agent.id]
+
+    def line_segments_in_range(self, position, distance):
+        return self._walls
+
+    def inside_geometry(self, position):
+        return True
 
 
 class TestCrowdRLAgentState:
@@ -113,10 +122,11 @@ class TestWorldStateAssembly:
         ego_state = CrowdRLAgentState(position=(5.0, 5.0), velocity=(1.0, 0.0))
         ego = _StubAgent(0, ego_state, target=(19.0, 10.0))
         neighbor = _StubAgent(1, CrowdRLAgentState(position=(6.0, 5.0)), target=(19.0, 10.0))
-        # The neighbourhood query returns the querying agent too; it must be filtered.
-        neighborhood = _StubNeighborhood([ego, neighbor])
+        # other_agents_in_range excludes the querying agent by contract; the
+        # stub mirrors that, so listing the ego here must not duplicate it.
+        env_query = _StubEnvQuery(agents=[ego, neighbor])
 
-        world = model.build_world_state(ego, _StubGeometry(), neighborhood)
+        world = model.build_world_state(ego, env_query)
 
         assert world.n_agents == 2, "ego + 1 neighbour, self-match removed"
         np.testing.assert_allclose(world.positions[0], [5.0, 5.0])
@@ -127,7 +137,7 @@ class TestWorldStateAssembly:
     def test_wall_segments_are_shaped_for_crowdrl_core(self):
         model = _model()
         ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 5.0)), target=(19.0, 10.0))
-        world = model.build_world_state(ego, _StubGeometry(), _StubNeighborhood([]))
+        world = model.build_world_state(ego, _StubEnvQuery())
         assert world.wall_segments.shape == (0, 2, 2)
 
 
@@ -244,14 +254,6 @@ class _StubWall:
         self.p2 = p2
 
 
-class _WalledGeometry:
-    def __init__(self, walls):
-        self._walls = walls
-
-    def get_walls_in_distance_to(self, point, distance):
-        return self._walls
-
-
 class TestRaycasting:
     """Every trained policy uses raycasts, so a silently-blind sensor would
     produce plausible-looking but wrong actions. These assert rays actually
@@ -267,7 +269,7 @@ class TestRaycasting:
         ego = _StubAgent(
             0, CrowdRLAgentState(position=(5.0, 5.0), head_angle=0.0), target=(19.0, 5.0)
         )
-        world = model.build_world_state(ego, _StubGeometry(), _StubNeighborhood([]))
+        world = model.build_world_state(ego, _StubEnvQuery())
         assert np.allclose(self._rays(model, world), 1.0), "no geometry -> all rays clear"
 
     def test_rays_detect_a_wall_ahead(self):
@@ -276,8 +278,8 @@ class TestRaycasting:
             0, CrowdRLAgentState(position=(5.0, 5.0), head_angle=0.0), target=(19.0, 5.0)
         )
         # Vertical wall 1 m ahead of an agent facing +x, ray range 5 m.
-        geometry = _WalledGeometry([_StubWall((6.0, 0.0), (6.0, 10.0))])
-        world = model.build_world_state(ego, geometry, _StubNeighborhood([]))
+        env_query = _StubEnvQuery(walls=[_StubWall((6.0, 0.0), (6.0, 10.0))])
+        world = model.build_world_state(ego, env_query)
         rays = self._rays(model, world)
 
         assert rays.min() < 1.0, "a wall 1 m ahead must register a hit"
@@ -293,12 +295,8 @@ class TestRaycasting:
         )
         blocker = _StubAgent(1, CrowdRLAgentState(position=(6.0, 5.0)), target=(19.0, 5.0))
 
-        alone = self._rays(
-            model, model.build_world_state(ego, _StubGeometry(), _StubNeighborhood([]))
-        )
-        blocked = self._rays(
-            model, model.build_world_state(ego, _StubGeometry(), _StubNeighborhood([blocker]))
-        )
+        alone = self._rays(model, model.build_world_state(ego, _StubEnvQuery()))
+        blocked = self._rays(model, model.build_world_state(ego, _StubEnvQuery(agents=[blocker])))
 
         assert np.allclose(alone, 1.0)
         assert blocked.min() < 1.0, "an agent 1 m ahead must occlude at least one ray"

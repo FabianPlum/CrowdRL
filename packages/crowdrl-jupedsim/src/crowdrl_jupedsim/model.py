@@ -7,9 +7,11 @@ the returned state **verbatim**.
 
 That makes the division of labour sharp (see Project Plan v8, Section 3.6):
 
-* JuPedSim supplies the walkable geometry and wall segments, the route waypoint
-  ``ped.target`` (its strategical + tactical systems run *before* the
-  operational step), a neighbourhood-search grid, and agent lifecycle.
+* JuPedSim supplies the walkable geometry and wall segments (through the
+  per-step ``EnvironmentQuery``), the agent's final goal ``ped.final_target``
+  and its routed next waypoint ``ped.next_target`` (the strategical + tactical
+  systems run *before* the operational step), neighbour queries, and agent
+  lifecycle.
 * JuPedSim performs **no** velocity integration, **no** boundary clamping and
   **no** collision resolution for the operational layer. ``GenericAgent`` has no
   velocity or orientation field at all.
@@ -169,26 +171,16 @@ class LearnedPolicyModel(CustomOperationalModel):
         )
         self.keep_inside_geometry = keep_inside_geometry
 
-        self._walkable_polygon = None  # lazily built from the JuPedSim geometry
-
     # -- observation assembly -------------------------------------------------
 
-    def _walls(self, geometry, position: tuple[float, float]) -> NDArray[np.float64]:
+    def _walls(self, env_query, position: tuple[float, float]) -> NDArray[np.float64]:
         """Wall segments near ``position`` as a crowdrl-core (S, 2, 2) array."""
-        segments = geometry.get_walls_in_distance_to(position, self.wall_query_radius)
+        segments = env_query.line_segments_in_range(position, self.wall_query_radius)
         if not segments:
             return np.zeros((0, 2, 2), dtype=np.float64)
         return np.array([[ls.p1, ls.p2] for ls in segments], dtype=np.float64)
 
-    def _polygon(self, geometry):
-        """Shapely walkable polygon, cached (the geometry is fixed per simulation)."""
-        if self._walkable_polygon is None:
-            import shapely
-
-            self._walkable_polygon = shapely.Polygon(geometry.boundary(), holes=geometry.holes())
-        return self._walkable_polygon
-
-    def build_world_state(self, ped, geometry, neighborhood_search) -> WorldState:
+    def build_world_state(self, ped, env_query) -> WorldState:
         """Assemble a WorldState with the ego agent at index 0.
 
         This is the deployment half of the transfer guarantee: the observation
@@ -196,14 +188,14 @@ class LearnedPolicyModel(CustomOperationalModel):
         it in.
         """
         state = ped.model
-        neighbors = [
-            n
-            for n in neighborhood_search.get_neighboring_agents(ped.position, self.neighbor_radius)
-            if n.id != ped.id
-        ]
+        # other_agents_in_range excludes the querying agent by contract.
+        neighbors = env_query.other_agents_in_range(ped, self.neighbor_radius)
 
         agents = [state] + [n.model for n in neighbors]
-        goals = [ped.target] + [n.target for n in neighbors]
+        # goal_positions carries each agent's FINAL goal, matching the training
+        # env's episode goal. The routed next waypoint (ped.next_target) is a
+        # separate signal and feeds the navmesh observation block instead.
+        goals = [ped.final_target] + [n.final_target for n in neighbors]
 
         return WorldState(
             positions=np.array([a.position for a in agents], dtype=np.float64),
@@ -215,15 +207,15 @@ class LearnedPolicyModel(CustomOperationalModel):
             masses=np.array([a.mass for a in agents], dtype=np.float64),
             goal_positions=np.array(goals, dtype=np.float64),
             preferred_speeds=np.array([a.preferred_speed for a in agents], dtype=np.float64),
-            wall_segments=self._walls(geometry, ped.position),
+            wall_segments=self._walls(env_query, ped.position),
         )
 
     # -- JuPedSim operational-model interface ---------------------------------
 
-    def compute_next_state(self, dt, ped, geometry, neighborhood_search) -> CrowdRLAgentState:
+    def compute_next_state(self, dt, ped, env_query) -> CrowdRLAgentState:
         state = ped.model
 
-        world = self.build_world_state(ped, geometry, neighborhood_search)
+        world = self.build_world_state(ped, env_query)
         obs = build_observation(world, 0, self.obs_config)
         raw_action = self.policy(obs)
 
@@ -251,12 +243,11 @@ class LearnedPolicyModel(CustomOperationalModel):
         position = np.asarray(state.position, dtype=np.float64)
         new_position = position + new_velocity * dt
 
-        if self.keep_inside_geometry:
-            import shapely
-
-            if not self._polygon(geometry).contains(shapely.Point(new_position)):
-                new_position = position
-                new_velocity = np.zeros(2, dtype=np.float64)
+        if self.keep_inside_geometry and not env_query.inside_geometry(
+            (float(new_position[0]), float(new_position[1]))
+        ):
+            new_position = position
+            new_velocity = np.zeros(2, dtype=np.float64)
 
         return replace(
             state,

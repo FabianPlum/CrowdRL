@@ -26,6 +26,7 @@ pytest.importorskip(
 import shapely  # noqa: E402
 
 import jupedsim as jps  # noqa: E402
+from crowdrl_core.action import ActionConfig  # noqa: E402
 from crowdrl_core.geometry import extract_wall_segments  # noqa: E402
 from crowdrl_core.observation import ObsConfig, build_observation  # noqa: E402
 from crowdrl_core.world_state import WorldState  # noqa: E402
@@ -81,11 +82,14 @@ class _RecordingModel(LearnedPolicyModel):
         super().__init__(*args, **kwargs)
         self.captured: dict[int, tuple[np.ndarray, tuple[float, float]]] = {}
 
-    def compute_next_state(self, dt, ped, geometry, neighborhood_search):
-        world = self.build_world_state(ped, geometry, neighborhood_search)
+    def compute_next_state(self, dt, ped, env_query):
+        world = self.build_world_state(ped, env_query)
         obs = build_observation(world, 0, self.obs_config)
-        self.captured[ped.id] = (np.asarray(obs, dtype=np.float64).copy(), tuple(ped.target))
-        return super().compute_next_state(dt, ped, geometry, neighborhood_search)
+        self.captured[ped.id] = (
+            np.asarray(obs, dtype=np.float64).copy(),
+            tuple(ped.final_target),
+        )
+        return super().compute_next_state(dt, ped, env_query)
 
 
 def _training_world(targets: list[tuple[float, float]]) -> WorldState:
@@ -109,7 +113,8 @@ def _training_world(targets: list[tuple[float, float]]) -> WorldState:
 def parity(obs_config: ObsConfig | None = None):
     """Run one JuPedSim step, capturing each agent's adapter-side observation."""
     config = obs_config or ObsConfig()
-    model = _RecordingModel(ConstantPolicy(HOLD), obs_config=config)
+    # ConstantPolicy carries no embedded metadata, so both configs are explicit.
+    model = _RecordingModel(ConstantPolicy(HOLD), obs_config=config, action_config=ActionConfig())
 
     # dt=0.01 matches CrowdEnvConfig.dt; see the note in test_model.py::_sim.
     sim = jps.Simulation(model=model, geometry=ROOM, dt=0.01)
@@ -125,8 +130,9 @@ def parity(obs_config: ObsConfig | None = None):
         for spec in AGENTS
     ]
 
-    # One iteration: routing sets each target, then the operational step runs and
-    # the model records the observation it built from the pre-step state.
+    # One iteration: routing sets each agent's final_target/next_target, then
+    # the operational step runs and the model records the observation it built
+    # from the pre-step state.
     sim.iterate()
 
     assert len(model.captured) == len(AGENTS), "every agent should have been visited"
