@@ -17,7 +17,7 @@ from crowdrl_jupedsim.policy import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
-    from crowdrl_jupedsim.model import CrowdRLAgentState, LearnedPolicyModel
+    from crowdrl_jupedsim.model import CrowdRLAgentState, LearnedPolicyModel, TemporalMemory
 
 __all__ = [
     "ConstantPolicy",
@@ -26,10 +26,11 @@ __all__ = [
     "OnnxPolicy",
     "Policy",
     "PolicyMetadata",
+    "TemporalMemory",
     "resolve_configs",
 ]
 
-_MODEL_EXPORTS = {"CrowdRLAgentState", "LearnedPolicyModel"}
+_MODEL_EXPORTS = {"CrowdRLAgentState", "LearnedPolicyModel", "TemporalMemory"}
 
 
 def __getattr__(name: str):

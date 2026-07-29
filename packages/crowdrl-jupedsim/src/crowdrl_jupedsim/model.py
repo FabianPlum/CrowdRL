@@ -61,6 +61,31 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
+@dataclass(frozen=True)
+class TemporalMemory:
+    """Per-agent trajectory memory backing the temporal observation block.
+
+    Mirrors the state CrowdEnv keeps per agent (spawn, initial goal distance,
+    cumulative path, position/goal-distance ring buffers, step count) with the
+    exact same ring-buffer contract: all slots initialised to the spawn
+    values, the post-step position written at index ``step_count % buf_size``
+    (pre-step count), then the count incremented.
+
+    The ndarray fields are treated as immutable by convention: every update
+    copies before writing (see ``LearnedPolicyModel._advance_memory``),
+    because this object is shared live with the running simulation.
+    """
+
+    spawn_position: tuple[float, float]
+    initial_goal_distance: float
+    cumulative_path_length: float
+    step_count: int
+    pos_history: NDArray[np.float64]
+    """(buf_size, 2) ring buffer of post-step positions."""
+    gdist_history: NDArray[np.float64]
+    """(buf_size,) ring buffer of post-step goal distances."""
+
+
 @dataclass(frozen=True, kw_only=True)
 class CrowdRLAgentState:
     """Per-agent state for a CrowdRL-driven JuPedSim agent.
@@ -95,6 +120,12 @@ class CrowdRLAgentState:
 
     mass: float = 80.0
     preferred_speed: float = 1.34
+
+    memory: TemporalMemory | None = None
+    """Trajectory memory for the temporal observation block. Leave None at
+    ``add_agent``: the spawn position and routed goal are only knowable after
+    the first routing pass, so the model initialises it lazily on the agent's
+    first ``compute_next_state`` (when ``ObsConfig.use_temporal_memory``)."""
 
 
 class LearnedPolicyModel(CustomOperationalModel):
@@ -171,6 +202,53 @@ class LearnedPolicyModel(CustomOperationalModel):
         )
         self.keep_inside_geometry = keep_inside_geometry
 
+    # -- temporal memory ------------------------------------------------------
+
+    def _ensure_memory(self, state: CrowdRLAgentState, goal) -> CrowdRLAgentState:
+        """Initialise trajectory memory on first contact, mirroring CrowdEnv
+        reset: every ring-buffer slot pre-filled with the spawn value."""
+        if not self.obs_config.use_temporal_memory or state.memory is not None:
+            return state
+        buf_size = self.obs_config.temporal_memory_window + 1
+        pos = np.asarray(state.position, dtype=np.float64)
+        gdist = float(np.linalg.norm(np.asarray(goal, dtype=np.float64) - pos))
+        memory = TemporalMemory(
+            spawn_position=(float(pos[0]), float(pos[1])),
+            initial_goal_distance=gdist,
+            cumulative_path_length=0.0,
+            step_count=0,
+            pos_history=np.tile(pos, (buf_size, 1)),
+            gdist_history=np.full(buf_size, gdist, dtype=np.float64),
+        )
+        return replace(state, memory=memory)
+
+    def _advance_memory(
+        self,
+        memory: TemporalMemory,
+        old_position: NDArray[np.float64],
+        new_position: NDArray[np.float64],
+        goal,
+    ) -> TemporalMemory:
+        """One step of the CrowdEnv ring-buffer contract: write the post-step
+        position/goal-distance at the pre-step count's slot, then increment."""
+        buf_size = self.obs_config.temporal_memory_window + 1
+        write_idx = memory.step_count % buf_size
+        pos_history = memory.pos_history.copy()
+        pos_history[write_idx] = new_position
+        gdist_history = memory.gdist_history.copy()
+        gdist_history[write_idx] = np.linalg.norm(
+            np.asarray(goal, dtype=np.float64) - new_position
+        )
+        return TemporalMemory(
+            spawn_position=memory.spawn_position,
+            initial_goal_distance=memory.initial_goal_distance,
+            cumulative_path_length=memory.cumulative_path_length
+            + float(np.linalg.norm(new_position - old_position)),
+            step_count=memory.step_count + 1,
+            pos_history=pos_history,
+            gdist_history=gdist_history,
+        )
+
     # -- observation assembly -------------------------------------------------
 
     def _walls(self, env_query, position: tuple[float, float]) -> NDArray[np.float64]:
@@ -197,6 +275,40 @@ class LearnedPolicyModel(CustomOperationalModel):
         # separate signal and feeds the navmesh observation block instead.
         goals = [ped.final_target] + [n.final_target for n in neighbors]
 
+        extra: dict = {}
+        if self.obs_config.use_temporal_memory:
+            ego_memory = self._ensure_memory(state, ped.final_target).memory
+            n = len(agents)
+            buf_size = self.obs_config.temporal_memory_window + 1
+            spawn = np.zeros((n, 2), dtype=np.float64)
+            init_g = np.zeros(n, dtype=np.float64)
+            cum = np.zeros(n, dtype=np.float64)
+            pos_h = np.zeros((n, buf_size, 2), dtype=np.float64)
+            g_h = np.zeros((n, buf_size), dtype=np.float64)
+            # The ego row (index 0) is the one the observation reads. Neighbour
+            # rows are copied from their own memory when initialised; note the
+            # world-level step_count below is the EGO's, so neighbour buffers
+            # written at different agent ages would misindex -- acceptable while
+            # only the ego's temporal block reads them, revisit before wiring
+            # use_neighbor_trajectory_features.
+            rows = [ego_memory] + [nb.model.memory for nb in neighbors]
+            for i, mem in enumerate(rows):
+                if mem is None:
+                    continue
+                spawn[i] = mem.spawn_position
+                init_g[i] = mem.initial_goal_distance
+                cum[i] = mem.cumulative_path_length
+                pos_h[i] = mem.pos_history
+                g_h[i] = mem.gdist_history
+            extra = {
+                "spawn_positions": spawn,
+                "initial_goal_distances": init_g,
+                "cumulative_path_length": cum,
+                "pos_history": pos_h,
+                "gdist_history": g_h,
+                "step_count": ego_memory.step_count if ego_memory is not None else 0,
+            }
+
         return WorldState(
             positions=np.array([a.position for a in agents], dtype=np.float64),
             velocities=np.array([a.velocity for a in agents], dtype=np.float64),
@@ -215,12 +327,16 @@ class LearnedPolicyModel(CustomOperationalModel):
             route_next_waypoints=np.array(
                 [ped.next_target] + [n.next_target for n in neighbors], dtype=np.float64
             ),
+            **extra,
         )
 
     # -- JuPedSim operational-model interface ---------------------------------
 
     def compute_next_state(self, dt, ped, env_query) -> CrowdRLAgentState:
-        state = ped.model
+        # Lazy-init trajectory memory (no-op unless use_temporal_memory); the
+        # observation this step reads the PRE-step memory, the returned state
+        # carries the advanced one.
+        state = self._ensure_memory(ped.model, ped.final_target)
 
         world = self.build_world_state(ped, env_query)
         obs = build_observation(world, 0, self.obs_config)
@@ -256,6 +372,12 @@ class LearnedPolicyModel(CustomOperationalModel):
             new_position = position
             new_velocity = np.zeros(2, dtype=np.float64)
 
+        # Advance memory on the FINAL position (post-containment), matching
+        # the training env, which records post-step, post-collision positions.
+        memory = state.memory
+        if memory is not None:
+            memory = self._advance_memory(memory, position, new_position, ped.final_target)
+
         return replace(
             state,
             position=(float(new_position[0]), float(new_position[1])),
@@ -263,4 +385,5 @@ class LearnedPolicyModel(CustomOperationalModel):
             heading=result.new_heading,
             torso_angle=result.new_torso_orientation,
             head_angle=result.new_head_orientation,
+            memory=memory,
         )

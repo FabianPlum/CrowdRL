@@ -246,6 +246,81 @@ class TestSimulationIntegration:
                 )
 
 
+class TestTemporalMemory:
+    """The adapter must replicate CrowdEnv's ring-buffer contract exactly --
+    an off-by-one here corrupts the policy's time-pressure and progress
+    signals without ever crashing."""
+
+    CFG = ObsConfig(use_temporal_memory=True, temporal_memory_window=4)  # buf_size 5
+
+    def test_lazy_init_mirrors_crowdenv_reset(self):
+        model = _model(obs_config=self.CFG)
+        state = CrowdRLAgentState(position=(2.0, 10.0))
+        mem = model._ensure_memory(state, (19.0, 10.0)).memory
+
+        assert mem.step_count == 0
+        assert mem.spawn_position == (2.0, 10.0)
+        assert mem.initial_goal_distance == pytest.approx(17.0)
+        assert mem.cumulative_path_length == 0.0
+        np.testing.assert_allclose(mem.pos_history, np.tile([2.0, 10.0], (5, 1)))
+        np.testing.assert_allclose(mem.gdist_history, np.full(5, 17.0))
+
+    def test_advance_writes_post_step_position_at_pre_step_slot(self):
+        model = _model(obs_config=self.CFG)
+        state = model._ensure_memory(CrowdRLAgentState(position=(2.0, 10.0)), (19.0, 10.0))
+        mem = model._advance_memory(
+            state.memory, np.array([2.0, 10.0]), np.array([2.5, 10.0]), (19.0, 10.0)
+        )
+
+        assert mem.step_count == 1
+        np.testing.assert_allclose(mem.pos_history[0], [2.5, 10.0])  # write_idx = 0
+        assert mem.gdist_history[0] == pytest.approx(16.5)
+        assert mem.cumulative_path_length == pytest.approx(0.5)
+        # Untouched slots keep the spawn fill; the source memory is unchanged
+        # (copy-on-write -- it is shared live with the simulation).
+        np.testing.assert_allclose(mem.pos_history[1], [2.0, 10.0])
+        np.testing.assert_allclose(state.memory.pos_history[0], [2.0, 10.0])
+
+    def test_simulation_accumulates_memory(self):
+        model = _model(obs_config=self.CFG)
+        sim, exit_id, journey_id = _sim(model)
+        agent_id = sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(2.0, 10.0)),
+        )
+
+        positions = []
+        for _ in range(3):
+            sim.iterate()
+            positions.append(np.asarray(sim.agent(agent_id).model.position))
+
+        mem = sim.agent(agent_id).model.memory
+        assert mem is not None and mem.step_count == 3
+        for k in range(3):
+            np.testing.assert_allclose(mem.pos_history[k], positions[k], atol=1e-12)
+        assert mem.spawn_position == (2.0, 10.0)
+        assert mem.cumulative_path_length == pytest.approx(
+            sum(
+                float(np.linalg.norm(b - a))
+                for a, b in zip([np.array([2.0, 10.0])] + positions[:-1], positions)
+            )
+        )
+
+    def test_deployment_obs_width_is_89d(self):
+        """The current best checkpoints' shape: nogoaldir + navmesh + temporal.
+        All three optional blocks must materialise from adapter-supplied state."""
+        cfg = ObsConfig(use_navmesh=True, use_goal_direction=False, use_temporal_memory=True)
+        model = _model(obs_config=cfg)
+        ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 5.0)), target=(19.0, 5.0))
+
+        world = model.build_world_state(ego, _StubEnvQuery())
+        obs = build_observation(world, 0, cfg)
+
+        assert cfg.obs_dim == 89
+        assert obs.shape == (89,)
+
+
 class _StubWall:
     """Stand-in for a JuPedSim LineSegment (exposes p1 / p2 endpoints)."""
 
