@@ -80,7 +80,11 @@ BOTTLENECK_SPAWNS = [
 
 
 def run_scenario(model, area, exit_poly, spawns, max_steps):
-    """Drive one simulation to completion; return (sim, steps, ids, trajectories)."""
+    """Drive one simulation to completion.
+
+    Returns (sim, steps, ids, trajectories, min_pairwise) where min_pairwise
+    is the smallest centre-to-centre agent distance observed at any step.
+    """
     sim = jps.Simulation(model=model, geometry=area, dt=0.01)
     exit_id = sim.add_exit_stage(exit_poly)
     journey_id = sim.add_journey(jps.JourneyDescription([exit_id]))
@@ -90,17 +94,25 @@ def run_scenario(model, area, exit_poly, spawns, max_steps):
     ]
 
     trajectories: dict[int, list[tuple[float, float]]] = {i: [] for i in ids}
+    min_pairwise = np.inf
     steps = 0
     while sim.agent_count() > 0 and steps < max_steps:
         sim.iterate()
         steps += 1
+        positions = []
         for agent in sim.agents():
             trajectories[agent.id].append(tuple(agent.position))
+            positions.append(agent.position)
+        if len(positions) >= 2:
+            pos = np.asarray(positions)
+            dists = np.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
+            np.fill_diagonal(dists, np.inf)
+            min_pairwise = min(min_pairwise, float(dists.min()))
 
-    return sim, steps, ids, trajectories
+    return sim, steps, ids, trajectories, min_pairwise
 
 
-def assert_all_exited(sim, steps, ids, trajectories):
+def assert_all_exited(sim, steps, ids, trajectories, *_):
     stuck = {i: t[-1] for i, t in trajectories.items() if t and sim.agent_count() > 0}
     assert sim.agent_count() == 0, (
         f"{sim.agent_count()}/{len(ids)} agents still in the simulation "
@@ -119,11 +131,12 @@ def assert_inside(area, trajectories):
 
 @pytest.mark.skipif(not EXAMPLE_MODEL.is_file(), reason="shipped example model missing")
 class TestSelfConfiguredCorner:
-    """The shipped artefact, zero hand-supplied configuration."""
+    """The shipped artefact: config AND physics need nothing beyond the
+    geometry the simulation already uses."""
 
     @pytest.fixture(scope="class")
     def result(self):
-        model = LearnedPolicyModel(OnnxPolicy(EXAMPLE_MODEL))  # self-configured
+        model = LearnedPolicyModel(OnnxPolicy(EXAMPLE_MODEL), walkable_geometry=CORNER_AREA)
         return run_scenario(model, CORNER_AREA, CORNER_EXIT, CORNER_SPAWNS, max_steps=4000)
 
     def test_every_agent_reaches_the_exit(self, result):
@@ -132,7 +145,7 @@ class TestSelfConfiguredCorner:
     def test_agents_actually_rounded_the_corner(self, result):
         """The route must pass through the vertical corridor -- the pre-#1626
         failure mode was every agent pinned at the lower wall (y=2.0)."""
-        _, _, _, trajectories = result
+        trajectories = result[3]
         for agent_id, traj in trajectories.items():
             ys = np.array([p[1] for p in traj])
             assert ys.max() > 9.0, (
@@ -141,24 +154,33 @@ class TestSelfConfiguredCorner:
             )
 
     def test_no_agent_left_the_walkable_area(self, result):
-        _, _, _, trajectories = result
-        assert_inside(CORNER_AREA, trajectories)
+        assert_inside(CORNER_AREA, result[3])
+
+    def test_bodies_keep_clear_of_walls(self, result):
+        """Agent centres must stay one body radius (0.225 m) off the walls --
+        the centre-at-the-wall clipping is exactly the regression this pins."""
+        trajectories = result[3]
+        boundary = CORNER_AREA.boundary
+        for agent_id, traj in trajectories.items():
+            for x, y in traj[:: max(1, len(traj) // 200)]:
+                dist = boundary.distance(shapely.Point(x, y))
+                assert dist >= 0.225 - 1e-6, (
+                    f"agent {agent_id} centre came within {dist:.3f} m of a wall"
+                )
 
 
 @pytest.mark.skipif(not EXAMPLE_MODEL.is_file(), reason="shipped example model missing")
 class TestSelfConfiguredBottleneck:
     """Crowd behaviour, not just solo navigation: 12 agents, 1.4 m aperture.
 
-    Known gap, deliberately not asserted on: without contact forces in the
-    adapter (walking-skeleton scope) agents can interpenetrate in the neck --
-    observed min pairwise distance ~0.04 m on this scenario. Navigation and
-    throughput are what this pins; spacing discipline needs the shared
-    contact-force module before it can be a test criterion.
+    With training-parity contact physics active (walkable_geometry given),
+    spacing is a real criterion: pre-physics this scenario bottomed out at
+    ~0.04 m centre distance (agents ghosting through each other in the neck).
     """
 
     @pytest.fixture(scope="class")
     def result(self):
-        model = LearnedPolicyModel(OnnxPolicy(EXAMPLE_MODEL))  # self-configured
+        model = LearnedPolicyModel(OnnxPolicy(EXAMPLE_MODEL), walkable_geometry=BOTTLENECK_AREA)
         return run_scenario(
             model, BOTTLENECK_AREA, BOTTLENECK_EXIT, BOTTLENECK_SPAWNS, max_steps=6000
         )
@@ -167,14 +189,22 @@ class TestSelfConfiguredBottleneck:
         assert_all_exited(*result)
 
     def test_every_agent_passed_the_aperture(self, result):
-        _, _, _, trajectories = result
+        trajectories = result[3]
         for agent_id, traj in trajectories.items():
             xs = np.array([p[0] for p in traj])
             assert xs.max() > 7.2, f"agent {agent_id} never cleared the neck"
 
     def test_no_agent_left_the_walkable_area(self, result):
-        _, _, _, trajectories = result
-        assert_inside(BOTTLENECK_AREA, trajectories)
+        assert_inside(BOTTLENECK_AREA, result[3])
+
+    def test_agents_keep_body_scale_separation(self, result):
+        """The spring-damper contact must keep centres at body scale even in
+        the squeeze -- the pre-physics floor was ~0.04 m."""
+        min_pairwise = result[4]
+        assert min_pairwise > 0.2, (
+            f"min centre-to-centre distance {min_pairwise:.3f} m -- contact "
+            "forces failed to hold body-scale separation"
+        )
 
 
 @pytest.mark.skipif(
@@ -202,6 +232,7 @@ class TestLegacyPathCorner:
                 policy,
                 obs_config=env_config.obs,
                 action_config=env_config.action,
+                walkable_geometry=CORNER_AREA,
                 desired_velocity_weight=env_config.desired_velocity_weight,
             )
         return run_scenario(model, CORNER_AREA, CORNER_EXIT, CORNER_SPAWNS, max_steps=4000)
@@ -210,5 +241,4 @@ class TestLegacyPathCorner:
         assert_all_exited(*result)
 
     def test_no_agent_left_the_walkable_area(self, result):
-        _, _, _, trajectories = result
-        assert_inside(CORNER_AREA, trajectories)
+        assert_inside(CORNER_AREA, result[3])
