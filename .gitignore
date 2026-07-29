@@ -39,8 +39,9 @@ Thumbs.db
 htmlcov/
 .mypy_cache/
 
-# ONNX artifacts
+# ONNX artifacts (except the shipped, self-describing example model)
 *.onnx
+!example_model/*.onnx
 
 # Jupyter
 .ipynb_checkpoints/
