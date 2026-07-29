@@ -31,24 +31,36 @@ the assembled WorldState, so rays intersect both, exactly as in training. The
 query radii are derived from ``ObsConfig.raycast.max_range`` so nothing inside
 ray range is ever missing from the world the policy sees.
 
-Scope note (walking skeleton): contact forces, navmesh waypoint signals and the
-temporal/neighbour-memory observation blocks are not yet wired. Observation
-parity with training is therefore only guaranteed for an ``ObsConfig`` that
-leaves those disabled; see the obs-parity harness.
+Navmesh (route-waypoint) and temporal-memory observation blocks are wired, and
+contact physics (agent-agent contact forces + body-clearance wall projection,
+the same crowdrl-core functions the training env runs) is active whenever
+``walkable_geometry`` is passed -- without it the model falls back to a coarse
+centre-point containment check and warns.
+
+Scope note: the neighbour-memory observation blocks (A+/A++,
+``use_neighbor_vel_history`` / ``use_neighbor_trajectory_features``) are not
+yet wired; observation parity is only guaranteed for configs that leave those
+disabled. See the obs-parity harness.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from crowdrl_core.action import ActionConfig, interpret_action
+from crowdrl_core.collision import compute_contact_forces, enforce_wall_boundaries
 from crowdrl_core.observation import ObsConfig, build_observation
 from crowdrl_core.world_state import WorldState
 
 from .policy import Policy, resolve_configs
+
+if TYPE_CHECKING:  # pragma: no cover
+    from shapely import Polygon
 
 try:  # pragma: no cover - import shape depends on how jupedsim 2.0 is provided
     from jupedsim.models.custom_model import CustomOperationalModel
@@ -137,8 +149,11 @@ class LearnedPolicyModel(CustomOperationalModel):
         *,
         obs_config: ObsConfig | None = None,
         action_config: ActionConfig | None = None,
+        walkable_geometry: Polygon | None = None,
         desired_velocity_weight: float = 0.05,
         max_velocity_magnitude: float = 5.0,
+        contact_stiffness: float = 30000.0,
+        contact_damping: float = 500.0,
         neighbor_radius: float | None = None,
         wall_query_radius: float | None = None,
         keep_inside_geometry: bool = True,
@@ -158,6 +173,15 @@ class LearnedPolicyModel(CustomOperationalModel):
         action_config
             Action limits used during training; same resolution rules as
             ``obs_config``.
+        walkable_geometry
+            The same shapely Polygon passed to ``jps.Simulation(geometry=...)``.
+            When given, the model runs the training env's contact physics each
+            step: agent-agent contact forces and body-clearance wall
+            projection (``enforce_wall_boundaries``; clearance =
+            max(shoulder_width, chest_depth) per agent) -- the exact
+            crowdrl-core functions and ordering used in training. Without it,
+            only a coarse centre-point containment check runs, agent bodies
+            can clip walls and interpenetrate, and construction warns.
         desired_velocity_weight
             First-order velocity filter weight, mirroring
             ``CrowdEnvConfig.desired_velocity_weight``:
@@ -170,11 +194,12 @@ class LearnedPolicyModel(CustomOperationalModel):
         wall_query_radius
             Radius for the wall-segment query. Defaults to the raycast range.
         keep_inside_geometry
-            If the integrated position leaves the walkable area, hold position
+            Fallback containment when ``walkable_geometry`` is NOT given: if
+            the integrated position leaves the walkable area, hold position
             instead. JuPedSim applies the returned position verbatim and a
             point outside the walkable area crashes the next iteration, so the
-            model is responsible for containment. This is a coarse placeholder
-            for proper wall handling.
+            model is responsible for containment. Superseded by the
+            body-clearance projection when ``walkable_geometry`` is provided.
         """
         super().__init__()
         self.policy = policy
@@ -182,8 +207,21 @@ class LearnedPolicyModel(CustomOperationalModel):
         # artefact's embedded metadata, cross-check anything explicit, refuse
         # legacy artefacts without explicit configs.
         self.obs_config, self.action_config = resolve_configs(policy, obs_config, action_config)
+        self.walkable_geometry = walkable_geometry
+        if walkable_geometry is None:
+            warnings.warn(
+                "LearnedPolicyModel constructed without walkable_geometry: "
+                "contact forces and body-clearance wall projection are "
+                "DISABLED, so agent bodies can clip walls and interpenetrate "
+                "(the training env enforces both). Pass the same shapely "
+                "Polygon given to jps.Simulation(geometry=...).",
+                UserWarning,
+                stacklevel=2,
+            )
         self.desired_velocity_weight = float(desired_velocity_weight)
         self.max_velocity_magnitude = float(max_velocity_magnitude)
+        self.contact_stiffness = float(contact_stiffness)
+        self.contact_damping = float(contact_damping)
         # Rays intersect walls *and* other agents, so the neighbour query has to
         # cover the raycast horizon as well as the social one. If it did not,
         # an agent sitting beyond the social radius but inside ray range would
@@ -352,12 +390,25 @@ class LearnedPolicyModel(CustomOperationalModel):
             current_speed=float(np.linalg.norm(velocity)),
         )
 
-        # Integration mirrors CrowdEnv.step: first-order velocity filter, then a
-        # magnitude clamp, then semi-implicit Euler. Contact forces are absent
-        # here (skeleton) -- JuPedSim contributes none either, so agents can
-        # currently interpenetrate.
+        # Integration mirrors CrowdEnv.step, in the exact training order:
+        # velocity filter -> contact accelerations (pre-integration positions,
+        # post-filter velocities) -> magnitude clamp -> semi-implicit Euler ->
+        # body-clearance wall projection. The assembled ``world`` is transient
+        # and adapter-owned, so mutating the ego row is safe. One deviation is
+        # inherent to the per-agent compute-then-apply contract: neighbours are
+        # at their PRE-step positions when the ego's contact forces are
+        # computed, whereas training computes all forces from one synchronized
+        # snapshot -- a single-step staleness, not a systematic bias.
         w = self.desired_velocity_weight
         new_velocity = w * result.desired_velocity + (1.0 - w) * velocity
+
+        physics = self.walkable_geometry is not None
+        if physics:
+            world.velocities[0] = new_velocity
+            accel = compute_contact_forces(
+                world, stiffness=self.contact_stiffness, damping=self.contact_damping
+            )[0]
+            new_velocity = new_velocity + accel * dt
 
         speed = float(np.linalg.norm(new_velocity))
         if speed > self.max_velocity_magnitude:
@@ -366,7 +417,14 @@ class LearnedPolicyModel(CustomOperationalModel):
         position = np.asarray(state.position, dtype=np.float64)
         new_position = position + new_velocity * dt
 
-        if self.keep_inside_geometry and not env_query.inside_geometry(
+        if physics:
+            world.positions[0] = new_position
+            world.velocities[0] = new_velocity
+            world.walkable_polygon = self.walkable_geometry
+            enforce_wall_boundaries(world)  # corrects the ego row in place
+            new_position = world.positions[0]
+            new_velocity = world.velocities[0]
+        elif self.keep_inside_geometry and not env_query.inside_geometry(
             (float(new_position[0]), float(new_position[1]))
         ):
             new_position = position

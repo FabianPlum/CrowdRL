@@ -37,10 +37,13 @@ def _model(**kwargs) -> LearnedPolicyModel:
 
     ConstantPolicy carries no embedded config metadata and issue #7 removed
     the silent ObsConfig()/ActionConfig() fallback, so the configs these tests
-    always ran with are now stated explicitly.
+    always ran with are now stated explicitly. walkable_geometry defaults to
+    the same room the sim fixture uses, turning on training-parity contact
+    physics (pass walkable_geometry=None explicitly to exercise the fallback).
     """
     kwargs.setdefault("obs_config", ObsConfig())
     kwargs.setdefault("action_config", ActionConfig())
+    kwargs.setdefault("walkable_geometry", _room())
     return LearnedPolicyModel(ConstantPolicy(FORWARD), **kwargs)
 
 
@@ -244,6 +247,72 @@ class TestSimulationIntegration:
                 assert 0.0 <= x <= 20.0 and 0.0 <= y <= 20.0, (
                     f"agent left the walkable area at ({x}, {y})"
                 )
+
+
+class TestContactPhysics:
+    """Training-parity contact physics: the crowd_env step's contact forces +
+    body-clearance wall projection, active when walkable_geometry is given."""
+
+    def test_construction_without_geometry_warns(self):
+        with pytest.warns(UserWarning, match="walkable_geometry"):
+            _model(walkable_geometry=None)
+
+    def test_wall_clearance_is_enforced(self):
+        """An agent driving straight at a wall must be held one body radius
+        (max(shoulder, chest) = 0.225 m default) off the boundary -- not just
+        its centre point inside, which was the pre-physics behaviour."""
+        room = _room()
+        model = _model()
+        sim, exit_id, journey_id = _sim(model)
+        # Spawn near the right wall, heading +x, away from the exit slot.
+        agent_id = sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(18.0, 3.0)),
+        )
+
+        min_boundary_dist = np.inf
+        for _ in range(400):
+            if sim.agent_count() == 0:
+                break
+            sim.iterate()
+            if sim.agent_count() > 0:
+                point = shapely.Point(sim.agent(agent_id).position)
+                min_boundary_dist = min(min_boundary_dist, room.boundary.distance(point))
+
+        assert min_boundary_dist >= 0.225 - 1e-6, (
+            f"agent centre came within {min_boundary_dist:.3f} m of the wall; "
+            "body clearance (0.225 m) must hold"
+        )
+
+    def test_head_on_agents_do_not_pass_through(self):
+        """Two agents driven straight at each other. Without contact forces
+        they ghost through one another; the spring-damper contact must keep
+        their centres apart at roughly body scale."""
+        model = _model()
+        sim, exit_id, journey_id = _sim(model)
+        a = sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(8.0, 10.0), heading=0.0, torso_angle=0.0),
+        )
+        b = sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(12.0, 10.0), heading=np.pi, torso_angle=np.pi),
+        )
+
+        min_dist = np.inf
+        for _ in range(600):
+            sim.iterate()
+            pa = np.asarray(sim.agent(a).position)
+            pb = np.asarray(sim.agent(b).position)
+            min_dist = min(min_dist, float(np.linalg.norm(pa - pb)))
+
+        # Head-on ellipse contact is at 2 x chest_depth = 0.30 m; the spring
+        # is soft, so allow transient compression but nothing like the
+        # pre-physics pass-through (which reached ~0).
+        assert min_dist > 0.2, f"agents interpenetrated: min centre distance {min_dist:.3f} m"
 
 
 class TestTemporalMemory:

@@ -114,7 +114,12 @@ def parity(obs_config: ObsConfig | None = None):
     """Run one JuPedSim step, capturing each agent's adapter-side observation."""
     config = obs_config or ObsConfig()
     # ConstantPolicy carries no embedded metadata, so both configs are explicit.
-    model = _RecordingModel(ConstantPolicy(HOLD), obs_config=config, action_config=ActionConfig())
+    model = _RecordingModel(
+        ConstantPolicy(HOLD),
+        obs_config=config,
+        action_config=ActionConfig(),
+        walkable_geometry=ROOM,
+    )
 
     # dt=0.01 matches CrowdEnvConfig.dt; see the note in test_model.py::_sim.
     sim = jps.Simulation(model=model, geometry=ROOM, dt=0.01)
