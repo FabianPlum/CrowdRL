@@ -46,7 +46,7 @@ from crowdrl_core.action import ActionConfig, interpret_action
 from crowdrl_core.observation import ObsConfig, build_observation
 from crowdrl_core.world_state import WorldState
 
-from .policy import Policy
+from .policy import Policy, resolve_configs
 
 try:  # pragma: no cover - import shape depends on how jupedsim 2.0 is provided
     from jupedsim.models.custom_model import CustomOperationalModel
@@ -116,12 +116,15 @@ class LearnedPolicyModel(CustomOperationalModel):
         policy
             Maps one observation vector to a raw 4D action in [-1, 1].
         obs_config
-            **Must match the config the checkpoint was trained with.** A
-            mismatch (e.g. the ``use_goal_direction`` ablation) silently
-            produces a differently-shaped world and wrong actions, so prefer
-            loading this from the run's ``config_resolved.yaml``.
+            Normally omitted: artefacts exported since issue #7 embed the
+            training config, and the model self-configures from it. When
+            given, it is cross-checked field-for-field against the embedded
+            record and any disagreement raises. Required (with a warning)
+            only for legacy artefacts without metadata -- rebuild it from the
+            run's ``config_resolved.yaml``.
         action_config
-            Action limits used during training.
+            Action limits used during training; same resolution rules as
+            ``obs_config``.
         desired_velocity_weight
             First-order velocity filter weight, mirroring
             ``CrowdEnvConfig.desired_velocity_weight``:
@@ -142,8 +145,10 @@ class LearnedPolicyModel(CustomOperationalModel):
         """
         super().__init__()
         self.policy = policy
-        self.obs_config = obs_config if obs_config is not None else ObsConfig()
-        self.action_config = action_config if action_config is not None else ActionConfig()
+        # Issue #7: no silent ObsConfig() fallback. Self-configure from the
+        # artefact's embedded metadata, cross-check anything explicit, refuse
+        # legacy artefacts without explicit configs.
+        self.obs_config, self.action_config = resolve_configs(policy, obs_config, action_config)
         self.desired_velocity_weight = float(desired_velocity_weight)
         self.max_velocity_magnitude = float(max_velocity_magnitude)
         # Rays intersect walls *and* other agents, so the neighbour query has to

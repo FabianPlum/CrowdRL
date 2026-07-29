@@ -19,6 +19,7 @@ pytest.importorskip(
 import shapely  # noqa: E402
 
 import jupedsim as jps  # noqa: E402
+from crowdrl_core.action import ActionConfig  # noqa: E402
 from crowdrl_core.observation import ObsConfig, build_observation  # noqa: E402
 from crowdrl_core.sensing import RaycastConfig  # noqa: E402
 from crowdrl_jupedsim import (  # noqa: E402
@@ -29,6 +30,18 @@ from crowdrl_jupedsim import (  # noqa: E402
 
 # Drive straight ahead at max forward speed, no turning.
 FORWARD = [1.0, 0.0, 0.0, 0.0]
+
+
+def _model(**kwargs) -> LearnedPolicyModel:
+    """LearnedPolicyModel over a ConstantPolicy with explicit default configs.
+
+    ConstantPolicy carries no embedded config metadata and issue #7 removed
+    the silent ObsConfig()/ActionConfig() fallback, so the configs these tests
+    always ran with are now stated explicitly.
+    """
+    kwargs.setdefault("obs_config", ObsConfig())
+    kwargs.setdefault("action_config", ActionConfig())
+    return LearnedPolicyModel(ConstantPolicy(FORWARD), **kwargs)
 
 
 def _room() -> shapely.Polygon:
@@ -95,7 +108,7 @@ class TestCrowdRLAgentState:
 
 class TestWorldStateAssembly:
     def test_ego_is_index_zero_and_self_is_excluded(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
 
         ego_state = CrowdRLAgentState(position=(5.0, 5.0), velocity=(1.0, 0.0))
         ego = _StubAgent(0, ego_state, target=(19.0, 10.0))
@@ -112,7 +125,7 @@ class TestWorldStateAssembly:
         world.validate()
 
     def test_wall_segments_are_shaped_for_crowdrl_core(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         ego = _StubAgent(0, CrowdRLAgentState(position=(5.0, 5.0)), target=(19.0, 10.0))
         world = model.build_world_state(ego, _StubGeometry(), _StubNeighborhood([]))
         assert world.wall_segments.shape == (0, 2, 2)
@@ -120,7 +133,7 @@ class TestWorldStateAssembly:
 
 class TestSimulationIntegration:
     def test_agent_advances_toward_the_routing_target(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         sim, exit_id, journey_id = _sim(model)
         start = (2.0, 10.0)
         agent_id = sim.add_agent(
@@ -137,7 +150,7 @@ class TestSimulationIntegration:
         )
 
     def test_agent_reaches_the_exit(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         sim, exit_id, journey_id = _sim(model)
         sim.add_agent(
             journey_id=journey_id,
@@ -156,7 +169,7 @@ class TestSimulationIntegration:
         """Guards the dataclasses.replace contract: compute_next_state must
         carry state forward, not rebuild it from defaults. A silent reset here
         would corrupt the policy's observations without ever crashing."""
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         sim, exit_id, journey_id = _sim(model)
         agent_id = sim.add_agent(
             journey_id=journey_id,
@@ -184,7 +197,7 @@ class TestSimulationIntegration:
     def test_velocity_filter_ramps_rather_than_jumping(self):
         """v_new = w*v_desired + (1-w)*v_old, mirroring CrowdEnv.step -- so the
         first step must not reach max forward speed immediately."""
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD), desired_velocity_weight=0.05)
+        model = _model(desired_velocity_weight=0.05)
         sim, exit_id, journey_id = _sim(model)
         agent_id = sim.add_agent(
             journey_id=journey_id,
@@ -203,7 +216,7 @@ class TestSimulationIntegration:
         """JuPedSim applies the returned position verbatim and crashes on the
         next iteration if it is outside the walkable area, so containment is
         the model's responsibility."""
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         sim, exit_id, journey_id = _sim(model)
         # Head straight at the right wall, away from the exit slot.
         agent_id = sim.add_agent(
@@ -250,7 +263,7 @@ class TestRaycasting:
         return obs[-model.obs_config.raycast.n_rays :]
 
     def test_open_space_reads_clear(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         ego = _StubAgent(
             0, CrowdRLAgentState(position=(5.0, 5.0), head_angle=0.0), target=(19.0, 5.0)
         )
@@ -258,7 +271,7 @@ class TestRaycasting:
         assert np.allclose(self._rays(model, world), 1.0), "no geometry -> all rays clear"
 
     def test_rays_detect_a_wall_ahead(self):
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         ego = _StubAgent(
             0, CrowdRLAgentState(position=(5.0, 5.0), head_angle=0.0), target=(19.0, 5.0)
         )
@@ -274,7 +287,7 @@ class TestRaycasting:
 
     def test_rays_detect_a_neighbouring_agent(self):
         """Rays intersect agent collision boundaries, not just walls."""
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD))
+        model = _model()
         ego = _StubAgent(
             0, CrowdRLAgentState(position=(5.0, 5.0), head_angle=0.0), target=(19.0, 5.0)
         )
@@ -294,7 +307,7 @@ class TestRaycasting:
         """Regression guard: hardcoding the radii would make walls and agents
         beyond 5 m invisible for a policy trained with longer rays."""
         cfg = ObsConfig(raycast=RaycastConfig(max_range=12.0))
-        model = LearnedPolicyModel(ConstantPolicy(FORWARD), obs_config=cfg)
+        model = _model(obs_config=cfg)
 
         assert model.wall_query_radius == pytest.approx(12.0)
         assert model.neighbor_radius >= 12.0, (
@@ -302,8 +315,6 @@ class TestRaycasting:
         )
 
     def test_explicit_radii_override_the_defaults(self):
-        model = LearnedPolicyModel(
-            ConstantPolicy(FORWARD), neighbor_radius=3.0, wall_query_radius=4.0
-        )
+        model = _model(neighbor_radius=3.0, wall_query_radius=4.0)
         assert model.neighbor_radius == pytest.approx(3.0)
         assert model.wall_query_radius == pytest.approx(4.0)

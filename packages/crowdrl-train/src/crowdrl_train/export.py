@@ -22,22 +22,21 @@ import torch
 import torch.nn as nn
 
 from crowdrl_core.action import ActionConfig
-from crowdrl_core.config_io import action_config_to_dict, obs_config_to_dict
+from crowdrl_core.config_io import (
+    META_ACTION_CONFIG_KEY,
+    META_ACTION_DIM_KEY,
+    META_OBS_CONFIG_KEY,
+    META_OBS_DIM_KEY,
+    META_PROVENANCE_KEY,
+    META_SCHEMA_KEY,
+    METADATA_SCHEMA_VERSION,
+    action_config_to_dict,
+    obs_config_to_dict,
+)
 from crowdrl_core.observation import ObsConfig
 
 from crowdrl_train.networks import Actor
 from crowdrl_train.normalizer import RunningNormalizer
-
-# metadata_props keys for the embedded training configuration (issue #7).
-# The deployment reader (crowdrl_jupedsim.policy.OnnxPolicy) matches on these
-# exact names; bump METADATA_SCHEMA_VERSION when their meaning changes.
-METADATA_SCHEMA_VERSION = "1"
-META_SCHEMA_KEY = "crowdrl.schema_version"
-META_OBS_CONFIG_KEY = "crowdrl.obs_config"
-META_ACTION_CONFIG_KEY = "crowdrl.action_config"
-META_OBS_DIM_KEY = "crowdrl.obs_dim"
-META_ACTION_DIM_KEY = "crowdrl.action_dim"
-META_PROVENANCE_KEY = "crowdrl.provenance"
 
 
 class PolicyForExport(nn.Module):

@@ -36,11 +36,31 @@ from crowdrl_core.observation import ObsConfig
 from crowdrl_core.sensing import RaycastConfig
 
 __all__ = [
+    "META_ACTION_CONFIG_KEY",
+    "META_ACTION_DIM_KEY",
+    "META_OBS_CONFIG_KEY",
+    "META_OBS_DIM_KEY",
+    "META_PROVENANCE_KEY",
+    "META_SCHEMA_KEY",
+    "METADATA_SCHEMA_VERSION",
     "action_config_from_dict",
     "action_config_to_dict",
     "obs_config_from_dict",
     "obs_config_to_dict",
 ]
+
+# ONNX metadata_props keys for the embedded training configuration (issue #7).
+# Written by crowdrl_train.export, read by crowdrl_jupedsim.policy; both sides
+# import the names from here so they cannot disagree. Bump
+# METADATA_SCHEMA_VERSION when the payload semantics change -- readers refuse
+# versions they do not know.
+METADATA_SCHEMA_VERSION = "1"
+META_SCHEMA_KEY = "crowdrl.schema_version"
+META_OBS_CONFIG_KEY = "crowdrl.obs_config"
+META_ACTION_CONFIG_KEY = "crowdrl.action_config"
+META_OBS_DIM_KEY = "crowdrl.obs_dim"
+META_ACTION_DIM_KEY = "crowdrl.action_dim"
+META_PROVENANCE_KEY = "crowdrl.provenance"
 
 
 def _checked_kwargs(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:

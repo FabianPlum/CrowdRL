@@ -6,8 +6,18 @@ crowdrl-env or crowdrl-train. The only artefact crossing from the training side
 is an ``.onnx`` file.
 """
 
-from crowdrl_jupedsim.model import CrowdRLAgentState, LearnedPolicyModel
-from crowdrl_jupedsim.policy import ConstantPolicy, OnnxPolicy, Policy
+from typing import TYPE_CHECKING
+
+from crowdrl_jupedsim.policy import (
+    ConstantPolicy,
+    OnnxPolicy,
+    Policy,
+    PolicyMetadata,
+    resolve_configs,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from crowdrl_jupedsim.model import CrowdRLAgentState, LearnedPolicyModel
 
 __all__ = [
     "ConstantPolicy",
@@ -15,4 +25,25 @@ __all__ = [
     "LearnedPolicyModel",
     "OnnxPolicy",
     "Policy",
+    "PolicyMetadata",
+    "resolve_configs",
 ]
+
+_MODEL_EXPORTS = {"CrowdRLAgentState", "LearnedPolicyModel"}
+
+
+def __getattr__(name: str):
+    """Import the operational-model classes lazily (PEP 562).
+
+    ``crowdrl_jupedsim.model`` requires a JuPedSim 2.0 source build, which is
+    provided out-of-band (see pyproject.toml). Deferring its import keeps the
+    jupedsim-free surface -- ``OnnxPolicy``, ``PolicyMetadata``,
+    ``resolve_configs`` -- importable everywhere (CI has no jupedsim), while
+    touching the model classes still raises the helpful install guidance from
+    ``crowdrl_jupedsim.model``.
+    """
+    if name in _MODEL_EXPORTS:
+        from crowdrl_jupedsim import model
+
+        return getattr(model, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
