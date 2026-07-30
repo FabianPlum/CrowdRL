@@ -5,9 +5,28 @@ description = "JuPedSim integration adapter for learned CrowdRL policies"
 requires-python = ">=3.12"
 dependencies = [
     "crowdrl-core",
-    "jupedsim>=1.0",
     "onnxruntime>=1.17",
 ]
+
+# NOTE: jupedsim is deliberately NOT declared as a resolvable dependency.
+#
+# This adapter targets JuPedSim 2.0's pure-Python operational-model layer
+# (jupedsim.models.custom_model.CustomOperationalModel). At time of writing that
+# layer exists only on upstream main and is NOT published to PyPI -- the latest
+# published line is 1.x, which lacks the custom-model API entirely. Declaring
+# `jupedsim>=1.0` here caused `uv sync` to install a 1.x wheel into
+# site-packages, which then silently shadows a local 2.0 source build.
+#
+# Provide JuPedSim 2.0 out-of-band: build it from source, then put both the
+# built extension and the Python package on sys.path -- e.g. a .pth file in the
+# venv's site-packages containing:
+#     <jupedsim-build>/lib                      # py_jupedsim.<abi>.pyd / .so
+#     <jupedsim-src>/python_modules/jupedsim    # the jupedsim package
+# (site-packages must not contain a competing jupedsim install, since .pth
+# entries are appended *after* site-packages on sys.path.)
+#
+# See plan/CrowdRL_Project_Plan_v9.md Section 3.6 for the operational-model
+# contract and the rationale.
 
 [tool.uv.sources]
 crowdrl-core = { workspace = true }

@@ -38,8 +38,16 @@ def save_checkpoint(
     curriculum: CurriculumManager,
     total_steps: int,
     rollout_count: int,
+    total_episodes: int | None = None,
 ) -> None:
-    """Save a training checkpoint."""
+    """Save a training checkpoint.
+
+    ``rollout_count`` must be the rollout index, not an episode count: it is
+    resumed as a rollout counter (it drives per-rollout seeding and checkpoint
+    naming), so storing episodes here makes a resumed run jump its seed
+    sequence forward by the episode-to-rollout ratio. Pass the episode total as
+    ``total_episodes`` if it is worth recording.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "actor_critic": actor_critic.state_dict(),
@@ -49,6 +57,8 @@ def save_checkpoint(
         "rollout_count": rollout_count,
         "curriculum": curriculum.state_dict(),
     }
+    if total_episodes is not None:
+        checkpoint["total_episodes"] = total_episodes
     if obs_normalizer is not None:
         checkpoint["obs_normalizer"] = obs_normalizer.state_dict()
     if reward_normalizer is not None:

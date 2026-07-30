@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "PyTorch-accelerated GPU environments for CrowdRL training"
 requires-python = ">=3.12"
 dependencies = [
-    "crowdrl-core",
+    # [geometry]: the episode factory builds navmeshes for generated geometry.
+    "crowdrl-core[geometry]",
     "crowdrl-env",
     "torch>=2.2",
 ]

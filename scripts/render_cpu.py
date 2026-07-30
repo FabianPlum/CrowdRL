@@ -106,7 +106,7 @@ def main() -> None:
     )
 
     # Always also write the Kinora/pedpy HDF5 next to the video, so the same
-    # episode can be opened in Kinora (/home/fabi/dev/Kinora), not just the MP4.
+    # episode can be opened in Kinora, not just the MP4.
     # Derive the path from the ORIGINAL --out (not render_episode_video's return,
     # which becomes .gif on the ffmpeg fallback) so it is always a sibling .h5.
     h5_path = Path(args.out).with_suffix(".h5")

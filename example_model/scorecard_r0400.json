@@ -1,0 +1,306 @@
+{
+  "per_scenario": [
+    {
+      "label": "open_t0",
+      "n_agents": 20,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 20.0,
+        "episode_length": 700.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.789317370120895,
+        "p95_speed": 1.9446320550825276,
+        "speed_over_preferred": 1.336686470825115,
+        "frac_steps_above_preferred": 0.9301865460712266,
+        "freeze_rate": 0.0010363670623704541,
+        "wall_contact_rate": 0.0,
+        "wall_proximity_rate": 0.0007523039307880384,
+        "agent_collision_rate": 0.024637953733308255,
+        "path_efficiency": 0.9998308941941103
+      }
+    },
+    {
+      "label": "open_t0",
+      "n_agents": 20,
+      "seed": 1,
+      "metrics": {
+        "n_agents": 20.0,
+        "episode_length": 717.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.7324576703160715,
+        "p95_speed": 1.9168138677951798,
+        "speed_over_preferred": 1.3644764592491256,
+        "frac_steps_above_preferred": 0.9007360672975815,
+        "freeze_rate": 0.0003154574132492114,
+        "wall_contact_rate": 0.0,
+        "wall_proximity_rate": 0.001888772298006296,
+        "agent_collision_rate": 0.045960125918153204,
+        "path_efficiency": 0.9987429588168333
+      }
+    },
+    {
+      "label": "corridor_t1",
+      "n_agents": 20,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 16.0,
+        "episode_length": 720.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.1047250716506165,
+        "p95_speed": 1.9550997300516668,
+        "speed_over_preferred": 0.822816523209126,
+        "frac_steps_above_preferred": 0.47581466395112015,
+        "freeze_rate": 0.1854633401221996,
+        "wall_contact_rate": 0.015752032520325202,
+        "wall_proximity_rate": 0.3232977642276423,
+        "agent_collision_rate": 0.0017784552845528454,
+        "path_efficiency": 0.9476559100534867
+      }
+    },
+    {
+      "label": "corridor_t1",
+      "n_agents": 20,
+      "seed": 1,
+      "metrics": {
+        "n_agents": 20.0,
+        "episode_length": 538.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.6114690320445952,
+        "p95_speed": 1.9639695736123972,
+        "speed_over_preferred": 1.2853894268806627,
+        "frac_steps_above_preferred": 0.8180382246090665,
+        "freeze_rate": 0.009319222871584269,
+        "wall_contact_rate": 0.0001574555188159345,
+        "wall_proximity_rate": 0.0365296803652968,
+        "agent_collision_rate": 0.0091324200913242,
+        "path_efficiency": 0.995900720479922
+      }
+    },
+    {
+      "label": "branch_t2",
+      "n_agents": 24,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 7.0,
+        "episode_length": 248.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.8632639577362384,
+        "p95_speed": 1.9918883038594772,
+        "speed_over_preferred": 1.388267285701469,
+        "frac_steps_above_preferred": 0.9510439164866811,
+        "freeze_rate": 0.0,
+        "wall_contact_rate": 0.0,
+        "wall_proximity_rate": 0.00501432664756447,
+        "agent_collision_rate": 0.17621776504297995,
+        "path_efficiency": 0.9934804402509358
+      }
+    },
+    {
+      "label": "branch_t2",
+      "n_agents": 24,
+      "seed": 1,
+      "metrics": {
+        "n_agents": 16.0,
+        "episode_length": 736.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.486610192117804,
+        "p95_speed": 1.9297104440215629,
+        "speed_over_preferred": 1.1373970029621212,
+        "frac_steps_above_preferred": 0.7641891891891892,
+        "freeze_rate": 0.09324324324324325,
+        "wall_contact_rate": 0.0,
+        "wall_proximity_rate": 0.011461704422869472,
+        "agent_collision_rate": 0.0,
+        "path_efficiency": 0.994048879859998
+      }
+    },
+    {
+      "label": "rooms_t3a",
+      "n_agents": 30,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 5.0,
+        "episode_length": 719.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.9069095873774735,
+        "p95_speed": 1.9490677037093824,
+        "speed_over_preferred": 1.317610659104386,
+        "frac_steps_above_preferred": 0.9982295662437297,
+        "freeze_rate": 0.0,
+        "wall_contact_rate": 0.0014731879787860931,
+        "wall_proximity_rate": 0.19416617560400706,
+        "agent_collision_rate": 0.2972893341190336,
+        "path_efficiency": 0.8308555972573561
+      }
+    },
+    {
+      "label": "rooms_t3a",
+      "n_agents": 30,
+      "seed": 1,
+      "metrics": {
+        "n_agents": 29.0,
+        "episode_length": 1028.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.7055563208565794,
+        "p95_speed": 1.96105241960916,
+        "speed_over_preferred": 1.3382566034087373,
+        "frac_steps_above_preferred": 0.8809988294966836,
+        "freeze_rate": 0.005016442784683128,
+        "wall_contact_rate": 0.0005008347245409015,
+        "wall_proximity_rate": 0.1105731775180857,
+        "agent_collision_rate": 0.10962715637173066,
+        "path_efficiency": 0.9977473864077304
+      }
+    },
+    {
+      "label": "composed_t3b",
+      "n_agents": 30,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 19.0,
+        "episode_length": 1067.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.6614526703027497,
+        "p95_speed": 1.9251270628283361,
+        "speed_over_preferred": 1.3697570979585536,
+        "frac_steps_above_preferred": 0.8458138653870438,
+        "freeze_rate": 0.014774592751610052,
+        "wall_contact_rate": 0.007432602670697909,
+        "wall_proximity_rate": 0.08453010833963215,
+        "agent_collision_rate": 0.01473922902494331,
+        "path_efficiency": 0.9533698072412271
+      }
+    },
+    {
+      "label": "composed_t3b",
+      "n_agents": 30,
+      "seed": 1,
+      "metrics": {
+        "n_agents": 30.0,
+        "episode_length": 844.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.62346912634092,
+        "p95_speed": 1.950882803499683,
+        "speed_over_preferred": 1.3272879819864853,
+        "frac_steps_above_preferred": 0.8191133416980343,
+        "freeze_rate": 0.014080579952600028,
+        "wall_contact_rate": 0.0023650528658875902,
+        "wall_proximity_rate": 0.13508625486922649,
+        "agent_collision_rate": 0.04820534223706177,
+        "path_efficiency": 0.9779039230774139
+      }
+    },
+    {
+      "label": "corridor_hi",
+      "n_agents": 40,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 16.0,
+        "episode_length": 1203.0,
+        "goal_rate": 1.0,
+        "mean_speed": 0.7133332438306911,
+        "p95_speed": 1.9504972808894563,
+        "speed_over_preferred": 0.5445735074041675,
+        "frac_steps_above_preferred": 0.3133573453904514,
+        "freeze_rate": 0.4219480419955552,
+        "wall_contact_rate": 0.017604286261002678,
+        "wall_proximity_rate": 0.22349789513968618,
+        "agent_collision_rate": 0.0,
+        "path_efficiency": 0.9294330642684765
+      }
+    },
+    {
+      "label": "rooms_hi",
+      "n_agents": 60,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 5.0,
+        "episode_length": 791.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.8961278937517636,
+        "p95_speed": 1.9387169429198177,
+        "speed_over_preferred": 1.3132689979591403,
+        "frac_steps_above_preferred": 0.99713384924047,
+        "freeze_rate": 0.0,
+        "wall_contact_rate": 0.004865483686319404,
+        "wall_proximity_rate": 0.25386376645678305,
+        "agent_collision_rate": 0.25014310246136234,
+        "path_efficiency": 0.8236706966052193
+      }
+    },
+    {
+      "label": "rooms_hi",
+      "n_agents": 100,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 5.0,
+        "episode_length": 715.0,
+        "goal_rate": 1.0,
+        "mean_speed": 1.914708853889486,
+        "p95_speed": 1.9690849826516672,
+        "speed_over_preferred": 1.3280405811192426,
+        "frac_steps_above_preferred": 0.9984779299847792,
+        "freeze_rate": 0.0,
+        "wall_contact_rate": 0.14711246200607903,
+        "wall_proximity_rate": 0.27477203647416415,
+        "agent_collision_rate": 0.6966565349544073,
+        "path_efficiency": 0.8279546586274261
+      }
+    },
+    {
+      "label": "composed_hi",
+      "n_agents": 60,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 35.0,
+        "episode_length": 1501.0,
+        "goal_rate": 0.7142857142857143,
+        "mean_speed": 0.675548303915046,
+        "p95_speed": 1.8949701041657019,
+        "speed_over_preferred": 0.5505671125332465,
+        "frac_steps_above_preferred": 0.2991369841518908,
+        "freeze_rate": 0.32402322297191277,
+        "stuck_agent_frac": 0.02857142857142857,
+        "wall_contact_rate": 0.0032288401253918494,
+        "wall_proximity_rate": 0.05501567398119122,
+        "agent_collision_rate": 0.030564263322884012,
+        "path_efficiency": 0.7971106267580065
+      }
+    },
+    {
+      "label": "composed_hi",
+      "n_agents": 100,
+      "seed": 0,
+      "metrics": {
+        "n_agents": 62.0,
+        "episode_length": 1501.0,
+        "goal_rate": 0.5967741935483871,
+        "mean_speed": 0.521171990784296,
+        "p95_speed": 1.8954185451857584,
+        "speed_over_preferred": 0.4063520827418631,
+        "frac_steps_above_preferred": 0.21164845703325685,
+        "freeze_rate": 0.4213104086036237,
+        "stuck_agent_frac": 0.2903225806451613,
+        "wall_contact_rate": 0.0019501847543451484,
+        "wall_proximity_rate": 0.033820309292459286,
+        "agent_collision_rate": 0.03955111536882441,
+        "path_efficiency": 0.687114238639124
+      }
+    }
+  ],
+  "overall": {
+    "wall_contact_rate": 0.013496161540812783,
+    "goal_rate": 0.9540706605222734,
+    "frac_steps_above_preferred": 0.7469279184154137,
+    "speed_over_preferred": 1.1220498528695626,
+    "wall_proximity_rate": 0.11628466330449352,
+    "stuck_agent_frac": 0.15944700460829495,
+    "p95_speed": 1.9424621213254518,
+    "n_agents": 20.333333333333332,
+    "freeze_rate": 0.09936872798484211,
+    "agent_collision_rate": 0.11630018652870437,
+    "episode_length": 868.5333333333333,
+    "mean_speed": 1.480408085669015,
+    "path_efficiency": 0.9169879868358177
+  }
+}

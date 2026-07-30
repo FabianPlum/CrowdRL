@@ -6,6 +6,7 @@ PyTorch MKL access violations inside the pytest process on Windows.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -19,12 +20,22 @@ from crowdrl_train.networks import ActorCritic
 
 
 def _run_python(code: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Run Python code in a subprocess."""
+    """Run Python code in a subprocess.
+
+    ``USE_LIBUV=0`` selects the non-libuv TCPStore rendezvous backend. The
+    Windows PyTorch wheels here are built without libuv, so the libuv default
+    fails outright ("use_libuv was requested but PyTorch was build without
+    libuv support"); which store backend brings up a world_size=1 gloo group
+    is irrelevant to the KL-reduction behaviour these tests pin, so it is set
+    unconditionally to keep both platforms on the same path.
+    """
+    env = {**os.environ, "USE_LIBUV": "0"}
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
     return result
 

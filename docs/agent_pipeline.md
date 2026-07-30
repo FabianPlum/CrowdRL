@@ -269,7 +269,7 @@ The **agent proximity penalty** is a reward signal (not a physics force) that
 teaches the policy to maintain personal space. Unlike JuPedSim's Social Force
 Model which prescribes exponential repulsion as a world force, CrowdRL lets
 the policy discover its own avoidance strategy through this tunable reward
-term. See Project Plan v7, Section 3.2, and Section 8.3 below for the
+term. See Project Plan v9, Section 3.2, and Section 8.3 below for the
 current graded-ramp form.
 
 ### Tier 2: Progress shaping (potential-based)
@@ -376,7 +376,7 @@ in the human walking envelope in the agent-dynamics refactor (Layer 1): heading
 0.020 rad/step (115 deg/s), torso 0.010 rad/step (57 deg/s), head 0.030 rad/step
 (172 deg/s). These replaced the earlier pi/12 (1500 deg/s) heading/torso and
 pi/3 (6000 deg/s) head caps, which were far above human capability. See
-`plan/agent_dynamics_refactor.md` and Project Plan v7, Section 3.3.
+`plan/agent_dynamics_refactor.md` and Project Plan v9, Section 3.3.
 
 ### 8.3 Agent proximity penalty (graded linear ramp) -- IMPLEMENTED
 

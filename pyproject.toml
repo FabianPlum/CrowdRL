@@ -13,7 +13,15 @@ dev = [
     "pytest>=8.0",
     "pytest-cov",
     "pre-commit",
-    "ruff",
+    # Pinned exactly, and kept in lockstep with .pre-commit-config.yaml's rev.
+    # uv.lock is deliberately untracked (see .gitignore), so an unpinned linter
+    # means CI resolves whatever is newest at run time: a new ruff release then
+    # turns CI red with no code change (0.16.0 did exactly that -- 213 findings
+    # from new default rules in files nobody had touched). Bump this and the
+    # pre-commit rev together, in a commit that does nothing else.
+    "ruff==0.15.8",
+    "pedpy>=1.3",
+    "plotly>=6",
 ]
 
 [tool.uv.workspace]

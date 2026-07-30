@@ -128,6 +128,11 @@ class EnvConfig(NamedTuple):
     use_goal_direction: bool = (
         True  # expose global-goal bearing in ego block; False = navmesh waypoint only
     )
+    # Serve the deployed JuPedSim signal: stored waypoint path precomputed at
+    # the router's fixed 0.2 m portal inset (episode factory) and the path_dev
+    # obs channel pinned to 0.0 (compute_navmesh_signals). Mirrors
+    # ObsConfig.use_jupedsim_style_routing -- see its docstring for the contract.
+    use_jupedsim_style_routing: bool = False
     # Derived from ObsConfig.navmesh_max_waypoints in from_crowd_env_config. The
     # waypoints tensor is (E, N, max_waypoints, 2); at 64 envs x 100 agents the
     # default 1024 is ~50 MiB (+ ~25 MiB for path lengths). Far above any real 2D
@@ -303,6 +308,7 @@ class EnvConfig(NamedTuple):
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
             use_goal_direction=cfg.obs.use_goal_direction,
+            use_jupedsim_style_routing=cfg.obs.use_jupedsim_style_routing,
             max_waypoints=cfg.obs.navmesh_max_waypoints,
             stuck_termination_enabled=cfg.stuck_termination_enabled,
             stuck_window_steps=cfg.stuck_window_steps,

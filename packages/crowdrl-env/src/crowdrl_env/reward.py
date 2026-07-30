@@ -105,7 +105,7 @@ class RewardConfig:
     #   - beyond ``personal_space_radius``: no penalty
     # This provides a continuous gradient for the policy to maintain personal
     # space, while the binary ``collision_penalty`` handles the hard "you
-    # touched someone" signal on top. See Project Plan v7, Section 3.2.
+    # touched someone" signal on top. See Project Plan v9, Section 3.2.
     agent_proximity_penalty_near: float = -0.005
     """Strongest proximity penalty magnitude, applied when agents are at
     contact distance (sum of body radii, center-to-center)."""

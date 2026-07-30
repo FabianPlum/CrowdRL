@@ -1,6 +1,8 @@
+# Keep `rev` identical to the ruff pin in pyproject.toml's dev extra, so the
+# hook that runs before a commit is the same linter CI runs after it.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.4
+    rev: v0.15.8
     hooks:
       - id: ruff
         args: [--fix]

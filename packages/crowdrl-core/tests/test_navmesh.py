@@ -5,6 +5,7 @@ from shapely.geometry import Polygon, box
 
 from crowdrl_core.geometry import build_navmesh
 from crowdrl_core.navmesh import (
+    JUPEDSIM_ROUTER_INSET,
     _validate_path_clearance,
     astar_triangle_path,
     find_path,
@@ -12,6 +13,7 @@ from crowdrl_core.navmesh import (
     is_reachable,
     next_waypoint_direction,
     path_deviation,
+    router_next_waypoint,
     shortest_path,
 )
 
@@ -116,6 +118,103 @@ class TestNextWaypointDirection:
         pos = np.array([1.0, 1.0])
         goal = np.array([15.0, 15.0])
         assert next_waypoint_direction(nm, pos, goal) is None
+
+
+class TestPortalOrientation:
+    """Regression for the portal left/right swap (fixed 2026-07-30).
+
+    _orient_portal used the centroid-to-centroid ray to classify endpoints;
+    for the long thin triangles a CDT produces in corridors that ray can miss
+    the shared edge entirely, putting both endpoints on one side and swapping
+    left/right -- the funnel then popped the wrong-side corner and returned a
+    detoured path. Found by the JuPedSim router emulation-fidelity test on the
+    jupedsim#1625 corner geometry.
+    """
+
+    # The jupedsim#1625 corner: lower corridor -> reflex corner (10, 2) -> exit arm.
+    CORNER = Polygon([(0, 0), (12, 0), (12, 12), (10, 12), (10, 2), (0, 2)])
+
+    def test_funnel_rounds_the_inner_corner(self):
+        """From the lower corridor the taut path bends at the inner corner
+        (10, 2). The buggy orientation detoured via the outer corner (12, 0):
+        waypoints[1] came out (11.859, 0.141) instead of (10.141, 1.859)."""
+        nm = build_navmesh(self.CORNER)
+        wps = shortest_path(nm, np.array([5.0, 0.8]), np.array([11.0, 11.5]), 0.2)
+        assert wps is not None and len(wps) >= 3
+        assert np.linalg.norm(wps[1] - np.array([10.0, 2.0])) < 0.5, (
+            f"funnel took the wrong corner: {wps[1]}"
+        )
+
+    def test_every_portal_satisfies_the_side_invariant(self):
+        """For portal (i, j) with endpoints (L, R): the destination centroid
+        must lie strictly LEFT of the directed segment L->R and the source
+        centroid strictly RIGHT -- i.e. facing the crossing direction, L is on
+        the traveller's left. Checked independently of _orient_portal's own
+        math, over every portal of two geometries."""
+        for polygon in (self.CORNER, TestRouterNextWaypoint._l_corridor()):
+            nm = build_navmesh(polygon)
+            assert nm.portals, "geometry produced no portals"
+            for (i, j), (left, right) in nm.portals.items():
+                edge = right - left
+                c_from = nm.centroids[i] - left
+                c_to = nm.centroids[j] - left
+                cross_to = edge[0] * c_to[1] - edge[1] * c_to[0]
+                cross_from = edge[0] * c_from[1] - edge[1] * c_from[0]
+                assert cross_to > 0, f"portal ({i},{j}): destination not left of L->R"
+                assert cross_from < 0, f"portal ({i},{j}): source not right of L->R"
+
+
+class TestRouterNextWaypoint:
+    """router_next_waypoint mirrors JuPedSim's ComputeAllWaypoints(...)[1]."""
+
+    @staticmethod
+    def _l_corridor() -> Polygon:
+        """Horizontal 12x3 arm joined to a vertical 3x7 arm; inner corner (9, 3)."""
+        return Polygon([(0, 0), (12, 0), (12, 10), (9, 10), (9, 3), (0, 3)])
+
+    def test_line_of_sight_returns_goal(self, simple_square_polygon):
+        nm = build_navmesh(simple_square_polygon)
+        pos = np.array([1.0, 1.0])
+        goal = np.array([9.0, 9.0])
+        wp = router_next_waypoint(nm, pos, goal)
+        assert wp is not None
+        assert np.array_equal(wp, goal)
+
+    def test_corner_waypoint_at_router_inset(self):
+        nm = build_navmesh(self._l_corridor())
+        pos = np.array([1.0, 1.5])
+        goal = np.array([10.5, 9.0])
+        wp = router_next_waypoint(nm, pos, goal)
+        assert wp is not None
+        # The corner blocks line of sight, so [1] is the funnel corner: the
+        # inner vertex (9, 3) inset by exactly the router literal.
+        corner = np.array([9.0, 3.0])
+        dist = float(np.linalg.norm(wp - corner))
+        assert abs(dist - JUPEDSIM_ROUTER_INSET) < 1e-6
+
+    def test_inset_differs_from_body_radius_funnel(self):
+        nm = build_navmesh(self._l_corridor())
+        pos = np.array([1.0, 1.5])
+        goal = np.array([10.5, 9.0])
+        wp_router = router_next_waypoint(nm, pos, goal)
+        body = shortest_path(nm, pos, goal, agent_radius=0.225)
+        assert wp_router is not None and body is not None and len(body) >= 3
+        assert not np.allclose(wp_router, body[1])
+
+    def test_unreachable_returns_none(self, simple_square_polygon):
+        nm = build_navmesh(simple_square_polygon)
+        pos = np.array([1.0, 1.0])
+        goal = np.array([15.0, 15.0])
+        assert router_next_waypoint(nm, pos, goal) is None
+
+    def test_degenerate_same_point_returns_goal_verbatim(self, simple_square_polygon):
+        # Standing on the waypoint: the router serves element [1] as-is (the
+        # destination) -- no waypoints[2] fallback like next_waypoint_direction.
+        nm = build_navmesh(simple_square_polygon)
+        p = np.array([5.0, 5.0])
+        wp = router_next_waypoint(nm, p, p)
+        assert wp is not None
+        assert np.allclose(wp, p)
 
 
 class TestPathDeviation:

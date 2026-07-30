@@ -6,11 +6,17 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "shapely>=2.0",
-    "scipy>=1.12",
-    "triangle>=20250106",
 ]
 
 [project.optional-dependencies]
+# Constrained Delaunay triangulation, needed only to *build* a navmesh from a
+# polygon (triangulate_polygon / build_navmesh). Training generates geometry, so
+# crowdrl-env and crowdrl-torch require this extra. Deployment consumes an
+# existing geometry via WorldState and does not, which keeps the JuPedSim-side
+# install free of a compiled triangulation library.
+geometry = [
+    "triangle>=20250106",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov",

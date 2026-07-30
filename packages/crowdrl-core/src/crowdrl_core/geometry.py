@@ -7,12 +7,17 @@ Triangulation uses Shewchuk's Triangle library (``triangle`` package) for true
 constrained Delaunay triangulation (CDT) that respects all boundary edges.
 This guarantees full coverage of the walkable area -- matching the CGAL CDT
 approach used by JuPedSim's RoutingEngine.
+
+``triangle`` is an optional dependency (``crowdrl-core[geometry]``), imported
+lazily inside :func:`triangulate_polygon` -- its only consumer. Deployment
+builds a WorldState from an existing geometry rather than triangulating one, so
+keeping this module importable without it lets crowdrl-jupedsim ship without a
+compiled triangulation library. See Project Plan v9, Section 3.6.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import triangle as tr
 from numpy.typing import NDArray
 from shapely.geometry import Point, Polygon
 
@@ -117,7 +122,20 @@ def triangulate_polygon(polygon: Polygon) -> list[NDArray[np.float64]]:
     -------
     triangles : list of (3, 2) arrays
         Vertex coordinates for each valid triangle.
+
+    Raises
+    ------
+    ImportError
+        If the optional ``triangle`` dependency is missing.
     """
+    try:
+        import triangle as tr
+    except ImportError as exc:  # pragma: no cover - depends on install extras
+        raise ImportError(
+            "triangulate_polygon requires the optional 'triangle' dependency. "
+            "Install it with: pip install 'crowdrl-core[geometry]'"
+        ) from exc
+
     exterior_coords = np.array(polygon.exterior.coords[:-1], dtype=np.float64)
     if len(exterior_coords) < 3:
         return []
@@ -179,21 +197,27 @@ def _orient_portal(
     edge_a: NDArray[np.float64],
     edge_b: NDArray[np.float64],
     from_centroid: NDArray[np.float64],
-    to_centroid: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Orient a shared edge as (left, right) relative to the travel direction.
+    """Orient a shared edge as (left, right) for crossing it from the
+    ``from`` triangle.
 
-    Standing at `from_centroid` and looking toward `to_centroid`, the portal's
-    'left' endpoint is to the left and 'right' is to the right.
+    The crossing direction is NOT derived from the centroid-to-centroid ray:
+    for the long thin triangles a CDT produces in corridors, that ray can miss
+    the shared edge entirely and put both endpoints on the same side, silently
+    swapping left/right -- the funnel then pops the wrong-side corner and
+    returns a detoured path (found 2026-07-30 by the JuPedSim router
+    emulation-fidelity test). Instead we use the one invariant that cannot
+    fail: the two triangles lie on opposite sides of their shared edge, so the
+    side the from-triangle's centroid is on fully determines the crossing
+    direction. Crossing a directed edge a->b from its left half-plane, ``b``
+    is on the traveller's left; crossing from its right half-plane, ``a`` is.
     """
-    travel = to_centroid - from_centroid
-    # Cross product: travel × (edge_a - from_centroid)
-    # Positive cross → edge_a is to the left
-    to_a = edge_a - from_centroid
-    cross = travel[0] * to_a[1] - travel[1] * to_a[0]
-    if cross >= 0:
-        return edge_a.copy(), edge_b.copy()  # a is left, b is right
-    return edge_b.copy(), edge_a.copy()  # b is left, a is right
+    edge = edge_b - edge_a
+    to_c = from_centroid - edge_a
+    cross = edge[0] * to_c[1] - edge[1] * to_c[0]
+    if cross > 0:  # from-centroid left of a->b: we cross toward its right side
+        return edge_b.copy(), edge_a.copy()  # b is left, a is right
+    return edge_a.copy(), edge_b.copy()  # a is left, b is right
 
 
 def build_navmesh(polygon: Polygon) -> NavMesh:
@@ -256,10 +280,10 @@ def build_navmesh(polygon: Polygon) -> NavMesh:
                 edge_a, edge_b = shared_verts[0], shared_verts[1]
 
                 # Orient portal for both travel directions
-                left_ij, right_ij = _orient_portal(edge_a, edge_b, centroids[i], centroids[j])
+                left_ij, right_ij = _orient_portal(edge_a, edge_b, centroids[i])
                 portals[(i, j)] = (left_ij, right_ij)
 
-                left_ji, right_ji = _orient_portal(edge_a, edge_b, centroids[j], centroids[i])
+                left_ji, right_ji = _orient_portal(edge_a, edge_b, centroids[j])
                 portals[(j, i)] = (left_ji, right_ji)
 
     return NavMesh(

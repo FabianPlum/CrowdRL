@@ -94,3 +94,48 @@ class TestOverCapRegeneration:
         with pytest.raises(RuntimeError):
             for seed in range(20):
                 factory(seed)
+
+
+def _config_jps(flag: bool) -> CrowdEnvConfig:
+    return CrowdEnvConfig(
+        geometry=GeometryConfig(tier=GeometryTier.TIER_2),
+        geometry_tiers=[GeometryTier.TIER_2],
+        spawn=SpawnConfig(n_agents_range=(12, 18)),
+        obs=ObsConfig(use_navmesh=True, use_jupedsim_style_routing=flag),
+        action=ActionConfig(),
+    )
+
+
+class TestJupedsimStyleRoutingPrecompute:
+    """Flag on: stored paths use the router's fixed 0.2 m inset, not body radius."""
+
+    def test_same_seed_stored_paths_differ_only_by_inset(self):
+        on = make_episode_factory(_config_jps(True))
+        off = make_episode_factory(_config_jps(False))
+        found_difference = False
+        for seed in range(8):
+            ep_on, ep_off = on(seed), off(seed)
+            # The flag consumes no RNG, so the episode itself is identical...
+            assert np.allclose(ep_on["positions"], ep_off["positions"])
+            assert np.allclose(ep_on["goal_positions"], ep_off["goal_positions"])
+            # ...but bent paths store different funnel corners (0.2 vs ~0.23).
+            nwp_on, nwp_off = ep_on["n_waypoints"], ep_off["n_waypoints"]
+            for i in range(len(nwp_on)):
+                if nwp_on[i] >= 2 and nwp_off[i] >= 2:
+                    if not np.allclose(ep_on["waypoints"][i, 0], ep_off["waypoints"][i, 0]):
+                        found_difference = True
+            if found_difference:
+                break
+        assert found_difference, "no bent path differed -- the inset switch had no effect"
+
+    def test_final_waypoint_still_goal_under_flag(self):
+        factory = make_episode_factory(_config_jps(True))
+        checked = 0
+        for seed in range(4):
+            ep = factory(seed)
+            wp, nwp, goals = ep["waypoints"], ep["n_waypoints"], ep["goal_positions"]
+            for i in range(len(goals)):
+                if nwp[i] > 0:
+                    assert np.allclose(wp[i, nwp[i] - 1], goals[i], atol=1e-6)
+                    checked += 1
+        assert checked > 0

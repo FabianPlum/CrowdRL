@@ -91,6 +91,16 @@ class WorldState:
     navmesh: NavMesh | None = None
     """Precomputed navigation mesh. None if navmesh signals are disabled."""
 
+    route_next_waypoints: NDArray[np.float64] | None = None
+    """(n_agents, 2) -- per-agent routed next waypoint supplied by an EXTERNAL
+    router (JuPedSim's tactical layer, ``ped.next_target``). When present, the
+    observation builder derives the navmesh block's waypoint direction from it
+    instead of querying ``navmesh``, and emits ``path_deviation`` as 0.0 (the
+    single-waypoint deployment contract: with only the next waypoint available
+    there is no route to measure deviation against; 0.0 sits inside the
+    training distribution because a clear straight path was the common case).
+    Training environments leave this None and use ``navmesh``."""
+
     # --- Masks ---
 
     active_mask: NDArray[np.bool_] | None = None
@@ -191,6 +201,11 @@ class WorldState:
                 raise ValueError(f"{name} has shape {arr.shape}, expected {expected_shape}")
         if self.active_mask is not None and self.active_mask.shape != (n,):
             raise ValueError(f"active_mask has shape {self.active_mask.shape}, expected ({n},)")
+        if self.route_next_waypoints is not None and self.route_next_waypoints.shape != (n, 2):
+            raise ValueError(
+                f"route_next_waypoints has shape {self.route_next_waypoints.shape}, "
+                f"expected ({n}, 2)"
+            )
         if self.wall_segments is not None and self.wall_segments.ndim != 3:
             raise ValueError(
                 f"wall_segments must be (S, 2, 2), got shape {self.wall_segments.shape}"

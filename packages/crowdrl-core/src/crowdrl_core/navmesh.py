@@ -21,6 +21,14 @@ from shapely.geometry import Point
 from crowdrl_core.geometry import find_containing_triangle
 from crowdrl_core.world_state import NavMesh
 
+# Portal inset used by JuPedSim's RoutingEngine. Fixed literal in
+# ``straightenPath`` (RoutingEngine.cpp:327-331 @ 49e3ddebd): every portal is
+# shrunk 0.2 m at BOTH ends before the funnel runs, regardless of agent size.
+# Known divergence, deliberately kept: jupedsim leaves the shrink unclamped
+# (portals narrower than 0.4 m produce crossed candidates) while our
+# ``_inset_portal`` collapses portals narrower than 2r to their midpoint.
+JUPEDSIM_ROUTER_INSET = 0.2
+
 
 # ---------------------------------------------------------------------------
 # A* on triangle adjacency graph
@@ -409,6 +417,40 @@ def next_waypoint_direction(
         if dist < 1e-10:
             return np.zeros(2, dtype=np.float64)
     return diff / dist
+
+
+def router_next_waypoint(
+    navmesh: NavMesh,
+    position: NDArray[np.float64],
+    goal: NDArray[np.float64],
+) -> NDArray[np.float64] | None:
+    """Next waypoint as JuPedSim's router serves it (``agent.next_target``).
+
+    JuPedSim's tactical layer computes ``ComputeAllWaypoints(position,
+    target)[1]`` every tick: the first corner of a funnel run over portals
+    shrunk by the fixed :data:`JUPEDSIM_ROUTER_INSET`, or the destination
+    itself when the funnel collapses to line of sight. This helper reproduces
+    that contract on our navmesh so training can serve the signal the
+    deployed adapter will serve.
+
+    Unlike :func:`next_waypoint_direction` there is NO fallback to
+    ``waypoints[2]`` when standing on the waypoint -- the router returns
+    element [1] verbatim. Consumers must apply the observation builder's
+    route-branch math (zero the direction when the distance underflows).
+
+    Returns
+    -------
+    waypoint : (2,) array or None
+        The router-style next waypoint, or None if unreachable.
+    """
+    waypoints = shortest_path(navmesh, position, goal, JUPEDSIM_ROUTER_INSET)
+    if waypoints is None:
+        return None
+    if len(waypoints) < 2:
+        # Degenerate same-point query: the router's path is
+        # {position, destination}, so element [1] is the destination.
+        return np.asarray(goal, dtype=np.float64).copy()
+    return np.asarray(waypoints[1], dtype=np.float64)
 
 
 def path_deviation(
