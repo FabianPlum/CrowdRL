@@ -144,6 +144,95 @@ class TestWorldStateAssembly:
         assert world.wall_segments.shape == (0, 2, 2)
 
 
+class TestHeadingIsAnchoredToTheTorso:
+    """Divergence channel 8.
+
+    Both training engines pass ``torso_orientations`` as BOTH current_headings
+    and current_torsos (``crowd_env.py`` and ``lockstep.native_batch_step``), so
+    the commanded velocity direction is re-derived from the previous torso every
+    step. The adapter used to feed back its own integrated ``state.heading``,
+    letting heading and torso drift apart without bound.
+    """
+
+    @staticmethod
+    def _step_once(state):
+        model = _model()
+        ego = _StubAgent(0, state, target=(19.0, 10.0))
+        return model.compute_next_state(0.01, ego, _StubEnvQuery(agents=[ego]))
+
+    def test_a_stale_heading_field_does_not_steer(self):
+        """The two states differ only in ``heading``; if it were an input, the
+        commanded direction -- and so the resulting velocity -- would differ."""
+        base = CrowdRLAgentState(position=(5.0, 5.0), torso_angle=0.0, heading=0.0)
+        poisoned = replace(base, heading=np.pi)  # 180 deg away from the torso
+
+        clean_result = self._step_once(base)
+        poisoned_result = self._step_once(poisoned)
+
+        assert clean_result.velocity == poisoned_result.velocity
+        assert clean_result.position == poisoned_result.position
+        assert clean_result.heading == poisoned_result.heading
+
+    def test_commanded_heading_stays_within_one_delta_of_the_torso(self):
+        """The invariant training guarantees: the commanded direction can never
+        sit more than one per-step heading delta from the previous torso."""
+        max_delta = ActionConfig().max_heading_change
+        state = CrowdRLAgentState(position=(5.0, 5.0), torso_angle=0.7, heading=0.7)
+
+        for _ in range(50):
+            previous_torso = state.torso_angle
+            state = self._step_once(state)
+            offset = abs((state.heading - previous_torso + np.pi) % (2 * np.pi) - np.pi)
+            assert offset <= max_delta + 1e-12, (
+                f"commanded heading sits {offset:.4f} rad from the previous torso, "
+                f"beyond the {max_delta:.4f} rad per-step cap"
+            )
+
+
+class TestDtGuard:
+    def test_running_at_an_untrained_dt_warns(self):
+        """Action limits are per STEP, so a different dt rescales the whole
+        motion envelope away from what the policy trained under."""
+        model = _model()
+        sim, exit_id, journey_id = _sim(model, dt=0.05)
+        sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(2.0, 10.0)),
+        )
+        with pytest.warns(UserWarning, match="differs from the trained"):
+            sim.iterate()
+
+    def test_the_trained_dt_is_silent(self):
+        import warnings as _warnings
+
+        model = _model()
+        sim, exit_id, journey_id = _sim(model, dt=0.01)
+        sim.add_agent(
+            journey_id=journey_id,
+            stage_id=exit_id,
+            state=CrowdRLAgentState(position=(2.0, 10.0)),
+        )
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            sim.iterate()
+
+    def test_the_warning_fires_once_not_per_agent_per_step(self):
+        model = _model()
+        sim, exit_id, journey_id = _sim(model, dt=0.05)
+        for x in (2.0, 4.0, 6.0):
+            sim.add_agent(
+                journey_id=journey_id,
+                stage_id=exit_id,
+                state=CrowdRLAgentState(position=(x, 10.0)),
+            )
+        with pytest.warns(UserWarning) as record:
+            for _ in range(5):
+                sim.iterate()
+        dt_warnings = [w for w in record if "differs from the trained" in str(w.message)]
+        assert len(dt_warnings) == 1, f"expected 1 dt warning, got {len(dt_warnings)}"
+
+
 class TestSimulationIntegration:
     def test_agent_advances_toward_the_routing_target(self):
         model = _model()

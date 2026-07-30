@@ -193,8 +193,11 @@ class LearnedPolicyModel(CustomOperationalModel):
             dynamics parameters (speed clamp, contact constants), normally
             omitted: schema-v2 artefacts embed the trained values and the
             model self-configures; an explicit value that disagrees with the
-            embedded record raises. Unrecorded (v1 artefacts): explicit value
-            or the crowdrl default (0.05).
+            embedded record raises. Unrecorded (v1 artefacts): explicit value,
+            else the legacy ADAPTER fallback (0.05, clamp 5.0) with a warning
+            -- note those are not the training-env defaults (0.05 matches, but
+            the env clamps at 3.0); they are pinned so v1 deployments do not
+            shift when training defaults move.
         waypoint_clearance
             Push routed waypoints (``ped.next_target``) off walls/corners to
             the agent's body radius before they enter the observation,
@@ -269,6 +272,7 @@ class LearnedPolicyModel(CustomOperationalModel):
             float(wall_query_radius) if wall_query_radius is not None else ray_range
         )
         self.keep_inside_geometry = keep_inside_geometry
+        self._dt_checked = False
 
     # -- temporal memory ------------------------------------------------------
 
@@ -462,6 +466,18 @@ class LearnedPolicyModel(CustomOperationalModel):
     # -- JuPedSim operational-model interface ---------------------------------
 
     def compute_next_state(self, dt, ped, env_query) -> CrowdRLAgentState:
+        if not self._dt_checked:
+            self._dt_checked = True
+            if abs(float(dt) - self.action_config.dt) > 1e-12:
+                warnings.warn(
+                    f"simulation dt={dt} differs from the trained "
+                    f"ActionConfig.dt={self.action_config.dt}: the per-step action "
+                    "limits (speed, heading, torso, head) are expressed per step, "
+                    "so the whole motion envelope rescales silently.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         # Lazy-init trajectory memory (no-op unless use_temporal_memory); the
         # observation this step reads the PRE-step memory, the returned state
         # carries the advanced one.

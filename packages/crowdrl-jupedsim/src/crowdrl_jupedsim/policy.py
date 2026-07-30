@@ -15,6 +15,7 @@ loudly whenever two sources of truth disagree.
 from __future__ import annotations
 
 import json
+import math
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -302,6 +303,13 @@ class ConstantPolicy:
         return f"ConstantPolicy(action={self._action.tolist()})"
 
 
+# Fallbacks for artefacts that record no dynamics (pre-schema-v2). These are
+# the historical ADAPTER constants, deliberately NOT the current CrowdEnvConfig
+# defaults: keeping them pinned means a v1 deployment does not silently change
+# behaviour when the training defaults move. They are very unlikely to be the
+# physics any current checkpoint trained under -- every recent best run trains
+# at desired_velocity_weight=0.8 and clamps at 3.0 -- which is why falling back
+# to them warns.
 _DYNAMICS_DEFAULTS = {
     "desired_velocity_weight": 0.05,
     "max_velocity_magnitude": 5.0,
@@ -319,7 +327,11 @@ def resolve_dynamics(policy: Policy, overrides: Mapping[str, float | None]) -> d
       given: self-configure from the artefact;
     * artefact records it AND an explicit value is given: they must agree, or
       this raises rather than silently preferring either;
-    * unrecorded: the explicit value, else the crowdrl default.
+    * unrecorded: the explicit value, else the legacy adapter fallback from
+      ``_DYNAMICS_DEFAULTS`` -- which warns for a metadata-capable policy,
+      because running unverified physics is not a neutral default (the
+      ``desired_velocity_weight`` gap alone, 0.05 vs the 0.8 of every current
+      best run, is a ~16x change in the velocity-response time constant).
 
     ``overrides`` maps dynamics field names to explicit values or None.
     """
@@ -332,10 +344,18 @@ def resolve_dynamics(policy: Policy, overrides: Mapping[str, float | None]) -> d
 
     resolved: dict[str, float] = {}
     mismatches = []
+    fell_back = []
     for field_name, default in _DYNAMICS_DEFAULTS.items():
         explicit = overrides.get(field_name)
         stored = recorded.get(field_name)
-        if explicit is not None and stored is not None and abs(explicit - stored) > 1e-12:
+        # Relative comparison: an absolute 1e-12 is sub-ULP at contact-stiffness
+        # scale (ulp(30000.0) = 3.6e-12), so two adjacent doubles -- the same
+        # value after a serialisation round-trip -- would raise as a mismatch.
+        if (
+            explicit is not None
+            and stored is not None
+            and not math.isclose(explicit, stored, rel_tol=1e-9, abs_tol=1e-12)
+        ):
             mismatches.append(f"{field_name}: explicit {explicit!r} != embedded {stored!r}")
         if explicit is not None:
             resolved[field_name] = float(explicit)
@@ -343,9 +363,20 @@ def resolve_dynamics(policy: Policy, overrides: Mapping[str, float | None]) -> d
             resolved[field_name] = float(stored)
         else:
             resolved[field_name] = default
+            fell_back.append(field_name)
     if mismatches:
         raise ValueError(
             "explicit dynamics disagree with the artefact's embedded training "
             "dynamics -- refusing to silently prefer either. " + "; ".join(mismatches)
+        )
+    if fell_back and getattr(policy, "metadata_capable", False):
+        warnings.warn(
+            "this artefact records no trained value for "
+            + ", ".join(f"{f} (using {resolved[f]!r})" for f in fell_back)
+            + ". These are legacy adapter fallbacks, not the artefact's training "
+            "physics: re-export with scripts/reexport_onnx.py to embed the real "
+            "dynamics, or pass them explicitly.",
+            UserWarning,
+            stacklevel=2,
         )
     return resolved

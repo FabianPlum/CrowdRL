@@ -28,6 +28,7 @@ Version-drift policy, asymmetric on purpose:
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, fields
 from typing import Any, Mapping
 
@@ -92,11 +93,22 @@ and the Layer-1 0.05 default."""
 
 
 def validate_dynamics_dict(data: Mapping[str, Any]) -> dict[str, float]:
-    """Validate a dynamics block: known keys only, float values.
+    """Validate a dynamics block: known keys only, finite non-negative floats.
 
     Missing keys are allowed (unrecorded parameters fall back to defaults on
     the read side); unknown keys raise, same asymmetry as the configs.
+
+    Values are checked rather than merely coerced. A payload that is valid JSON
+    but not an object (``[]``, ``3``, ``"x"``) raises here instead of surfacing
+    as an ``AttributeError`` from the caller, and NaN/inf/negative values are
+    rejected outright: all four fields are physically non-negative, and a NaN
+    that reached the physics would propagate silently through every position.
     """
+    if not isinstance(data, Mapping):
+        raise ValueError(
+            f"dynamics block must be a JSON object, got {type(data).__name__}. "
+            "The artefact's metadata is malformed."
+        )
     unknown = sorted(set(data) - DYNAMICS_FIELDS)
     if unknown:
         raise ValueError(
@@ -104,7 +116,20 @@ def validate_dynamics_dict(data: Mapping[str, Any]) -> dict[str, float]:
             "was exported by a newer crowdrl than this one. Upgrade crowdrl "
             "to at least the version that exported it."
         )
-    return {key: float(value) for key, value in data.items()}
+    validated: dict[str, float] = {}
+    for key, value in data.items():
+        # bool is an int subclass, so float(True) == 1.0 would sail through.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"dynamics field {key!r} must be a number, got {value!r} ({type(value).__name__})."
+            )
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"dynamics field {key!r} must be finite, got {number!r}.")
+        if number < 0.0:
+            raise ValueError(f"dynamics field {key!r} must be non-negative, got {number!r}.")
+        validated[key] = number
+    return validated
 
 
 def _checked_kwargs(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:

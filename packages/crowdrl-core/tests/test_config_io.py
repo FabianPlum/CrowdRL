@@ -138,3 +138,41 @@ class TestDynamicsBlock:
 
         with pytest.raises(ValueError, match="warp_factor"):
             validate_dynamics_dict({"warp_factor": 9.0})
+
+    @pytest.mark.parametrize("payload", [[], 3, "x", None, ["desired_velocity_weight"]])
+    def test_non_object_payload_raises_cleanly(self, payload):
+        """Valid JSON that is not an object used to escape as an AttributeError
+        from .items(), bypassing the caller's 'unreadable metadata' handling."""
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            validate_dynamics_dict(payload)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_values_raise(self, bad):
+        """A NaN reaching the physics propagates silently through every
+        position, and defeats any comparison-based mismatch detection."""
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        with pytest.raises(ValueError, match="finite"):
+            validate_dynamics_dict({"contact_stiffness": bad})
+
+    def test_negative_values_raise(self):
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        with pytest.raises(ValueError, match="non-negative"):
+            validate_dynamics_dict({"contact_damping": -1.0})
+
+    @pytest.mark.parametrize("bad", [True, False])
+    def test_bools_raise(self, bad):
+        """bool is an int subclass, so float(True) == 1.0 sailed through."""
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        with pytest.raises(ValueError, match="must be a number"):
+            validate_dynamics_dict({"desired_velocity_weight": bad})
+
+    def test_zero_is_accepted(self):
+        """Zero contact stiffness (physics disabled) is legitimate."""
+        from crowdrl_core.config_io import validate_dynamics_dict
+
+        assert validate_dynamics_dict({"contact_stiffness": 0.0}) == {"contact_stiffness": 0.0}

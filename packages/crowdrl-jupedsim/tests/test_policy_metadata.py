@@ -300,3 +300,76 @@ class TestResolveDynamics:
 
         with pytest.raises(ValueError, match="warp_factor"):
             resolve_dynamics(ConstantPolicy([0, 0, 0, 0]), {"warp_factor": 9.0})
+
+    def test_legacy_fallback_warns_for_a_metadata_capable_policy(self):
+        """A v1 artefact silently ran w=0.05/clamp 5.0 against trained 0.8/3.0 --
+        a ~16x change in the velocity-response time constant, unannounced."""
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        with pytest.warns(UserWarning, match="records no trained value") as record:
+            resolve_dynamics(self._policy_with(None), {})
+        message = str(record[0].message)
+        for field in (
+            "desired_velocity_weight",
+            "max_velocity_magnitude",
+            "contact_stiffness",
+            "contact_damping",
+        ):
+            assert field in message
+
+    def test_fully_recorded_dynamics_do_not_warn(self):
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            resolved = resolve_dynamics(
+                self._policy_with(
+                    {
+                        "desired_velocity_weight": 0.8,
+                        "max_velocity_magnitude": 3.0,
+                        "contact_stiffness": 30000.0,
+                        "contact_damping": 500.0,
+                    }
+                ),
+                {},
+            )
+        assert resolved["desired_velocity_weight"] == 0.8
+
+    def test_constant_policy_stays_silent(self):
+        """ConstantPolicy has no checkpoint, so there is nothing to have
+        recorded -- warning there would be noise in every adapter unit test."""
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            resolve_dynamics(ConstantPolicy([0, 0, 0, 0]), {})
+
+    def test_mismatch_tolerance_is_relative(self):
+        """An absolute 1e-12 is sub-ULP at contact-stiffness scale
+        (ulp(30000.0) = 3.6e-12), so adjacent doubles raised as a mismatch."""
+        import math
+
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        stored = 30000.0
+        neighbour = math.nextafter(stored, math.inf)
+        assert neighbour != stored
+        resolved = resolve_dynamics(
+            self._policy_with({"contact_stiffness": stored}),
+            {"contact_stiffness": neighbour},
+        )
+        assert resolved["contact_stiffness"] == neighbour
+
+    def test_genuinely_different_values_still_raise(self):
+        """The relative tolerance must not blunt real disagreement."""
+        from crowdrl_jupedsim.policy import resolve_dynamics
+
+        with pytest.raises(ValueError, match="contact_stiffness"):
+            resolve_dynamics(
+                self._policy_with({"contact_stiffness": 30000.0}),
+                {"contact_stiffness": 30001.0},
+            )
