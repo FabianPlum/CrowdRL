@@ -252,6 +252,11 @@ New, found in this review (both verified against source and probed):
    exactly 0.2000 m). The problem is that 0.2 is not radius-aware and sits
    inside our 0.225 m body radius. The upstream ask is therefore
    "radius-aware/configurable waypoint inset", not "add an inset".
+   **Followed up 2026-07-30**: configurability is now ruled out from source --
+   agent size is private to the operational model, the router is passed only a
+   position, and the A* explicitly assumes point-size agents. Full evidence
+   and the co-draft design sketch live in `plan/lockstep_parity_analysis.md`,
+   section "Why the router inset cannot be configured".
 4. Existing items, now with mechanism attached: the 2-iteration exit
    removal lag is structural pipeline order (`Stage.cpp:116-123` marks in
    the strategical phase; `AgentRemovalSystem` erases at the start of the

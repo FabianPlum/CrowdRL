@@ -60,6 +60,41 @@ signal, and it explains the deployment-side weaving and the earlier
 freeze-divergence observations. No post-processing of the router output
 (clearance push-off, LOS promotion) reproduces the funnel signal.
 
+### Why the router inset cannot be configured (verified 2026-07-30)
+
+Channel 5 is **structural, not a setting we failed to find**. Verified against
+the jupedsim clone at HEAD `49e3ddebd`:
+
+1. **Agent size lives only inside the operational model's own state.** There
+   is no framework-level agent size. Built-ins each declare their own
+   (`radius{0.2}` in CollisionFreeSpeed V1/V2/V3 and AnticipationVelocity,
+   `radius{0.3}` SocialForce, `radius{0.15}` WarpDriver; GCFM alone carries a
+   true speed-dependent ellipse `Av`/`AMin`/`BMin`/`BMax`).
+   `CustomModel::State` -- our layer -- fixes exactly one field, `Point
+   position` (`CustomModel.hpp:74`); the rest is our type-erased payload. The
+   engine core reads no size anywhere: the neighbourhood grid indexes agents
+   as dimensionless points, waypoint/exit completion is point-in-set, spawn
+   validation is `InsideGeometry(position)`. Enforcement is delegated to
+   `CheckModelConstraint`, which for a custom model is ours (default `pass`).
+2. **The router never sees it.** `TacticalDecisionSystem::Run` passes only
+   `agent.position()` and `agent.finalTarget` (`TacticalDecisionSystem.hpp:16-22`);
+   model state never crosses into routing. `RoutingEngine`'s only ctor
+   argument is the polygon, and `Simulation` hard-wires it to
+   `_geometry->Polygon()` (`Simulation.cpp:65`) -- no setter, no injection, no
+   virtual to override. The A* cost model states the assumption outright:
+   `g_value_2 = g_value + 0`, "we assume point size agents (for now)"
+   (`RoutingEngine.cpp:187-189`). The funnel inset is a bare `0.2` literal
+   (`RoutingEngine.cpp:330-331`) carrying a TODO to delete it in favour of
+   arc-paths -- not a named constant, ctor param, macro, or env var; not
+   exposed to Python; unconnected to any model's radius (every model merely
+   *defaults* to 0.2). It is also unclamped: for portals shorter than 0.4 m
+   the two inset candidates cross past each other.
+3. **Exposure to the model is one-way.** Size is fully ours, ego and
+   neighbours (`env_query.other_agents_in_range()` -> `neighbor.model.<field>`,
+   as used at `model.py:433-434`). Routing is not: the model receives only the
+   finished `agent.next_target`, read-only. We cannot tell the router our
+   radius, and we cannot read back the inset it used.
+
 ## First-divergence experiments
 
 With channels 1-6 equalised (prototype), the corner run at trained dynamics
@@ -108,12 +143,15 @@ segment (funnel corners + wall projection), both compared with
 
 - **`LearnedPolicyModel`** stays the interactive/production adapter: router
   waypoint, per-agent callbacks, no `triangle` dependency, tolerant of
-  arbitrary journeys. Route-level faithful, not byte-exact -- channels 6
+  arbitrary journeys. Route-level faithful, not byte-exact -- channels 5 (the
+  router's fixed 0.2 m waypoint inset vs our per-agent body radius), 6
   (neighbour one-step staleness in the contact damping) and 7 (the exit lag
   leaking removed agents into neighbours' observations) remain step-level
   semantic differences by design, and no amount of retraining removes them.
-  Optional `waypoint_clearance` mitigates the router's corner-targeting (off
-  by default).
+  Channel 5 is additionally not settable from Python at all (see "Why the
+  router inset cannot be configured" above), so optional `waypoint_clearance`
+  is mitigation of the router's corner-targeting, not parity -- post-processing
+  the router output does not reproduce the funnel signal. Off by default.
 - **`LockstepPolicyModel`** is the validation instrument: IAS-7-style
   comparisons, regression baselines, and any claim of the form "JuPedSim
   reproduces the CrowdRL result" should run through it.
@@ -137,3 +175,13 @@ segment (funnel corners + wall projection), both compared with
 5. Upstream questions to co-draft when the time comes: the 2-iteration exit
    removal lag (bookkeeping quirk or intended?), radius-aware routing, and
    the dt convention -- all now with concrete measurements attached.
+   Radius-aware routing is no longer an open question about *what exists*: an
+   inset exists but is fixed at 0.2 m and blind to the model (see above), so
+   this is a feature request, not a knob. Design sketch for the co-draft, if
+   it goes anywhere: a virtual `RoutingClearance(const GenericAgent&)` on
+   `OperationalModel` -- the tactical system already holds the agent, and only
+   the model can interpret the type-erased state -- threaded into
+   `ComputeWaypoint` in place of the literal, plus a pybind arg on the
+   standalone `RoutingEngine` ctor. Built-ins would answer `radius`, GCFM
+   `max(AMin, BMax)`, custom models whatever they track. Recorded as a sketch
+   only; the "never post directly" rule stands.
