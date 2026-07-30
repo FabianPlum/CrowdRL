@@ -21,7 +21,11 @@ Provenance (also readable via `OnnxPolicy(...).metadata.provenance`):
   **JuPedSim routing contract** (`use_jupedsim_style_routing: true`: waypoints
   served router-style at the fixed 0.2 m portal inset, `path_deviation` pinned
   to 0.0 -- the signal the deployed `LearnedPolicyModel` actually feeds)
-- checkpoint: `checkpoint_rollout_0125.pt` (episode 8745)
+- checkpoint: `checkpoint_rollout_0125.pt` -- provenance records both
+  `rollout: 125` and `episode: 8745`. (Before 2026-07-30 `train_mappo.py`
+  passed the episode total into `save_checkpoint`'s `rollout_count` slot, so
+  this artefact previously advertised `rollout: 8745`. The exporter now takes
+  the rollout from the checkpoint filename, which is authoritative.)
 - observation: 89D -- `use_goal_direction=False` (navigates by the routed
   waypoint alone), navmesh block, 6D temporal memory
 - action: speed/turn-coupled interpreter (240 deg/s pivot), dt=0.01
@@ -44,17 +48,40 @@ artefact is the best-scoring checkpoint rather than the last one.
 `scorecard_r0125.json` (shipped) against `scorecard_r0400.json` (the previous
 best, kept as the comparison baseline):
 
-| metric | r0400 baseline | **r0125 (shipped)** |
-|---|---|---|
-| goal_rate | 0.954 | **0.975** |
-| agent_collision_rate | 0.116 | **0.093** |
-| stuck_agent_frac | 0.159 | **0.032** |
-| freeze_rate | 0.099 | **0.084** |
-| path_efficiency | 0.917 | **0.920** |
+| metric | r0400 baseline | **r0125 (shipped)** | |
+|---|---|---|---|
+| goal_rate | 0.954 | **0.975** | better |
+| agent_collision_rate | 0.116 | **0.093** | better |
+| stuck_agent_frac † | 0.159 | **0.032** | better |
+| freeze_rate | 0.099 | **0.084** | better |
+| wall_contact_rate | 0.0135 | **0.0071** | better |
+| path_efficiency | 0.917 | **0.920** | better |
+| episode_length | 868.5 | **822.3** | better |
+| wall_proximity_rate | **0.116** | 0.137 | worse |
+| speed_over_preferred | **1.122** | 1.175 | worse (target 1.0) |
+| frac_steps_above_preferred | **0.747** | 0.781 | worse |
 
-Better on every axis. The high-density scenarios (`composed_hi` at 60-100
-agents) remain the weakest and are where the later checkpoints lost ground --
-see `plan/CrowdRL_Project_Plan_v9.md` for what that implies for retraining.
+Better on the task metrics that matter -- goal rate, collisions, stuck and
+freeze fractions, wall contact and path efficiency -- but **not on every axis**:
+r0125 hugs walls more and overshoots its preferred speed more. The two speed
+rows are the same drift seen twice (agents running ~17.5% above preferred rather
+than ~12%), and it sits oddly beside the over-conservatism story above: this
+checkpoint is *faster* than the baseline in open running yet freezes more in
+dense crowds. Worth a look before the next round rather than an established
+finding.
+
+† `stuck_agent_frac` is only emitted for scenarios that still have unfinished
+agents at the end (`eval_metrics.py` gates it on `not_done.any()`), and the
+aggregate means over the scenarios that reported it. r0400 reported it in two
+scenarios (`composed_hi` at 60 and 100 agents), r0125 in one (`composed_hi` at
+100), so the two column values do not share a denominator. On the scenario both
+report, `composed_hi` at 100 agents, it is 0.290 → **0.032**. Over a fixed
+two-scenario denominator r0125 would score 0.016, so the table row understates
+the improvement rather than flattering it.
+
+The high-density scenarios (`composed_hi` at 60-100 agents) remain the weakest
+and are where the later checkpoints lost ground -- see
+`plan/CrowdRL_Project_Plan_v9.md` for what that implies for retraining.
 
 Regenerated via:
 

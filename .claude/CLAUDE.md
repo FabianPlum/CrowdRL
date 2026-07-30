@@ -19,11 +19,17 @@ Always run the full test suite (`uv run pytest`) AND check linting (`uv run ruff
 ```
 crowdrl-core          ← shared foundation, NO RL/JuPedSim deps
 crowdrl-env           ← depends on core + Gymnasium
+crowdrl-torch         ← depends on env + PyTorch; GPU-batched reimplementation
+                        of the env step. Training-only, NOT in the deployment
+                        path, held in step with core by parity tests
 crowdrl-train         ← depends on env + PyTorch
-crowdrl-jupedsim      ← depends on core + JuPedSim + ONNX Runtime
+crowdrl-jupedsim      ← depends on core + ONNX Runtime (JuPedSim supplied
+                        out-of-band, see below)
 ```
 
-Build order: core → env → train → jupedsim. The only artefact crossing from train to jupedsim is an `.onnx` policy file.
+Five packages, not four. Build order: core → env → torch/train → jupedsim. The only artefact crossing from training to deployment is an `.onnx` policy file.
+
+Note the real entry point is root `train_mappo.py` (~1,900 LOC), not `crowdrl-train/train.py` — the latter is the library loop.
 
 ## crowdrl-core
 
@@ -77,7 +83,7 @@ A* on navmesh verifies all (spawn, goal) pairs. Three modes:
 - **Tier 2** — Smoothness: jerk penalty, angular acceleration penalty, preferred-speed deviation
 - **Tier 3** — Distributional style matching from PeTrack trajectory data (velocity autocorrelation, neighbour-distance distributions)
 
-## Observation space (~80–99D per agent)
+## Observation space (80D base → 129D fully instrumented; 89D in production)
 
 | Component | Dims | Details |
 |-----------|------|---------|
@@ -85,8 +91,15 @@ A* on navmesh verifies all (spawn, goal) pairs. Three modes:
 | Social | K×7 = 56 | K=8 nearest: rel pos (2), rel vel (2), body orient (1), body dims (2) |
 | Raycasts | N = 16 | Head-anchored, 200° FOV, normalised distances. Optional 2-channel (distance + hit-type) → 32D |
 | Navmesh (optional) | 3 | Next-waypoint direction (2) + path deviation (1) |
+| Temporal memory (optional) | 6 | Own-trajectory history: displacement from spawn, cumulative path length, path efficiency, elapsed fraction, windowed displacement + goal progress |
+| Neighbour velocity history (optional) | K×2 = 16 | Per tracked neighbour, velocity change over the last W_n steps (acceleration proxy) |
+| Neighbour trajectory features (optional) | K×3 = 24 | Per tracked neighbour, its own path efficiency + windowed displacement + goal progress |
 
-All in egocentric frame. Total: 80D (1-channel rays) to 99D (2-channel + navmesh).
+All in egocentric frame. `ObsConfig.obs_dim` is the authority — do not compute it by hand.
+
+- Base (ego + social + 1-channel rays): **80D**; with 2-channel rays 96D.
+- Fully instrumented: **129D** (1-channel) / 145D (2-channel).
+- **The shipped policy is 89D**: ego 8 + social 56 + rays 16 + navmesh 3 + temporal 6, with `use_goal_direction=False` (navigates by the routed waypoint alone) and `use_jupedsim_style_routing=True` (router-style waypoint at JuPedSim's 0.2 m portal inset, `path_deviation` pinned to 0.0). The guiding principle: **do not train on a signal deployment cannot supply.**
 
 ## Action space (4D continuous)
 
@@ -114,13 +127,16 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 4. Call core action interpreter → desired velocities
 5. Return to JuPedSim simulation loop
 
-**Orientation gap**: JuPedSim agents have no torso/head angles. Strategy A (initial): adapter tracks orientation state privately. Strategy B (future): extend JuPedSim agent model via PR.
+**Orientation**: JuPedSim 2.0's custom-model layer lets the adapter own an arbitrary immutable per-agent state, so torso angle, head angle, preferred speed, body dimensions and the memory buffers are simply fields on the frozen `CrowdRLAgentState`. A neighbour's state is readable during the callback, so social sensing gets them too — the deployment observation is reconstructed faithfully, not approximated. (Earlier drafts weighed a private side-channel dict vs. a C++ PR extending JuPedSim's agent struct; both are retired.)
+
+**JuPedSim is NOT installed as a dependency.** `crowdrl-jupedsim` declares none: the custom-model layer exists only on upstream `main` (2.0, unreleased), and declaring `jupedsim>=1.0` made `uv sync` install a 1.x wheel that silently shadowed the local source build. Supply 2.0 out-of-band via a `.pth` in the venv's site-packages pointing at the build's `lib/` and `python_modules/jupedsim`. Every JuPedSim-dependent test uses `pytest.importorskip`, so the suite stays green without a build.
 
 ## Current state
 
-- **Active**: Building crowdrl-core (WorldState, geometry, navmesh) and crowdrl-env (procedural generator Tiers 0–2)
-- **Not started**: crowdrl-train, crowdrl-jupedsim, Tier 3 reward
-- **Reference doc**: CrowdRL_Project_Plan_v8.md (full design rationale, milestones, risks)
+- **All five packages are active.** crowdrl-core, crowdrl-env, crowdrl-torch (the GPU training path that `train_mappo.py` actually drives), crowdrl-train, and crowdrl-jupedsim.
+- **Delivered**: the JuPedSim deployment path — `LearnedPolicyModel`, the self-describing ONNX artefact (`example_model/policy_r0125.onnx`, schema v2: obs/action config + trained dynamics + provenance embedded), e2e scenarios, and `LockstepPolicyModel` as a byte-exact validation instrument. Suite: 662 tests.
+- **Open**: Tier 3 (distributional/style) reward, Tier 4–5 geometry, the IAS-7 geometry importer, the cross-model benchmark runner (LearnedPolicyModel vs CollisionFreeSpeedModel/SocialForceModel), and the behavioural weak spot — high-density scenarios where the policy trades goal completion for collision avoidance.
+- **Reference doc**: `plan/CrowdRL_Project_Plan_v9.md` (full design rationale, milestones, risks, and the dated implementation progress log). v8 and earlier are superseded.
 
 ## Development tooling
 

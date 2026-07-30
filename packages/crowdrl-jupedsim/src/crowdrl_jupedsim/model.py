@@ -204,11 +204,10 @@ class LearnedPolicyModel(CustomOperationalModel):
             restoring the training funnel's portal-inset semantics
             (``navmesh._inset_portal``). JuPedSim's router targets sharp
             corners directly -- a waypoint a funnel-trained policy never saw
-            in training and crashes into. Off by default while outcome-level
-            parity work is ongoing: correcting the waypoint reshuffles which
-            marginal agent falls into the checkpoint's freeze/absorbing state
-            (see plan/handover_2026-07-29.md), so flipping it is a
-            scenario-level decision for now.
+            in training and crashes into. Off by default: it changes the
+            navigation signal mid-route, so whether it helps depends on the
+            geometry and on what the artefact was trained against, making it a
+            scenario-level decision rather than a safe global default.
 
             Keep it OFF for artefacts trained with
             ``use_jupedsim_style_routing``: those policies were trained on the

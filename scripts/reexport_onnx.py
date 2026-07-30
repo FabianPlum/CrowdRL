@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -61,6 +62,39 @@ DYNAMICS_FIELDS = (
 # Only desired_velocity_weight has one (train_mappo.py:189); the other three
 # have no representation in the YAML schema at all.
 DYNAMICS_YAML_KEYS = {"desired_velocity_weight": "desired_velocity_weight"}
+
+# checkpoint_rollout_0125.pt -> 125
+_ROLLOUT_IN_NAME = re.compile(r"checkpoint_rollout_(\d+)\.pt$")
+
+
+def _rollout_provenance(checkpoint_name: str, ckpt: dict) -> dict:
+    """Provenance fields describing *when* in training this checkpoint is from.
+
+    The filename is authoritative for the rollout index: ``train_mappo.py``
+    names each periodic checkpoint after the rollout that produced it. The
+    in-checkpoint ``rollout_count`` field is not trustworthy on its own --
+    until 2026-07-30 ``train_mappo.py`` passed the episode total into that
+    slot, so checkpoints written before then carry episodes there (the shipped
+    r0125 artefact previously advertised ``rollout: 8745`` for
+    ``checkpoint_rollout_0125.pt``). Prefer the name, and only fall back to the
+    stored field when the name carries no rollout, labelling it for what it is.
+    """
+    provenance: dict[str, int | str] = {}
+    match = _ROLLOUT_IN_NAME.search(checkpoint_name)
+    if match:
+        provenance["rollout"] = int(match.group(1))
+    elif "rollout_count" in ckpt:
+        # Ambiguous: could be a rollout index or a pre-fix episode count.
+        provenance["rollout_count_unverified"] = int(ckpt["rollout_count"])
+
+    if "total_episodes" in ckpt:
+        provenance["episode"] = int(ckpt["total_episodes"])
+    elif match and "rollout_count" in ckpt and int(ckpt["rollout_count"]) != int(match.group(1)):
+        # Pre-fix checkpoint: the slot holds episodes, and the disagreement
+        # with the filename is the evidence for that.
+        provenance["episode"] = int(ckpt["rollout_count"])
+    return provenance
+
 
 # Keys from superseded YAML schemas that encoded dynamics today's parser
 # ignores. Their presence proves the run predates the current formulation, so
@@ -237,7 +271,7 @@ def main() -> None:
         provenance={
             "run": args.results_dir.name,
             "checkpoint": args.checkpoint,
-            "rollout": int(ckpt.get("rollout_count", -1)),
+            **_rollout_provenance(args.checkpoint, ckpt),
             "git_rev": _git_rev(),
             "source": "scripts/reexport_onnx.py",
             # Per-field origin of the certified dynamics block, so a reader can

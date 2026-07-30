@@ -1433,7 +1433,7 @@ time:
   onnxruntime's `onnxruntime_pybind11_state.pyd` and triton-windows'
   `libtriton.pyd` ("DLL initialization routine failed"). Torch itself was
   unaffected, so the only visible symptom was `torch.compile` silently falling
-  back to eager -- a **2.9x throughput loss** (57 k -> 164 k agent-steps/s
+  back to eager -- a **2.9x throughput loss** (164 k -> 57 k agent-steps/s
   global) that a training log reports as one warning line. Fix: preload the VS
   2022 14.44 redist CRT from a venv-local directory via `sitecustomize.py`. The
   general lesson: "DLL initialization routine failed" across *several unrelated*
@@ -1455,11 +1455,14 @@ collected tests.**
 
 | Package | Modules | LOC | Tests | Role |
 |---|---|---|---|---|
-| `crowdrl-core` | 9 | ~4.0 k | 208 | The shared contract: `world_state`, `observation` (the single builder, 923 LOC), `sensing`, `navmesh` (A\* + funnel), `geometry`, `collision`, `action`, `config_io` |
-| `crowdrl-env` | 9 | ~4.5 k | 157 | Gymnasium `CrowdEnv`, procedural generator (Tiers 0-3b), reward, spawner, solvability, visualiser, Kinora HDF5 export |
-| `crowdrl-torch` | 15 | ~4.5 k | 66 | The GPU-batched training path (batched env, step, obs/sensing/reward ports, DD-PPO) |
-| `crowdrl-train` | 13 | ~3.8 k | 94 | MAPPO loop, config, buffer/GAE, networks, **ONNX export**, scorecard, curriculum |
+| `crowdrl-core` | 9 | ~4.0 k | 220 | The shared contract: `world_state`, `observation` (the single builder, 923 LOC), `sensing`, `navmesh` (A\* + funnel), `geometry`, `collision`, `action`, `config_io` |
+| `crowdrl-env` | 9 | ~4.1 k | 157 | Gymnasium `CrowdEnv`, procedural generator (Tiers 0-3b), reward, spawner, solvability, visualiser, Kinora HDF5 export |
+| `crowdrl-torch` | 15 | ~5.1 k | 66 | The GPU-batched training path (batched env, step, obs/sensing/reward ports, DD-PPO). The largest package in the repo |
+| `crowdrl-train` | 13 | ~3.5 k | 94 | MAPPO loop, config, buffer/GAE, networks, **ONNX export**, scorecard, curriculum |
 | `crowdrl-jupedsim` | 4 | ~1.4 k | 70 | `model.py` `LearnedPolicyModel` (the deployment path), `policy.py` (`OnnxPolicy` + metadata resolution), `lockstep.py` (the validation instrument) |
+| root `tests/` | -- | -- | 55 | Cross-package integration: e2e JuPedSim scenarios, lockstep byte parity, dynamics provenance, config/metadata round-trip, `train_mappo` helpers |
+
+(607 package tests + 55 root tests = the 662 collected above.)
 
 Four honest observations from the audit, each an action item rather than a
 complaint:
@@ -1489,19 +1492,30 @@ complaint:
   defensible convention, but it means the deliberate gaps below are invisible to
   a code reader: the YAML lossy-gap guard in `config_io.cfg_dict_from_env_config`
   (docstring-only), Lockstep's fixed-roster/no-pass-detection limitation,
-  `crowd_env.py:243` `preferred_speeds` for temporal-off configs, and the absent
+  `crowd_env.py:247` `preferred_speeds` reaching `WorldState` only inside the
+  `if self.config.obs.use_temporal_memory:` guard at `:235`, and the absent
   full-step numpy-vs-torch trajectory equivalence test.
 
 ### Milestone status (updated)
 
 - **M1-M3:** unchanged as infrastructure. The M3 quality bar is now *measured
-  per scenario* rather than asserted: collision-free goal-reaching holds
-  everywhere except the 100-agent composed case.
+  per scenario* rather than asserted -- and the measurement splits the bar in
+  two. **Goal-reaching** holds everywhere except `composed_hi` at 100 agents
+  (0.629; every other scenario is 1.000). **Collision-free** fails somewhere
+  else entirely: `composed_hi` at 100 agents has a collision rate of 0.027,
+  below the 0.093 aggregate, while the worst offenders are `rooms_hi` (0.485
+  and 0.231), `branch_t2` at 24 agents (0.172) and `rooms_t3a` at 30 (0.145).
+  Reaching goals and doing it cleanly are therefore failing in *different*
+  scenarios, which argues against a single "harder = worse" story. Caveat on
+  the `rooms_hi` rows: both report `metrics.n_agents = 5.0` against 60- and
+  100-agent specs, a spawner shortfall that makes those two collision figures a
+  thin sample and worth confirming before acting on.
 - **M4 (emergent phenomena):** still the open behavioural target; the
   over-conservatism finding above is the concrete blocker to attack first.
 - **M9 (JuPedSim integration):** adapter, self-describing artefact, e2e
   scenarios, byte-exact validation instrument and example notebook all
-  delivered, years ahead of the Months 14-18 slot. Outstanding: the cross-model
+  delivered, roughly a year ahead of the Months 14-18 slot (the progress log
+  opens 2026-03-26, putting today near month 5). Outstanding: the cross-model
   benchmark runner and the public release.
 - **Module D (validation):** the scorecard is now demonstrably load-bearing (it
   is what caught the regression and selected the artefact). Framing it as a
@@ -1534,7 +1548,11 @@ Ordered by what unblocks the most:
       `environment_query.py`'s two unbound methods; radius-aware/configurable
       router inset (verified to be a feature request, not a missed knob -- the
       A* assumes point-size agents); whether the 2-iteration exit lag is
-      intended; the dt convention.
+      intended; the dt convention. **New:** `SqliteTrajectoryWriter` has no
+      public `close()` path from `Simulation` -- every upstream example works
+      around it by touching the private `simulation._writer`, and forgetting to
+      leaves a valid-but-truncated file with no warning. A context manager, a
+      `Simulation.close()`, or a flush on destruction would all fix it.
 - [ ] **Pass detection via `Simulation.iteration_count()`** (carried) -- would
       eliminate the wholesale-roster-replacement failure class in Lockstep, but
       needs the Simulation handle after construction. Documented limitation for

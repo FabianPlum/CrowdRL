@@ -1586,7 +1586,8 @@ def train_worker(
                     reward_normalizer,
                     curriculum,
                     total_agent_steps,
-                    total_episodes,
+                    rollout,
+                    total_episodes=total_episodes,
                 )
                 if render_interval > 0 and rollout % render_interval == 0:
                     viz_out = results_dir / f"viz_r{rollout:04d}_tier3B.mp4"
@@ -1697,7 +1698,8 @@ def train_worker(
             reward_normalizer,
             curriculum,
             total_agent_steps,
-            total_episodes,
+            n_rollouts,
+            total_episodes=total_episodes,
         )
         print(f"  Checkpoint -> {results_dir / 'checkpoint_final.pt'}")
 

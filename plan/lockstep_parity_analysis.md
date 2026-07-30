@@ -7,8 +7,12 @@ design (`crowdrl_jupedsim.lockstep.LockstepPolicyModel`), which achieves it.
 
 ## Divergence channel inventory (measured)
 
-Micro-ablations on identical inputs, corner geometry, the shipped
-`example_model/policy_r0400.onnx` (89D nogoaldir + navmesh + temporal):
+Micro-ablations on identical inputs, corner geometry, measured against the
+**then-shipped** `example_model/policy_r0400.onnx` (89D nogoaldir + navmesh +
+temporal). That artefact has since been superseded by `policy_r0125.onnx`; the
+measurements below are left exactly as taken, since restating them against a
+different artefact would falsify the record. The channel inventory itself is
+artefact-independent.
 
 | # | Channel | Measured delta | Byte-parity consequence |
 |---|---------|----------------|-------------------------|
@@ -34,13 +38,18 @@ the two free-integrate apart without bound and systematically changing the
 action->motion mapping vs training. `CrowdRLAgentState.heading` is now
 documented as output-only.
 
-Measured effect of closing channel 8 (shipped artefact, trained dynamics
-w=0.8, `LearnedPolicyModel`, contact physics on):
+Measured effect of closing channel 8 (the then-shipped r0400 artefact, trained
+dynamics w=0.8, `LearnedPolicyModel`, contact physics on):
 
 | Scenario | Before | After |
 |----------|--------|-------|
 | Corner, 4 agents | 3/4 exit; 1 pinned at (11.8, 1.7) for all 4000 steps | **4/4 exit**, steps 738/821/903/979 (9.8 s) |
 | Bottleneck, 12 agents, 1.4 m | 11/12 exit; 1 pinned before the neck; min pairwise 0.350 m | **12/12 exit** in 7.4 s; min pairwise 0.410 m |
+
+For the currently shipped `policy_r0125.onnx` the same scenarios give corner
+4/4 at steps 729/808/896/973 (9.7 s) and bottleneck 12/12 in 7.1 s with min
+pairwise 0.416 m (`tests/test_e2e_jupedsim_trained_policy.py`). Both artefacts
+clear the roster; the step numbers differ because the policies differ.
 
 This **retracts the "policy absorbing state" attribution** for the lost
 agent in both e2e scenarios and in notebook 10's parity section. The
