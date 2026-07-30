@@ -8,7 +8,14 @@ ordering, temporal bookkeeping, and native removal semantics inside JuPedSim.
 Positions are compared with ``np.array_equal`` -- exact, no tolerance.
 
 Needs a JuPedSim 2.0 source build on sys.path (skips in CI) and the shipped
-``example_model/policy_r0400.onnx``.
+``example_model/policy_r0125.onnx``.
+
+Scope note: ``LockstepPolicyModel`` is a **validation instrument**, not a
+deployment path -- it bypasses JuPedSim's router, journeys and stage
+transitions in favour of its own navmesh and removal bookkeeping. It stays
+covered here because any "JuPedSim reproduces the CrowdRL result" claim runs
+through it; ``LearnedPolicyModel`` is the JuPedSim-native deployment model and
+is exercised by ``test_e2e_jupedsim_trained_policy.py``.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ from crowdrl_jupedsim import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_MODEL = ROOT / "example_model" / "policy_r0400.onnx"
+EXAMPLE_MODEL = ROOT / "example_model" / "policy_r0125.onnx"
 pytestmark = pytest.mark.skipif(
     not EXAMPLE_MODEL.is_file(), reason="shipped example model missing"
 )

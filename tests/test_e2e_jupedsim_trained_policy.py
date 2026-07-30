@@ -14,7 +14,7 @@ Scenarios:
   solo navigation?
 
 The self-configured scenarios run against the shipped, metadata-carrying
-``example_model/policy_r0400.onnx`` and need only a JuPedSim 2.0 source
+``example_model/policy_r0125.onnx`` and need only a JuPedSim 2.0 source
 build on ``sys.path`` -- no configuration of any kind: the adapter
 reconstructs the training configs from the artefact (issue #7).
 
@@ -46,7 +46,7 @@ import jupedsim as jps  # noqa: E402
 from crowdrl_jupedsim import CrowdRLAgentState, LearnedPolicyModel, OnnxPolicy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_MODEL = ROOT / "example_model" / "policy_r0400.onnx"
+EXAMPLE_MODEL = ROOT / "example_model" / "policy_r0125.onnx"
 RESULTS_DIR = os.environ.get("CROWDRL_E2E_RESULTS_DIR")
 
 # The jupedsim#1625 reproduction geometry: lower corridor -> corner -> exit.
@@ -139,12 +139,12 @@ class TestSelfConfiguredCorner:
     """The shipped schema-v2 artefact: configs AND dynamics self-configure,
     so this runs at the TRAINED dynamics (w=0.8, clamp 3.0).
 
-    Baseline: 4/4 exit in ~9.8 s sim (exit steps 738/821/903/979). Until
-    2026-07-30 this scenario lost one agent, which was attributed to a policy
-    absorbing state; it was in fact divergence channel 8 -- the adapter
-    free-integrated a heading instead of re-anchoring it to the torso the way
-    both training engines do (see plan/lockstep_parity_analysis.md). With that
-    closed, no agent is lost.
+    Baseline (policy_r0125.onnx): 4/4 exit in ~9.7 s sim (exit steps
+    729/808/896/973). The predecessor artefact lost one agent here until
+    2026-07-30, which was attributed to a policy absorbing state; it was in
+    fact divergence channel 8 -- the adapter free-integrated a heading instead
+    of re-anchoring it to the torso the way both training engines do (see
+    plan/lockstep_parity_analysis.md). With that closed, no agent is lost.
 
     Machine scope: exit steps and the exact completion count rest on ONNX
     Runtime being run-to-run deterministic for this session/hardware. Expect
@@ -201,14 +201,14 @@ class TestSelfConfiguredBottleneck:
     """Crowd behaviour, not just solo navigation: 12 agents, 1.4 m aperture,
     at the trained dynamics (self-configured from the schema-v2 artefact).
 
-    Baseline: 12/12 exit in ~7.4 s sim (first 4.21 s, median 6.06 s, last
-    7.38 s). Until 2026-07-30 one agent was lost here too -- same cause as in
-    the corner scenario, divergence channel 8 (heading anchoring), not a
-    policy absorbing state.
+    Baseline (policy_r0125.onnx): 12/12 exit in ~7.1 s sim (first 4.15 s,
+    median 5.75 s, last 7.09 s). The predecessor artefact lost one agent here
+    too -- same cause as in the corner scenario, divergence channel 8 (heading
+    anchoring), not a policy absorbing state.
 
     Spacing is a real criterion with contact physics active: pre-physics this
     scenario bottomed out at ~0.04 m centre distance (ghosting); observed
-    floor at trained dynamics is 0.41 m.
+    floor at trained dynamics is 0.42 m.
 
     Machine scope: as in the corner scenario, exit steps are ONNX-Runtime
     determinism-scoped to this session/hardware.

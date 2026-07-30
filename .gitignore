@@ -43,6 +43,12 @@ htmlcov/
 *.onnx
 !example_model/*.onnx
 
+# The example model ships as onnx + config + scorecard only. Torch checkpoints
+# and renders next to it stay local: the .pt is reproducible from the run dir
+# (and is what --init_from consumed), the .mp4 is a regenerable render.
+example_model/*.pt
+example_model/*.mp4
+
 # Jupyter
 .ipynb_checkpoints/
 

@@ -19,13 +19,16 @@ not record must be supplied explicitly (or waived with
 ``--assume-current-defaults``), and the per-field origin is stamped into the
 artefact's provenance as ``dynamics_provenance``.
 
-Typical use -- upgrade a legacy artefact in place, proving equivalence:
+Typical use -- export a checkpoint as the shipped example model (how
+``example_model/policy_r0125.onnx`` was produced):
 
-    uv run python scripts/reexport_onnx.py results_exp_.../ \
-        checkpoint_rollout_0400.pt --output example_model/policy_r0400.onnx \
-        --verify-against results_exp_.../policy_r0400.onnx \
+    uv run python scripts/reexport_onnx.py results_exp_jps_routing_ft_r0400 \
+        checkpoint_rollout_0125.pt --output example_model/policy_r0125.onnx \
         --max-velocity-magnitude 3.0 \
         --contact-stiffness 30000 --contact-damping 500
+
+Add ``--verify-against <existing.onnx>`` when upgrading a legacy artefact in
+place, to prove the new export produces identical outputs.
 """
 
 from __future__ import annotations

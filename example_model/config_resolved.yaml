@@ -1,0 +1,121 @@
+seed: 42
+ddp_backend: gloo
+n_envs: 64
+max_agents: 100
+steps_per_collect: 1280000
+n_rollouts: 600
+log_interval: 5
+compile_step: true
+checkpoint_interval: 25
+render_during_training: true
+render_interval: 0
+scorecard_during_training: true
+scorecard_max_steps: 1500
+curriculum:
+  metric_window: 100
+  min_episodes_per_phase: 200
+  phases:
+  - name: composed
+    tiers:
+    - TIER_3A
+    - TIER_3B
+    agents:
+    - 20
+    - 60
+    threshold: 0.4
+  - name: full
+    tiers:
+    - TIER_0
+    - TIER_1
+    - TIER_2
+    - TIER_3A
+    - TIER_3B
+    agents:
+    - 10
+    - 100
+    threshold: 0.0
+    tier_weights:
+    - 0.05
+    - 0.05
+    - 0.1
+    - 0.35
+    - 0.45
+geometry:
+  min_side: 12.0
+  max_side: 22.0
+  corridor_width:
+  - 2.0
+  - 4.0
+  corridor_length:
+  - 8.0
+  - 18.0
+observation:
+  use_navmesh: true
+  use_goal_direction: false
+  use_jupedsim_style_routing: true
+  use_temporal_memory: true
+  temporal_memory_window: 50
+action:
+  max_heading_change_deg: 4.8
+  max_torso_change_deg: 4.8
+  speed_turn_coupling: true
+  turn_lat_accel: 2.0
+  turn_pivot_rate_deg: 240.0
+reward:
+  goal_bonus: 20.0
+  collision_penalty: -2.0
+  timeout_penalty: -10.0
+  existence_penalty: -0.01
+  progress_weight: 2.0
+  inverse_distance_weight: 0.0
+  speed_deviation_weight: 0.0
+  use_smoothness: false
+  wall_proximity_penalty: -0.1
+  wall_proximity_threshold: 1.5
+  wall_collision_penalty: -0.5
+  agent_proximity_penalty_near: -0.025
+  agent_proximity_penalty_far: -0.001
+  personal_space_radius: 0.75
+  action_rate_weight: -0.001
+  use_velocity_weighted_collision: true
+  collision_speed_floor: 0.25
+  collision_speed_scale: 0.5
+  collision_penalty_cap: -2.0
+  use_velocity_weighted_proximity: true
+  proximity_speed_floor: 0.0
+  proximity_speed_scale: 0.5
+max_steps: 3000
+desired_velocity_weight: 0.8
+episode:
+  stuck_termination_enabled: false
+  stuck_window_steps: 300
+  stuck_progress_threshold: 0.2
+network:
+  actor_hidden:
+  - 512
+  - 512
+  critic_hidden:
+  - 512
+  - 512
+ppo:
+  lr_actor: 0.0002
+  lr_critic: 0.0002
+  n_epochs: 10
+  clip_epsilon: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  target_kl: 0.02
+  lr_schedule: cosine
+  entropy_coef: 0.003
+  max_grad_norm: 1.0
+  use_huber_loss: true
+  huber_delta: 10.0
+eval:
+  n_episodes: 10
+  agent_range:
+  - 8
+  - 25
+  render_video: true
+  video_scenario: 7
+_launch:
+  init_from: C:\Users\Legos\dev\CrowdRL\example_model\checkpoint_rollout_0400.pt
