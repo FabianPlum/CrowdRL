@@ -197,21 +197,27 @@ def _orient_portal(
     edge_a: NDArray[np.float64],
     edge_b: NDArray[np.float64],
     from_centroid: NDArray[np.float64],
-    to_centroid: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Orient a shared edge as (left, right) relative to the travel direction.
+    """Orient a shared edge as (left, right) for crossing it from the
+    ``from`` triangle.
 
-    Standing at `from_centroid` and looking toward `to_centroid`, the portal's
-    'left' endpoint is to the left and 'right' is to the right.
+    The crossing direction is NOT derived from the centroid-to-centroid ray:
+    for the long thin triangles a CDT produces in corridors, that ray can miss
+    the shared edge entirely and put both endpoints on the same side, silently
+    swapping left/right -- the funnel then pops the wrong-side corner and
+    returns a detoured path (found 2026-07-30 by the JuPedSim router
+    emulation-fidelity test). Instead we use the one invariant that cannot
+    fail: the two triangles lie on opposite sides of their shared edge, so the
+    side the from-triangle's centroid is on fully determines the crossing
+    direction. Crossing a directed edge a->b from its left half-plane, ``b``
+    is on the traveller's left; crossing from its right half-plane, ``a`` is.
     """
-    travel = to_centroid - from_centroid
-    # Cross product: travel × (edge_a - from_centroid)
-    # Positive cross → edge_a is to the left
-    to_a = edge_a - from_centroid
-    cross = travel[0] * to_a[1] - travel[1] * to_a[0]
-    if cross >= 0:
-        return edge_a.copy(), edge_b.copy()  # a is left, b is right
-    return edge_b.copy(), edge_a.copy()  # b is left, a is right
+    edge = edge_b - edge_a
+    to_c = from_centroid - edge_a
+    cross = edge[0] * to_c[1] - edge[1] * to_c[0]
+    if cross > 0:  # from-centroid left of a->b: we cross toward its right side
+        return edge_b.copy(), edge_a.copy()  # b is left, a is right
+    return edge_a.copy(), edge_b.copy()  # a is left, b is right
 
 
 def build_navmesh(polygon: Polygon) -> NavMesh:
@@ -274,10 +280,10 @@ def build_navmesh(polygon: Polygon) -> NavMesh:
                 edge_a, edge_b = shared_verts[0], shared_verts[1]
 
                 # Orient portal for both travel directions
-                left_ij, right_ij = _orient_portal(edge_a, edge_b, centroids[i], centroids[j])
+                left_ij, right_ij = _orient_portal(edge_a, edge_b, centroids[i])
                 portals[(i, j)] = (left_ij, right_ij)
 
-                left_ji, right_ji = _orient_portal(edge_a, edge_b, centroids[j], centroids[i])
+                left_ji, right_ji = _orient_portal(edge_a, edge_b, centroids[j])
                 portals[(j, i)] = (left_ji, right_ji)
 
     return NavMesh(
