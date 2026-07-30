@@ -522,3 +522,76 @@ class TestRouteWaypointOverride:
         batch = build_observations_batch(world, config)
         for i in range(2):
             np.testing.assert_allclose(batch[i], build_observation(world, i, config), atol=1e-12)
+
+
+class TestJupedsimStyleRouting:
+    """use_jupedsim_style_routing: the funnel branch serves the deployed
+    signal -- router-style waypoint (fixed 0.2 m inset, element [1] verbatim)
+    with p_dev pinned to 0.0."""
+
+    FLAG_ON = ObsConfig(use_navmesh=True, use_jupedsim_style_routing=True)
+    FLAG_OFF = ObsConfig(use_navmesh=True)
+
+    @staticmethod
+    def _l_world(**kwargs):
+        """Agents in the horizontal arm of an L-corridor, goal around the
+        inner corner (9, 3) -- line of sight is blocked, so the nav signal
+        must come from the funnel corner."""
+        from shapely.geometry import Polygon
+
+        return make_world_state(
+            polygon=Polygon([(0, 0), (12, 0), (12, 10), (9, 10), (9, 3), (0, 3)]),
+            positions=np.array([[1.0, 1.5], [2.5, 1.5]]),
+            goal_positions=np.array([[10.5, 9.0], [10.5, 9.0]]),
+            build_nav=True,
+            **kwargs,
+        )
+
+    def test_p_dev_is_exactly_zero_behind_a_corner(self):
+        world = self._l_world()
+        obs_on = build_observation(world, 0, self.FLAG_ON)
+        obs_off = build_observation(world, 0, self.FLAG_OFF)
+        assert obs_on[-1] == 0.0
+        assert obs_off[-1] > 0.1, "sanity: the corner forces a real detour ratio"
+
+    def test_direction_matches_route_branch_math_on_router_waypoint(self):
+        from crowdrl_core.navmesh import router_next_waypoint
+
+        world = self._l_world()
+        obs = build_observation(world, 0, self.FLAG_ON)
+        wp = router_next_waypoint(world.navmesh, world.positions[0], world.goal_positions[0])
+        assert wp is not None
+        expected = (wp - world.positions[0]) / np.linalg.norm(wp - world.positions[0])
+        # Torso orientation is 0, so the ego frame equals the world frame.
+        np.testing.assert_allclose(obs[-3:-1], expected, atol=1e-12)
+
+    def test_direction_differs_from_body_radius_funnel(self):
+        world = self._l_world()
+        obs_on = build_observation(world, 0, self.FLAG_ON)
+        obs_off = build_observation(world, 0, self.FLAG_OFF)
+        # Body radius is 0.23 (conftest default) vs the router's 0.2 --
+        # different corner inset, measurably different direction.
+        assert not np.allclose(obs_on[-3:-1], obs_off[-3:-1])
+
+    def test_obs_dim_unchanged(self):
+        assert self.FLAG_ON.obs_dim == self.FLAG_OFF.obs_dim
+
+    def test_route_next_waypoints_still_wins(self):
+        from dataclasses import replace
+
+        world = replace(
+            self._l_world(),
+            route_next_waypoints=np.array([[1.0, 8.0], [2.5, 8.0]]),
+        )
+        obs = build_observation(world, 0, self.FLAG_ON)
+        # The injected route waypoint is due +y of the agent; the funnel
+        # corner is roughly +x. The route must win under the flag too.
+        np.testing.assert_allclose(obs[-3:], [0.0, 1.0, 0.0], atol=1e-12)
+
+    def test_batch_matches_single_agent_builder(self):
+        world = self._l_world(torso_orientations=np.array([0.4, -0.9]))
+        batch = build_observations_batch(world, self.FLAG_ON)
+        for i in range(2):
+            np.testing.assert_allclose(
+                batch[i], build_observation(world, i, self.FLAG_ON), atol=1e-12
+            )

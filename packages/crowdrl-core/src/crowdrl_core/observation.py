@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from crowdrl_core.navmesh import next_waypoint_direction, path_deviation
+from crowdrl_core.navmesh import next_waypoint_direction, path_deviation, router_next_waypoint
 from crowdrl_core.sensing import (
     RaycastConfig,
     cast_rays,
@@ -78,6 +78,23 @@ class ObsConfig:
     JuPedSim deployment mode where only the local waypoint is exposed, not the
     global goal. ``obs_dim`` is unchanged (the slots are kept, just zeroed) so
     network width and checkpoints stay comparable across the ablation."""
+
+    use_jupedsim_style_routing: bool = False
+    """Serve the navmesh block the way the JuPedSim deployment adapter feeds it.
+
+    When True and the funnel branch is taken (``navmesh`` present, no external
+    route), the waypoint is computed like JuPedSim's router ``next_target``:
+    the first funnel corner over portals inset by the fixed
+    ``JUPEDSIM_ROUTER_INSET`` (0.2 m -- NOT the per-agent body radius), served
+    verbatim with no waypoints[2] fallback, and ``path_deviation`` is pinned to
+    0.0 (the single-waypoint deployment contract). ``obs_dim`` is unchanged --
+    the p_dev slot is kept and zeroed, the ``use_goal_direction`` precedent.
+
+    The external-route branch (``WorldState.route_next_waypoints`` set, i.e.
+    actual deployment) always takes precedence and already implements this
+    contract, so the flag never changes deployed behaviour; it makes TRAINING
+    and native evaluation see the deployed signal. Default False reproduces
+    every legacy (funnel-trained) artefact."""
 
     use_temporal_memory: bool = False
     """Whether to include 6 scalar temporal-memory features derived from the
@@ -387,23 +404,37 @@ def build_observation(
 
         parts.append(nav_signal)
     elif config.use_navmesh and world.navmesh is not None:
-        # Use the larger body half-dimension as the clearance radius so the
-        # path stays clear of wall corners.
-        agent_radius = float(
-            max(
-                world.shoulder_widths[agent_idx],
-                world.chest_depths[agent_idx],
-            )
-        )
-        wp_dir = next_waypoint_direction(world.navmesh, ego_pos, goal, agent_radius)
-        p_dev = path_deviation(world.navmesh, ego_pos, goal, agent_radius)
-
-        if wp_dir is not None and p_dev is not None:
-            # Transform waypoint direction to ego frame
-            wp_dir_ego = rot @ wp_dir
-            nav_signal = np.array([wp_dir_ego[0], wp_dir_ego[1], p_dev], dtype=np.float64)
-        else:
+        if config.use_jupedsim_style_routing:
+            # Serve the deployed signal: router-style waypoint (fixed 0.2 m
+            # portal inset, element [1] verbatim) with route-branch math and
+            # p_dev pinned to 0.0. Mirrors the route branch above exactly.
+            wp = router_next_waypoint(world.navmesh, ego_pos, goal)
             nav_signal = np.zeros(3, dtype=np.float64)
+            if wp is not None:
+                wp_diff = wp - ego_pos
+                wp_dist = np.linalg.norm(wp_diff)
+                if wp_dist > 1e-10:
+                    wp_dir_ego = rot @ (wp_diff / wp_dist)
+                    nav_signal[0] = wp_dir_ego[0]
+                    nav_signal[1] = wp_dir_ego[1]
+        else:
+            # Use the larger body half-dimension as the clearance radius so
+            # the path stays clear of wall corners.
+            agent_radius = float(
+                max(
+                    world.shoulder_widths[agent_idx],
+                    world.chest_depths[agent_idx],
+                )
+            )
+            wp_dir = next_waypoint_direction(world.navmesh, ego_pos, goal, agent_radius)
+            p_dev = path_deviation(world.navmesh, ego_pos, goal, agent_radius)
+
+            if wp_dir is not None and p_dev is not None:
+                # Transform waypoint direction to ego frame
+                wp_dir_ego = rot @ wp_dir
+                nav_signal = np.array([wp_dir_ego[0], wp_dir_ego[1], p_dev], dtype=np.float64)
+            else:
+                nav_signal = np.zeros(3, dtype=np.float64)
 
         parts.append(nav_signal)
 
@@ -607,18 +638,34 @@ def build_observations_batch(
         obs[active_idx, offset + 1] = wp_ego_y
         offset += 3
     elif config.use_navmesh and world.navmesh is not None:
-        for idx_pos, i in enumerate(active_idx):
-            agent_radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
-            wp_dir = next_waypoint_direction(
-                world.navmesh, world.positions[i], world.goal_positions[i], agent_radius
-            )
-            p_dev = path_deviation(
-                world.navmesh, world.positions[i], world.goal_positions[i], agent_radius
-            )
-            if wp_dir is not None and p_dev is not None:
-                wp_ego_x = cos_h[idx_pos] * wp_dir[0] - sin_h[idx_pos] * wp_dir[1]
-                wp_ego_y = sin_h[idx_pos] * wp_dir[0] + cos_h[idx_pos] * wp_dir[1]
-                obs[i, offset : offset + 3] = [wp_ego_x, wp_ego_y, p_dev]
+        if config.use_jupedsim_style_routing:
+            # Deployed signal: router-style waypoint (fixed 0.2 m inset,
+            # element [1] verbatim), route-branch math, p_dev left at 0.0.
+            for idx_pos, i in enumerate(active_idx):
+                wp = router_next_waypoint(
+                    world.navmesh, world.positions[i], world.goal_positions[i]
+                )
+                if wp is None:
+                    continue
+                wp_diff = wp - world.positions[i]
+                wp_dist = np.linalg.norm(wp_diff)
+                if wp_dist > 1e-10:
+                    wp_unit = wp_diff / wp_dist
+                    obs[i, offset] = cos_h[idx_pos] * wp_unit[0] - sin_h[idx_pos] * wp_unit[1]
+                    obs[i, offset + 1] = sin_h[idx_pos] * wp_unit[0] + cos_h[idx_pos] * wp_unit[1]
+        else:
+            for idx_pos, i in enumerate(active_idx):
+                agent_radius = float(max(world.shoulder_widths[i], world.chest_depths[i]))
+                wp_dir = next_waypoint_direction(
+                    world.navmesh, world.positions[i], world.goal_positions[i], agent_radius
+                )
+                p_dev = path_deviation(
+                    world.navmesh, world.positions[i], world.goal_positions[i], agent_radius
+                )
+                if wp_dir is not None and p_dev is not None:
+                    wp_ego_x = cos_h[idx_pos] * wp_dir[0] - sin_h[idx_pos] * wp_dir[1]
+                    wp_ego_y = sin_h[idx_pos] * wp_dir[0] + cos_h[idx_pos] * wp_dir[1]
+                    obs[i, offset : offset + 3] = [wp_ego_x, wp_ego_y, p_dev]
 
         offset += 3
 

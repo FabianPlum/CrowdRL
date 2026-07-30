@@ -29,6 +29,7 @@ NON_DEFAULT_OBS = ObsConfig(
     raycast=RaycastConfig(n_rays=32, fov_deg=170.0, max_range=8.0, two_channel=True),
     use_navmesh=True,
     use_goal_direction=False,
+    use_jupedsim_style_routing=True,
     use_temporal_memory=True,
     temporal_memory_window=25,
     temporal_memory_max_steps=3000,
@@ -75,6 +76,15 @@ class TestObsConfigRoundTrip:
         rebuilt = obs_config_from_dict(data)
         assert rebuilt.use_neighbor_vel_history is False
         assert rebuilt.raycast == NON_DEFAULT_OBS.raycast
+
+    def test_legacy_artefact_reconstructs_funnel_routing(self):
+        """Artefacts exported before use_jupedsim_style_routing existed (every
+        funnel-trained run, r0400 included) must reconstruct with the flag
+        False -- the behaviour they were trained under."""
+        data = obs_config_to_dict(NON_DEFAULT_OBS)
+        del data["use_jupedsim_style_routing"]
+        rebuilt = obs_config_from_dict(data)
+        assert rebuilt.use_jupedsim_style_routing is False
 
     def test_unknown_top_level_key_raises(self):
         """Backward incompatibility must be loud: a newer exporter's field this
