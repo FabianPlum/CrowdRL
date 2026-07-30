@@ -1393,12 +1393,28 @@ demonstrated. Removing it also removed the last stale prose: both scenario
 sections had claimed an agent is lost to a wall-facing absorbing state, which
 was retracted on 2026-07-30 and is measurably false now.
 
-Two bugs surfaced by re-running it end to end, both now fixed: exit times were
+Three bugs surfaced by re-running it end to end, all now fixed. Exit times were
 being read from sqlite frame numbers (the recorder samples every 4th frame, so
 with all agents exiting the old filter reported 1 of 4 exits -- `run_scenario`
-now returns per-agent exit steps from the roster); and the parity prose still
+now returns per-agent exit steps from the roster). The parity prose still
 described the waypoint source and `path_deviation` as open gaps after the
-fine-tune had closed them.
+fine-tune had closed them. And the third is an upstream trap worth recording on
+its own:
+
+**`SqliteTrajectoryWriter` must be closed explicitly, or the tail of every
+recording is silently lost.** The writer commits every 100th write
+(`commit_every_nth_write=100`) and `Simulation` never closes it -- it calls only
+`begin_writing` and `write_iteration_state`, so nothing flushes the buffer at
+the end of a run. The corner recording held 200 frames instead of 244 (7.96 s of
+a 9.74 s run) and the bottleneck 100 instead of 178 (**44% of the run missing**),
+with no error and no warning: the sqlite file is valid, just short. Every
+JuPedSim example notebook works around this by reaching into the private
+attribute (`simulation._writer.close()`), which is itself a smell -- there is no
+public close, no context manager, and no destructor path. Two consequences for
+us: the notebook now binds the writer and closes it, and the transfer-fidelity
+number was re-measured over the full route (worst-case deviation is 2.23 mm
+either way -- the truncation had been hiding the last 18% of the trajectory, not
+inflating the agreement). Added to the upstream co-draft list below.
 
 ### Environment: reproducing the toolchain on a second machine
 
