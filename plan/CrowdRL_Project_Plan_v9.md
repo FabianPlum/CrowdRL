@@ -487,6 +487,11 @@ Added `inverse_distance_weight` to `RewardConfig` — continuous proximity-to-go
 
 ## 2026-03-28 — crowdrl-torch: GPU-vectorised environments
 
+*Background: the GPU environment was originally planned in JAX. The decision
+record for choosing PyTorch instead — and why the `crowdrl-jax` package was
+removed — is `plan/jax_environment_migration.md`, which remains the only
+account of that evaluation.*
+
 ### New package: crowdrl-torch
 
 A full GPU-vectorised re-implementation of the environment step, replacing `SubprocVecEnv` with batched tensor operations on a single GPU. All N_ENVS environments are processed in one call with shapes `(E, N, ...)`. No subprocess pipes, no IPC overhead.
@@ -1029,8 +1034,11 @@ Work on branch `agent_dynamics_refactor` (design of record:
 `plan/agent_dynamics_refactor.md`). This entry consolidates ~6 weeks of
 training iteration into the plan and motivates the version bump to v7 -- the
 observation space in Section 3.3 grew (see "Observation-space expansion"
-below). A standalone end-of-day snapshot lives in
-`docs/2026-05-26_layer1_v2_handover.md`.
+below). This entry is the full record; the standalone end-of-day snapshot that
+used to sit in `docs/` has been deleted as a duplicate of it. The one number it
+carried that is not repeated here -- the Layer 2 F2 counterflow comparison
+(~150 reward over no-brake, ~107 over brake-only) -- is reproducible from
+`examples/09_reward_landscape.ipynb`.
 
 ### Diagnosis: kinematic targets were unconstrained ("ice-skating")
 
@@ -1558,5 +1566,50 @@ Ordered by what unblocks the most:
       needs the Simulation handle after construction. Documented limitation for
       now.
 - [ ] Medium-term items unchanged: Tiers 4-5, IAS-7 geometry importer, Tier 3
-      distributional reward, `plan/CrowdRL_Project_Plan_v5.docx` staleness.
+      distributional reward.
+
+### Carried forward from `final_review_2026-07-29.md` (that file is now deleted)
+
+The 2026-07-29 adversarial review's findings were closed on 07-30 except the
+items below, which were recorded nowhere else. They are migrated here verbatim
+in substance so the review file could be deleted rather than kept as a document
+that asserts three things which are no longer true (it called `policy_r0400.onnx`
+the shipped artefact, cited corner 3/4 and bottleneck 11/12 as committed
+results, and rested on the retracted absorbing-state reading).
+
+- [ ] **`preferred_speeds` for temporal-off configs.** `crowd_env.py:247`
+      populates `world.preferred_speeds` only inside the
+      `if self.config.obs.use_temporal_memory:` guard at `:235`, so a
+      temporal-OFF config feeds the constant 1.34 into the ego observation
+      while the torch training twin always feeds the sampled per-agent speeds.
+      A real train/eval twin inconsistency -- moot for the shipped temporal-on
+      artefact, live for any ablation that turns temporal memory off.
+- [ ] **No full-step numpy-vs-torch trajectory equivalence test.** The twins are
+      equivalence-tested at component level (atol 1e-4) and the navmesh signal
+      only at spawn (they intentionally diverge off-route: numpy re-funnels,
+      torch follows a stored path cursor). Worth having before IAS-7 validation
+      leans on the numpy env as "the" reference.
+- [ ] **NaN policy differs between the two observation builders.**
+      `build_observations_batch` sanitises with `nan_to_num`;
+      `build_observation` -- the one the interactive adapter calls -- does not.
+      One builder, two failure modes.
+- [ ] **Temporal-offset hazard in the observation layout**
+      (`observation.py:672-707`). The temporal block's `offset += 6` sits inside
+      `if config.use_temporal_memory and _memory_state_populated(world)`, while
+      the neighbour-velocity-history block below does not test
+      `_memory_state_populated`. A world with temporal enabled but unpopulated
+      memory *and* populated neighbour blocks would land the A+ block in the
+      temporal slots. No current producer creates that combination, which is
+      exactly why it would be found late.
+- [ ] **Lockstep's byte-exactness is scoped to configs without A+/A++ neighbour
+      features** (it never populates neighbour-memory state) -- documented in
+      `model.py` but not in `lockstep.py`.
+- [ ] **Body dimensions are duplicated rather than shared:** `chest_depth = 0.15`
+      is a default on `CrowdRLAgentState` and hardcoded again in
+      `lockstep.py`. One constant, two homes.
+- [ ] **Two test-honesty items:** the e2e route assertions subsample
+      trajectories with `traj[:: max(1, len(traj) // 200)]`, so a fault between
+      samples is invisible; and `test_lockstep_byte_parity.py` derives its goal
+      from `centroid.coords[0]`, which is the exit centroid only for convex
+      exits.
 

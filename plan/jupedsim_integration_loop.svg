@@ -41,7 +41,7 @@
 <g class="c-teal">
   <rect x="160" y="150" width="360" height="80" rx="8"/>
   <text class="th" x="340" y="174" text-anchor="middle" dominant-baseline="central">observation builder</text>
-  <text class="ts" x="340" y="196" text-anchor="middle" dominant-baseline="central">ego state (7D) + K-NN social (56D) + raycasts (16D)</text>
+  <text class="ts" x="340" y="196" text-anchor="middle" dominant-baseline="central">ego state (8D) + K-NN social (56D) + raycasts (16D)</text>
   <text class="ts" x="340" y="214" text-anchor="middle" dominant-baseline="central">+ optional navmesh waypoint (3D)</text>
 </g>
 <text class="ts" x="538" y="190" dominant-baseline="central" opacity="0.5">crowdrl-core</text>
@@ -74,7 +74,7 @@
 <g class="c-gray">
   <rect x="180" y="416" width="320" height="56" rx="8"/>
   <text class="th" x="340" y="436" text-anchor="middle" dominant-baseline="central">JuPedSim simulation step</text>
-  <text class="ts" x="340" y="456" text-anchor="middle" dominant-baseline="central">collision resolution · position integration · routing</text>
+  <text class="ts" x="340" y="456" text-anchor="middle" dominant-baseline="central">geometry &amp; wall queries · neighbours · routing · lifecycle</text>
 </g>
 
 <!-- Feedback arrow (loop back) -->

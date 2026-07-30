@@ -160,7 +160,7 @@ Mean episode length dropped from 1498 (baseline) to 1188 (combined, -21%).
    tiers. This is the residual "coordinated navigation in composed rooms
    is hard" problem. Reward tuning can't fix it further.
 3. **Next step suggestion**: the geodesic progress potential work
-   (`/home/fabi/.claude/plans/expressive-launching-clock.md`) is the
+   is the
    natural follow-up. Euclidean progress creates phantom potential wells
    in room layouts; geodesic progress removes them at the root. The plan
    is well-scoped and uses infrastructure that already exists.

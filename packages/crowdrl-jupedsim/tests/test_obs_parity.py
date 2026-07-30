@@ -1,6 +1,6 @@
 """Observation parity between training and deployment -- the transfer guarantee.
 
-The architectural invariant from Project Plan v8, Section 3.6: if WorldState is
+The architectural invariant from Project Plan v9, Section 3.6: if WorldState is
 populated correctly from JuPedSim's agent states, the observation vector must be
 numerically identical to what the policy saw during training for the same
 physical configuration. Drift between the two population paths is a bug that

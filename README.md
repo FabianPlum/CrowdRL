@@ -10,6 +10,54 @@ validated against [IAS-7](https://www.fz-juelich.de/en/ias/ias-7) (Forschungszen
 controlled experiment data. Designed to replace or augment hand-crafted locomotion models
 in [JuPedSim](https://www.jupedsim.org/).
 
+## JuPedSim integration is available
+
+A trained CrowdRL policy now runs inside JuPedSim as an operational model:
+
+```python
+from crowdrl_jupedsim import CrowdRLAgentState, LearnedPolicyModel, OnnxPolicy
+
+model = LearnedPolicyModel(OnnxPolicy("example_model/policy_r0125.onnx"))
+# no ObsConfig, no ActionConfig, no physics constants -- the artefact carries them
+```
+
+That is the whole deployment surface: hand it the shipped `.onnx` and use it
+like any other JuPedSim model. The policy file is **self-describing** — its
+resolved observation/action configuration, the dynamics it trained under, and
+its provenance are embedded in the ONNX metadata, so deployment cannot silently
+run a configuration the policy never saw (an explicit value that disagrees with
+the record raises rather than being accepted).
+
+How faithful is it? On the corner scenario, the deployed policy's trajectories
+differ from the CrowdRL training engine's by **2.23 mm worst case** (1% of a
+body radius over a ~10 s route), with per-agent exit times separated by exactly
+the two iterations JuPedSim's exit stage lags by. That is not an accident of
+tuning: the shipped policy was *fine-tuned under the deployment routing
+contract*, so it was trained on the signal JuPedSim can actually supply. See
+[`examples/10_jupedsim_learned_model.ipynb`](examples/10_jupedsim_learned_model.ipynb).
+
+> [!IMPORTANT]
+> **This requires JuPedSim 2.0 built from source — no released version works.**
+> The integration targets `jupedsim.models.custom_model.CustomOperationalModel`,
+> the pure-Python operational-model layer that exists only on upstream
+> [`main`](https://github.com/PedestrianDynamics/jupedsim). The published PyPI
+> line is still 1.x and does not have this API at all; JuPedSim 2.0 is a
+> deliberate breaking change and is not yet tagged.
+>
+> Because of that, `crowdrl-jupedsim` deliberately declares **no** `jupedsim`
+> dependency. Declaring one caused `uv sync` to install a 1.x wheel that then
+> silently shadowed a local 2.0 source build. Supply 2.0 out-of-band instead:
+> build it from source, then add a `.pth` file in your venv's `site-packages`
+> containing the build's `lib/` (holding `py_jupedsim.*.pyd`/`.so`) and the
+> repo's `python_modules/jupedsim`. Your `site-packages` must not contain a
+> competing `jupedsim` install. Upstream is a moving branch, so expect to track
+> it; the build recipe and the revision this was validated against are in
+> [`plan/CrowdRL_Project_Plan_v9.md`](plan/CrowdRL_Project_Plan_v9.md).
+>
+> Everything else in this repo — training, the environment, the example
+> notebooks 01-09 — works without JuPedSim. The JuPedSim-dependent tests skip
+> themselves when no 2.0 build is importable, so the suite stays green.
+
 ## Architecture
 
 The project is organised as a uv workspace with five packages that build in strict dependency order:
@@ -29,9 +77,12 @@ crowdrl-core  ->  crowdrl-env  ->  crowdrl-train  -.onnx->  crowdrl-jupedsim
 | **crowdrl-env** | Gymnasium training environment with procedural geometry generation (Tiers 0-3b) and multi-tier reward. | core + Gymnasium, Matplotlib |
 | **crowdrl-train** | MAPPO training loop, curriculum manager, ONNX policy export. | env + PyTorch |
 | **crowdrl-torch** | GPU-vectorised environments: batched PyTorch re-implementation of the env step for >100k steps/sec training. | core + env + PyTorch |
-| **crowdrl-jupedsim** | `LearnedPolicyModel` adapter that plugs trained policies into JuPedSim's simulation loop. | core + JuPedSim, ONNX Runtime |
+| **crowdrl-jupedsim** | `LearnedPolicyModel` adapter that plugs trained policies into JuPedSim's simulation loop, plus `LockstepPolicyModel`, a byte-exact validation instrument. | core + ONNX Runtime (JuPedSim 2.0 supplied out-of-band, see above) |
 
 The only artefact crossing from training to deployment is an `.onnx` policy file.
+One is shipped: [`example_model/`](example_model/) holds `policy_r0125.onnx`
+together with the resolved config and scorecard of the run that produced it, so
+the adapter, its tests and notebook 10 all work from a fresh clone.
 
 ### crowdrl-core
 
@@ -59,7 +110,7 @@ At deployment time, the `LearnedPolicyModel` adapter runs each timestep:
 The teal blocks (`observation builder`, `action interpreter`) are **the same crowdrl-core code**
 used during training -- no reimplementation, no drift.
 
-### Observation space (~80-99D per agent)
+### Observation space (80D base, 129D fully instrumented, 89D shipped)
 
 | Component | Dims | Details |
 |-----------|------|---------|
@@ -67,9 +118,23 @@ used during training -- no reimplementation, no drift.
 | Social | 56 | K=8 nearest neighbours: relative position (2), relative velocity (2), body orientation (1), body dims (2) |
 | Raycasts | 16-32 | Head-anchored, 200 deg FOV, normalised distances. Optional 2-channel (distance + hit-type) |
 | Navmesh | 3 | Next-waypoint direction (2) + path deviation (1) -- pre-computed via A\*+funnel at episode reset, pure GPU tensor lookup per step |
+| Temporal memory | 6 | Own-trajectory history: displacement from spawn, cumulative path length, path efficiency, elapsed fraction, windowed displacement + goal progress |
+| Neighbour velocity history | 16 | Per tracked neighbour (K=8), velocity change over the last W steps -- an acceleration proxy |
+| Neighbour trajectory features | 24 | Per tracked neighbour, its own path efficiency + windowed displacement + goal progress |
 
-All observations are in egocentric frame. Base obs_dim is `8 + 56 + 16 = 80`;
-with 2-channel raycasts and navmesh enabled it grows to `8 + 56 + 32 + 3 = 99`.
+All observations are in egocentric frame. Every block is independently
+toggleable, so obs_dim is a config outcome, not a constant -- read
+`ObsConfig.obs_dim` rather than adding these up by hand. Base is
+`8 + 56 + 16 = 80`; fully instrumented with 1-channel rays is `129`.
+
+The **shipped policy is 89D** (`8 + 56 + 16 + 3 + 6`) and, more interestingly,
+is narrower than it could be *on purpose*. It runs with
+`use_goal_direction=False`, navigating by the routed waypoint alone, and with
+`use_jupedsim_style_routing=True`, which serves that waypoint the way
+JuPedSim's router does (fixed 0.2 m portal inset) and pins the path-deviation
+channel to 0.0. Both are the same principle: **do not train on a signal
+deployment cannot supply.** A channel the deployed adapter has to fake is
+better trained absent or degraded than trained rich and approximated later.
 
 ### Action space (4D continuous)
 
@@ -151,7 +216,12 @@ Design rationale and synchronisation details are in
 
 ### Running tests
 
-Tests live alongside each package in `packages/*/tests/`.
+Tests live alongside each package in `packages/*/tests/`, with a cross-package
+integration suite in [`tests/`](tests/) at the repo root (e2e JuPedSim
+scenarios, lockstep byte parity, dynamics provenance, config/metadata
+round-trip). Both roots are picked up by default. The JuPedSim-dependent tests
+skip themselves unless a 2.0 source build is importable, so a clone without one
+still runs green.
 
 ```bash
 # Run the full test suite
@@ -189,6 +259,8 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `06_full_training.ipynb` | Full GPU-vectorised training with `crowdrl-torch`, async resets, ONNX export |
 | `07_complex_geometry.ipynb` | Tier 3a/3b procedural geometry: rooms with obstacles, multi-room layouts, navmesh pathfinding |
 | `08_lane_formation_test.ipynb` | Bidirectional-corridor lane-formation benchmark with order-parameter metric |
+| `09_reward_landscape.ipynb` | Per-step reward decomposition across canonical scenarios (cruise, brake, wall approach, head-on, yield) |
+| `10_jupedsim_learned_model.ipynb` | **The deployment story**: the shipped policy driving JuPedSim agents through the jupedsim#1625 corner and a 12-agent bottleneck, plus a trajectory-level fidelity comparison against the training engine. Needs a JuPedSim 2.0 source build (see above) |
 
 ```bash
 uv run jupyter lab
@@ -196,20 +268,25 @@ uv run jupyter lab
 
 ## Current status
 
-**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v8.md) for details):
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v9.md) for details):
 
 | Milestone | Status |
 |-----------|--------|
 | M1: Environment prototype | **Complete** -- Tiers 0-3b geometry, solvability verification, navmesh router, GPU-vectorised env (>100k steps/sec) |
 | M2: Baseline RL agent | **Complete** |
-| M3: MARL training | **Substantially complete** -- MAPPO, GPU training, 6-phase curriculum (Tiers 0-3b), ONNX export. Needs large-scale training runs |
-| M4-M9 | Not started |
+| M3: MARL training | **Substantially complete** -- MAPPO, GPU training, 6-phase curriculum (Tiers 0-3b), ONNX export. Goal-reaching is at 1.000 on 14 of 15 fixed eval scenarios; the exception is a 100-agent composed layout |
+| M9: JuPedSim integration | **Substantially delivered** (ahead of schedule) -- `LearnedPolicyModel`, self-describing artefact, e2e scenarios, byte-exact validation instrument, example notebook. Outstanding: the cross-model benchmark runner and a public release |
+| M4-M8 | Not started |
 
-**Active packages**: `crowdrl-core`, `crowdrl-env`, `crowdrl-train`, `crowdrl-torch`
+**All five packages are active**: `crowdrl-core`, `crowdrl-env`, `crowdrl-torch`, `crowdrl-train`, `crowdrl-jupedsim`
 
-**Next up**: Large-scale training runs (10M+ timesteps), emergent behaviour documentation (M4), Tier 3 reward (distributional style matching from PeTrack data)
+**Next up**: the high-density regime (at 60-100 agents the current policy trades
+goal completion for collision avoidance -- it freezes rather than collides),
+emergent behaviour documentation (M4), the cross-model benchmark against
+JuPedSim's own models, and Tier 3 reward (distributional style matching from
+PeTrack data)
 
-**Not started**: `crowdrl-jupedsim`, Tier 4-5 geometry, IAS-7 geometry importer
+**Not started**: Tier 4-5 geometry, IAS-7 geometry importer
 
 ## License
 

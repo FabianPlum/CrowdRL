@@ -1,7 +1,7 @@
 """Export CrowdRL episode trajectories to a Kinora-compatible HDF5 file.
 
 Writes the *pedpy "ped data archive" HDF5* format (DOI 10.34735/ped.2020.3) -- the
-format the Kinora Blender visualiser (``/home/fabi/dev/Kinora``) loads via pedpy.
+format the Kinora Blender visualiser loads via pedpy.
 The same files are also readable by ``pedpy.io.load_trajectory_from_ped_data_archive_hdf5``,
 so they double as a generic, tool-agnostic trajectory artefact for the broader
 CrowdRL system, not just for Kinora.

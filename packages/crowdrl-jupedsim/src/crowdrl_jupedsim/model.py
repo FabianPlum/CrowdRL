@@ -5,7 +5,7 @@ JuPedSim 2.0 lets an operational model be written in pure Python by subclassing
 agent per iteration, in a compute-then-apply pass, and applies the position on
 the returned state **verbatim**.
 
-That makes the division of labour sharp (see Project Plan v8, Section 3.6):
+That makes the division of labour sharp (see Project Plan v9, Section 3.6):
 
 * JuPedSim supplies the walkable geometry and wall segments (through the
   per-step ``EnvironmentQuery``), the agent's final goal ``ped.final_target``
