@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
-from crowdrl_core.navmesh import first_waypoint_headings, shortest_path
+from crowdrl_core.navmesh import JUPEDSIM_ROUTER_INSET, first_waypoint_headings, shortest_path
 from crowdrl_env.crowd_env import CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, generate_geometry
 from crowdrl_env.solvability import verify_solvability
@@ -140,9 +140,17 @@ def make_episode_factory(
             wp_path_lengths = np.zeros((n_agents, max_wp), dtype=np.float64)
 
             if env_config.obs.use_navmesh and navmesh is not None:
+                jps_routing = env_config.obs.use_jupedsim_style_routing
                 path_over_cap = False
                 for i in range(n_agents):
-                    radius = float(max(shoulder_widths[i], chest_depths[i]))
+                    # Under the jupedsim-style contract the stored path uses the
+                    # router's fixed 0.2 m portal inset, not the body radius --
+                    # the waypoints the deployed policy will actually be served.
+                    radius = (
+                        JUPEDSIM_ROUTER_INSET
+                        if jps_routing
+                        else float(max(shoulder_widths[i], chest_depths[i]))
+                    )
                     path = shortest_path(navmesh, positions[i], goal_positions[i], radius)
                     if path is not None and len(path) >= 2:
                         # Drop start position, keep intermediate + goal
@@ -178,7 +186,11 @@ def make_episode_factory(
                 # waypoint). Falls back to the goal bearing per-agent when no
                 # path exists. Single-sourced with the numpy env via
                 # first_waypoint_headings so spawn orientation matches in both.
-                radii = np.maximum(shoulder_widths, chest_depths)
+                radii = (
+                    np.full(n_agents, JUPEDSIM_ROUTER_INSET)
+                    if jps_routing
+                    else np.maximum(shoulder_widths, chest_depths)
+                )
                 torso_orientations = first_waypoint_headings(
                     navmesh, positions, goal_positions, radii
                 )

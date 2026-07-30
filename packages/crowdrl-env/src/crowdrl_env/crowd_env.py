@@ -27,7 +27,11 @@ from crowdrl_core.collision import (
     enforce_wall_boundaries,
 )
 from crowdrl_core.geometry import build_navmesh, extract_wall_segments
-from crowdrl_core.navmesh import first_waypoint_headings, remaining_path_lengths
+from crowdrl_core.navmesh import (
+    JUPEDSIM_ROUTER_INSET,
+    first_waypoint_headings,
+    remaining_path_lengths,
+)
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
@@ -656,7 +660,13 @@ class CrowdEnv(gym.Env):
             # Falls back to the goal bearing per-agent when no path exists. When
             # the navmesh is disabled we keep the spawner's global-goal bearing.
             if cfg.obs.use_navmesh:
-                radii = np.maximum(shoulder_widths, chest_depths)
+                # Under the jupedsim-style contract, face the router-style
+                # waypoint (fixed 0.2 m inset) the obs builder will serve.
+                radii = (
+                    np.full(len(positions), JUPEDSIM_ROUTER_INSET)
+                    if cfg.obs.use_jupedsim_style_routing
+                    else np.maximum(shoulder_widths, chest_depths)
+                )
                 torso_orientations = first_waypoint_headings(
                     navmesh, positions, goal_positions, radii
                 )

@@ -638,3 +638,33 @@ class TestVelocityWeightedCollisionEnv:
             return total
 
         assert run(weighted=True) != pytest.approx(run(weighted=False))
+
+
+class TestJupedsimStyleRoutingObs:
+    """Flag on: the env's nav block serves p_dev == 0.0 (deployed contract)."""
+
+    @staticmethod
+    def _env(flag: bool) -> CrowdEnv:
+        config = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_2),
+            spawn=SpawnConfig(n_agents_range=(6, 10), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            obs=ObsConfig(use_navmesh=True, use_jupedsim_style_routing=flag),
+            max_steps=50,
+        )
+        return CrowdEnv(config=config, seed=11)
+
+    def test_p_dev_slot_is_zero_under_flag(self):
+        # With only use_navmesh on, the nav block is the last 3 dims; p_dev is
+        # obs[:, -1]. Flag on must pin it to 0.0 for every agent on every seed;
+        # flag off must produce a real detour ratio somewhere on the same
+        # seeds (Tier 2 bends sightlines), proving the slot is alive.
+        env_on, env_off = self._env(True), self._env(False)
+        saw_real_p_dev = False
+        for seed in (3, 4, 5):
+            obs_on, _ = env_on.reset(seed=seed)
+            assert np.all(obs_on[:, -1] == 0.0)
+            obs_off, _ = env_off.reset(seed=seed)
+            if np.any(obs_off[:, -1] > 0.0):
+                saw_real_p_dev = True
+        assert saw_real_p_dev, "flag-off never produced a detour -- weak scenario"

@@ -182,6 +182,12 @@ def compute_navmesh_signals(
     path_dev = (remaining_path / euclidean) - 1.0
     path_dev = path_dev.clamp(min=0.0)  # can't be negative
 
+    if config.use_jupedsim_style_routing:
+        # Deployed single-waypoint contract: path_deviation does not exist at
+        # JuPedSim inference time, so train on 0.0 (route-branch semantics).
+        # Python-bool branch = compile-time constant under torch.compile.
+        path_dev = torch.zeros_like(path_dev)
+
     # Zero out agents with no waypoints
     has_wp = (n_wp > 0).to(dtype)  # (E, N)
     dir_ego_x = dir_ego_x * has_wp
