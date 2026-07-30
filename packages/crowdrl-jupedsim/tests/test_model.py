@@ -403,6 +403,23 @@ class TestWaypointClearance:
         world = model.build_world_state(ego, _StubEnvQuery(walls=self.CORNER_WALLS))
         np.testing.assert_allclose(world.route_next_waypoints[0], [10.14, 1.86], atol=1e-12)
 
+    def test_clearance_with_jupedsim_style_artefact_warns(self):
+        """A use_jupedsim_style_routing policy was trained on the RAW router
+        waypoint; clearance would reintroduce the gap the flag closed."""
+        with pytest.warns(UserWarning, match="use_jupedsim_style_routing"):
+            _model(
+                waypoint_clearance=True,
+                obs_config=ObsConfig(use_navmesh=True, use_jupedsim_style_routing=True),
+            )
+
+    def test_clearance_off_with_jupedsim_style_artefact_is_silent(self):
+        import warnings as _warnings
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            _model(obs_config=ObsConfig(use_navmesh=True, use_jupedsim_style_routing=True))
+        assert not [w for w in caught if "waypoint_clearance" in str(w.message)]
+
 
 class TestContactPhysics:
     """Training-parity contact physics: the crowd_env step's contact forces +

@@ -203,12 +203,19 @@ class LearnedPolicyModel(CustomOperationalModel):
             the agent's body radius before they enter the observation,
             restoring the training funnel's portal-inset semantics
             (``navmesh._inset_portal``). JuPedSim's router targets sharp
-            corners directly -- a waypoint the policy never saw in training
-            and crashes into. Off by default while outcome-level parity work
-            is ongoing: correcting the waypoint reshuffles which marginal
-            agent falls into the checkpoint's freeze/absorbing state (see
-            plan/handover_2026-07-29.md), so flipping it is a scenario-level
-            decision for now.
+            corners directly -- a waypoint a funnel-trained policy never saw
+            in training and crashes into. Off by default while outcome-level
+            parity work is ongoing: correcting the waypoint reshuffles which
+            marginal agent falls into the checkpoint's freeze/absorbing state
+            (see plan/handover_2026-07-29.md), so flipping it is a
+            scenario-level decision for now.
+
+            Keep it OFF for artefacts trained with
+            ``use_jupedsim_style_routing``: those policies were trained on the
+            RAW router waypoint (fixed 0.2 m inset, corner-targeting included),
+            so "restoring" the funnel inset would reintroduce exactly the
+            train/deploy gap the flag closed. Construction warns on that
+            combination.
         neighbor_radius
             Radius for the neighbour query. Defaults to the larger of
             ``obs_config.neighbor_sensing_radius`` and the raycast range, because
@@ -255,6 +262,16 @@ class LearnedPolicyModel(CustomOperationalModel):
         self.contact_stiffness = dynamics["contact_stiffness"]
         self.contact_damping = dynamics["contact_damping"]
         self.waypoint_clearance = bool(waypoint_clearance)
+        if self.waypoint_clearance and self.obs_config.use_jupedsim_style_routing:
+            warnings.warn(
+                "waypoint_clearance=True with a use_jupedsim_style_routing "
+                "artefact: this policy was trained on the RAW router waypoint "
+                "(fixed 0.2 m inset), so pushing waypoints to body clearance "
+                "reintroduces the train/deploy gap the flag closed. Disable "
+                "waypoint_clearance for this artefact.",
+                UserWarning,
+                stacklevel=2,
+            )
         # Rays intersect walls *and* other agents, so the neighbour query has to
         # cover the raycast horizon as well as the social one. If it did not,
         # an agent sitting beyond the social radius but inside ray range would

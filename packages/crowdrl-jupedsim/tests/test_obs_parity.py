@@ -76,11 +76,11 @@ AGENTS = [
 
 
 class _RecordingModel(LearnedPolicyModel):
-    """Captures the observation and routing target the adapter produced per agent."""
+    """Captures the observation, final target and routed waypoint per agent."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.captured: dict[int, tuple[np.ndarray, tuple[float, float]]] = {}
+        self.captured: dict[int, tuple[np.ndarray, tuple[float, float], np.ndarray]] = {}
 
     def compute_next_state(self, dt, ped, env_query):
         world = self.build_world_state(ped, env_query)
@@ -88,12 +88,21 @@ class _RecordingModel(LearnedPolicyModel):
         self.captured[ped.id] = (
             np.asarray(obs, dtype=np.float64).copy(),
             tuple(ped.final_target),
+            np.asarray(world.route_next_waypoints[0], dtype=np.float64).copy(),
         )
         return super().compute_next_state(dt, ped, env_query)
 
 
-def _training_world(targets: list[tuple[float, float]]) -> WorldState:
-    """WorldState as crowdrl-env would populate it, for the same configuration."""
+def _training_world(
+    targets: list[tuple[float, float]],
+    route: list[np.ndarray] | None = None,
+) -> WorldState:
+    """WorldState as crowdrl-env would populate it, for the same configuration.
+
+    ``route`` injects per-agent routed waypoints (the values captured from
+    JuPedSim's tactical layer) so the training-side builder takes the same
+    route branch the adapter takes.
+    """
     return WorldState(
         positions=np.array([a["position"] for a in AGENTS], dtype=np.float64),
         velocities=np.array([a["velocity"] for a in AGENTS], dtype=np.float64),
@@ -106,13 +115,12 @@ def _training_world(targets: list[tuple[float, float]]) -> WorldState:
         preferred_speeds=np.array([a["preferred_speed"] for a in AGENTS], dtype=np.float64),
         walkable_polygon=ROOM,
         wall_segments=extract_wall_segments(ROOM),
+        route_next_waypoints=None if route is None else np.array(route, dtype=np.float64),
     )
 
 
-@pytest.fixture
-def parity(obs_config: ObsConfig | None = None):
+def _run_parity(config: ObsConfig):
     """Run one JuPedSim step, capturing each agent's adapter-side observation."""
-    config = obs_config or ObsConfig()
     # ConstantPolicy carries no embedded metadata, so both configs are explicit.
     model = _RecordingModel(
         ConstantPolicy(HOLD),
@@ -144,6 +152,17 @@ def parity(obs_config: ObsConfig | None = None):
     return config, ids, model.captured
 
 
+@pytest.fixture
+def parity():
+    return _run_parity(ObsConfig())
+
+
+@pytest.fixture
+def parity_nav():
+    """Parity run with the navmesh block enabled (route-fed on the adapter side)."""
+    return _run_parity(ObsConfig(use_navmesh=True))
+
+
 class TestObservationParity:
     def test_observations_match_between_training_and_deployment(self, parity):
         config, ids, captured = parity
@@ -151,7 +170,7 @@ class TestObservationParity:
         world = _training_world(targets)
 
         for idx, agent_id in enumerate(ids):
-            deployed, _ = captured[agent_id]
+            deployed, _, _ = captured[agent_id]
             trained = build_observation(world, idx, config)
 
             assert deployed.shape == trained.shape, (
@@ -176,7 +195,7 @@ class TestObservationParity:
         world = _training_world(targets)
 
         for idx, agent_id in enumerate(ids):
-            deployed, _ = captured[agent_id]
+            deployed, _, _ = captured[agent_id]
             trained = build_observation(world, idx, config)
             np.testing.assert_allclose(
                 deployed[:8], trained[:8], rtol=1e-9, atol=1e-9, err_msg=f"ego block, agent {idx}"
@@ -192,7 +211,7 @@ class TestObservationParity:
         n_rays = config.raycast.n_rays
 
         for idx, agent_id in enumerate(ids):
-            deployed, _ = captured[agent_id]
+            deployed, _, _ = captured[agent_id]
             trained = build_observation(world, idx, config)
             np.testing.assert_allclose(
                 deployed[-n_rays:],
@@ -201,3 +220,37 @@ class TestObservationParity:
                 atol=1e-9,
                 err_msg=f"raycast block, agent {idx}",
             )
+
+
+class TestNavBlockParity:
+    """use_navmesh=True parity: the nav block must survive the adapter data
+    path. The routed waypoint captured from JuPedSim's tactical layer is
+    injected into the training-style WorldState, so BOTH sides take the
+    obs builder's route branch -- the deployment contract. Holds regardless of
+    use_jupedsim_style_routing (the flag never touches the route branch)."""
+
+    def test_full_vector_including_nav_block(self, parity_nav):
+        config, ids, captured = parity_nav
+        targets = [captured[i][1] for i in ids]
+        route = [captured[i][2] for i in ids]
+        world = _training_world(targets, route=route)
+
+        for idx, agent_id in enumerate(ids):
+            deployed, _, _ = captured[agent_id]
+            assert deployed.shape == (config.obs_dim,)
+            trained = build_observation(world, idx, config)
+            np.testing.assert_allclose(
+                deployed,
+                trained,
+                rtol=1e-9,
+                atol=1e-9,
+                err_msg=f"agent {idx}: nav-extended observation diverged",
+            )
+
+    def test_nav_block_is_route_fed_with_zero_p_dev(self, parity_nav):
+        """With use_navmesh on, the nav block is the last 3 dims; the adapter
+        feeds it through the route branch, so p_dev must be exactly 0.0."""
+        _, ids, captured = parity_nav
+        for agent_id in ids:
+            obs = captured[agent_id][0]
+            assert obs[-1] == 0.0
