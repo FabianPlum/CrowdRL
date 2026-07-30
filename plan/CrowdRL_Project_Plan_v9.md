@@ -169,7 +169,7 @@ Shared-parameter PPO with an actor-critic MLP. All agents share one policy netwo
 
 The reward function is the core scientific contribution. It operates in three tiers:
 
-- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (-1 per timestep in contact), proximity penalty (a graded linear ramp on centre-to-centre distance to the worst-offending neighbour: strongest at contact distance `r_i + r_j`, decaying to a near-zero value at an absolute `personal_space_radius` of 1 m, zero beyond; each agent pays the most-negative per-pair penalty across its active neighbours), timeout penalty (-5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation. The proximity penalty is the reward-side counterpart to the physics-side decision not to include proximity repulsion forces (see Section 3.2, Physics): the environment enforces only physical constraints (contact, inertia), while spacing behaviour is learned through this reward term. The graded-ramp form replaced an earlier binary "flat penalty inside a body-radius multiple" variant because the sharp threshold produced a discontinuous reward surface with zero gradient outside the critical zone.
+- **Tier 1 — Sparse task rewards.** Goal-reaching bonus (+10), collision penalty (-1 per timestep in contact), proximity penalty (a graded linear ramp on centre-to-centre distance to the worst-offending neighbour: strongest at contact distance `r_i + r_j`, decaying to a near-zero value at an absolute `personal_space_radius` of 1 m, zero beyond; each agent pays the most-negative per-pair penalty across its active neighbours), timeout penalty (-5 if goal not reached within episode). These alone produce functional but potentially alien-looking navigation. The proximity penalty is the reward-side counterpart to the physics-side decision not to include proximity repulsion forces (see Section 3.2, Physics): the environment enforces only physical constraints (contact, inertia), while spacing behaviour is learned through this reward term. The graded-ramp form replaced an earlier binary "flat penalty inside a body-radius multiple" variant because the sharp threshold produced a discontinuous reward surface with zero gradient outside the critical zone. Two later refinements (see the 2026-07-20 log entry): the collision and proximity penalties can be scaled by approach speed (the impact-speed weighting from the collision-suppression campaign, with a discount-only `collision_penalty_cap`), so plowing in fast costs more than incidental contact; and a separate `wall_collision_penalty` fires on the hard wall-contact mask. The progress term, likewise, is now potential-based on the navmesh remaining-path length rather than the straight-line goal distance.
 - **Tier 2 — Smoothness priors.** Acceleration penalty (penalise jerk and angular acceleration), preferred-speed deviation penalty. These regularise the motion toward physically plausible trajectories without using any human data.
 - **Tier 3 — Trajectory-matching from real data.** This is where IAS-7’s experimental data becomes an unfair advantage. Using trajectory datasets from PeTrack experiments (bottleneck flow, counterflow, unidirectional flow), compute distributional statistics: velocity autocorrelation functions, neighbour-distance distributions, angular change distributions. Define a style reward that penalises deviations from these distributions at the population level. This is not imitation learning on individual trajectories (which would overfit to specific experiments) but distributional matching—the agent should produce trajectories that are statistically indistinguishable from real pedestrians.
 
@@ -267,7 +267,7 @@ The following table summarises the critical architectural choices and their rati
 | Decision | Recommended Choice | Rationale |
 |----------|-------------------|-----------|
 | Training environment | Lightweight 2D physics (not UE5) | UE5 in the training loop is 100–1000× slower. Vector observations don’t benefit from rendering. Architect for a module swap to egocentric vision later. |
-| Observation space | Egocentric vector: ego state (8D) + K=8 neighbours (56D) + N=16 head-anchored raycasts (16D) = 80D base; optional navmesh (+3), temporal-memory (+6), neighbour-velocity-history (+16) and neighbour-trajectory (+24) blocks extend it to 105D (current Layer 1 v2) up to 129D | Three-component design: ego state, social sensing (K nearest neighbours), and environment sensing (FOV-restricted raycasts for wall/obstacle distances). Raycasts prevent geometry-blindness. FOV restriction couples perception to torso orientation, making the orientation action meaningful. N and FOV are tuneable for ablation. |
+| Observation space | Egocentric vector: ego state (8D) + K=8 neighbours (56D) + N=16 head-anchored raycasts (16D) = 80D base; optional navmesh (+3), temporal-memory (+6), neighbour-velocity-history (+16) and neighbour-trajectory (+24) blocks extend it to 89D (the shipped line: navmesh + temporal memory), 105D (Layer 1 v2), or up to 129D fully instrumented | Three-component design: ego state, social sensing (K nearest neighbours), and environment sensing (FOV-restricted raycasts for wall/obstacle distances). Raycasts prevent geometry-blindness. FOV restriction couples perception to torso orientation, making the orientation action meaningful. N and FOV are tuneable for ablation. |
 | Action space | 4D continuous: speed, heading, torso angle, head angle (relative to torso, ±90°) | Head and torso are independently actuated, matching human anatomy (head rotates ±90° relative to torso before shoulders must follow). Decoupling separates information-gathering (head turn) from physical reorientation (shoulder turn). Ablation: collapse to 3D (fused head-torso) or 2D (speed + heading only). |
 | RL algorithm | PPO with parameter sharing (MAPPO) | Proven stable for cooperative/competitive multi-agent continuous control. Shared parameters scale to large agent counts. |
 | Agent count (training) | 20–100 per episode, randomised | Enough for crowd phenomena. >200 agents creates training instability without curriculum learning. |
@@ -1459,7 +1459,9 @@ time:
 
 The five-package structure from the 2026-07-20 entry holds; what changed is that
 `crowdrl-jupedsim` is no longer a stub. **50 source modules, 45 test files, 662
-collected tests.**
+collected tests.** (The 662 requires a local JuPedSim 2.0 build on `sys.path`;
+without one, 609 collect -- the 53 jupedsim-dependent tests, 41 adapter + 12
+root e2e, skip at collection via `importorskip`.)
 
 | Package | Modules | LOC | Tests | Role |
 |---|---|---|---|---|
@@ -1489,12 +1491,13 @@ complaint:
   (`exp_jps_routing_ft_r0400.yaml`) exists only on the training machine. Either
   whitelist the configs that produce shipped artefacts, or state that
   `config_resolved.yaml` is the contract. The latter is cheaper and already true.
-- **There are two parallel doc trees.** `plan/` (22 files) and `docs/` (5 files:
-  `agent_pipeline.md`, `environment_mechanics.md`, and three dated summaries)
-  overlap in purpose with no stated precedence. `plan/` is the canonical one --
-  it holds this document and the progress log; `docs/` holds the two long
-  mechanism references that are genuinely useful and three session summaries
-  that duplicate the `plan/handover_*` role.
+- **There are two parallel doc trees.** `plan/` (15 markdown files after the
+  same-day retirement pass) and `docs/` (4 files: `agent_pipeline.md`,
+  `environment_mechanics.md`, and two dated summaries) overlap in purpose with
+  no stated precedence. `plan/` is the canonical one -- it holds this document
+  and the progress log; `docs/` holds the two long mechanism references that
+  are genuinely useful and two session summaries that duplicate the
+  `plan/handover_*` role.
 - **No `TODO`/`FIXME` markers anywhere** in `packages/`, `scripts/` or `tests/`.
   Open work is recorded in prose (docstrings and handovers) instead. That is a
   defensible convention, but it means the deliberate gaps below are invisible to
@@ -1542,10 +1545,25 @@ Ordered by what unblocks the most:
 - [ ] **Cross-model benchmark runner** (LearnedPolicyModel vs.
       CollisionFreeSpeedModel / SocialForceModel on one scenario, trajectory-level
       + macroscopic metrics through the Kinora/pedpy export). This is the last
-      piece of Step 4 and the natural bridge to M7.
+      piece of Step 4 and the natural bridge to M7. *First cut exists
+      (2026-07-30, uncommitted): `examples/11_model_comparison.ipynb` runs the
+      upstream jupedsim comparison suite -- five scenarios (crossing rooms,
+      following, head-on, perpendicular crossing, bottleneck) across six models
+      (CSM, AVM, SFM, GCFM, WarpDriver, CrowdRL r0125) -- with a
+      deployment-side speed-clamp shim compensating r0125's
+      `speed_deviation_weight = 0`; CrowdRL posts the fastest evacuation time
+      in three of the five. Still a notebook with one macroscopic metric
+      (evacuation time), not the packaged trajectory-level runner this item
+      means.*
 - [ ] **`no_p_dev` ablation** -- the routing contract pins `path_deviation` to
       0.0, which is not the same as training without the channel. Removing it
       outright is the cleaner statement of the same principle.
+- [ ] **Retrain with `speed_deviation_weight > 0` and randomised preferred
+      speeds** -- r0125 trains with the term off (the whole smoothness block
+      is disabled in its config), so it ignores its preferred-speed
+      observation and cruises near the 2.0 m/s ceiling. Notebook 11's
+      speed-clamp shim is the interim compensation; the real fix is training
+      the preference in, then deleting the shim.
 - [ ] Make Windows multi-GPU launch work out of the box in `train_mappo.py`
       (direct-rank fallback when the libuv rendezvous is unavailable).
 - [ ] **YAML lossy-gap guard** in `cfg_dict_from_env_config` (carried from the
@@ -1612,4 +1630,52 @@ results, and rested on the retracted absorbing-state reading).
       samples is invisible; and `test_lockstep_byte_parity.py` derives its goal
       from `centroid.coords[0]`, which is the exit centroid only for convex
       exits.
+
+## 2026-07-30 -- Addendum: mechanism references synced to code; audit notes
+
+`docs/agent_pipeline.md` and `docs/environment_mechanics.md` -- last
+substantively reconciled 2026-06-08 -- have been rewritten against the current
+code. The delta they were missing is essentially the 2026-06/07 arc: the
+tanh-squashed policy head (+ truncation-aware GAE), speed-turn coupling, the
+impact-speed (velocity-weighted) collision/proximity penalties with
+`collision_penalty_cap` and the separate `wall_collision_penalty`, the switch
+of the progress potential to navmesh remaining-path length, optional stuck
+termination, the normalizer count caps + NaN tripwires, and the deployment
+adapter's place in the pipeline. Where the shipped r0125 run diverges from the
+dataclass defaults (89D obs, coupling at 240 deg/s with 4.8 deg/step flat
+caps, `w = 0.8`, max_steps 3000, goal +20 / collision -2 velocity-weighted
+with a -2.0 cap / progress x2 / proximity -0.025/-0.001 inside 0.75 m /
+smoothness off / action rate -0.001, (512, 512) networks, entropy 0.003), both
+docs now state default and shipped values side by side. Stale line anchors
+were repointed at the current source.
+
+Small code-level facts surfaced by the audit sweep, recorded so they are not
+re-found (all verified against source; none blocks anything):
+
+- `CrowdEnv._generate_episode` forwards only 9 `GeometryConfig` fields when
+  `geometry_tiers` is set (crowd_env.py:572-583): the Tier-3 knobs
+  (`obstacle_*`, `column_*`, `door_width_range`, `shared_goal_probability`,
+  `n_rooms_range`, `max_wall_segments`) silently revert to defaults in
+  tier-randomised episodes. Harmless for the shipped runs (they override only
+  sides/corridor ranges) but a trap for obstacle-density experiments, and the
+  same copy-site hazard class as the torch `episode_factory` propagation.
+- `wall_strength` / `wall_range` have no `CrowdEnvConfig` surface: the numpy
+  path always uses the core defaults (400 N / 0.3 m, collision.py:349-350)
+  and the torch `EnvConfig` duplicates the same values without mapping them
+  in `from_crowd_env_config`. One knob, two homes, no config exposure.
+- The numpy `compute_rewards` returns no per-component breakdown; only the
+  torch twin does (`REWARD_COMPONENT_NAMES`, 10 components, `(E, N, C)`
+  tensor). Reward-decomposition plots therefore describe the training path
+  only.
+- The observation builder's preferred-speed fallback is inconsistent: 1.34 in
+  the ego block vs 1.3 in the temporal/neighbour features
+  (observation.py:358/:585 vs :496/:689).
+- In 2-channel raycasts `HIT_AGENT == HIT_NONE == 1.0` (sensing.py:24-27); an
+  agent hit at exactly max range is indistinguishable from no hit.
+- The `interpret_actions_batch` speed remap is one straight line over
+  [-0.5, +2.0] m/s, so the zero action commands +0.75 m/s; standing still
+  requires a[0] = -0.6.
+
+Milestone rows are unchanged by this addendum; it records documentation state
+and audit findings only.
 

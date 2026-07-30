@@ -39,14 +39,23 @@ WorldState
   |     head_orientations  (N,)      radians, absolute
   |     shoulder_widths    (N,)      metres (ellipse semi-axis)
   |     chest_depths       (N,)      metres (ellipse semi-axis)
+  |     masses             (N,)      kg (scales contact-force response)
   |     goal_positions     (N, 2)    metres
+  |     preferred_speeds   (N,) | None   m/s (obs falls back to 1.34 if absent)
   |
   |-- Geometry (shared, static within an episode)
   |     walkable_polygon   Shapely Polygon (exterior = boundary, holes = obstacles)
   |     wall_segments      (S, 2, 2)  precomputed line segments
   |     navmesh            NavMesh | None
+  |     route_next_waypoints (N, 2) | None  externally routed waypoint per agent
+  |                                         (deployment: JuPedSim's next_target;
+  |                                          overrides the funnel query)
   |
   |-- active_mask          (N,) bool | None
+  |-- Temporal-memory state (optional): spawn_positions, initial_goal_distances,
+  |     cumulative_path_length, pos_history, gdist_history, step_count
+  |-- Neighbour-memory state (optional): neighbor_ids (N, K),
+  |     neighbor_vel_history (N, W_n+1, K, 2)
 ```
 
 The critical design guarantee: **the observation builder and all sensing code
@@ -71,7 +80,9 @@ extract_wall_segments()       -- polygon boundary -> line segments
 spawn_agents()                -- rejection-sampled positions, heterogeneous bodies
   |                              shoulder_width ~ N(0.22, 0.02) m
   |                              chest_depth    ~ N(0.12, 0.015) m
+  |                              mass           ~ N(80, 15) kg, clamped >= 40
   |                              preferred_speed ~ N(1.34, 0.26) m/s
+  |                              goals >= 3.0 m from spawn (min_spawn_goal_distance)
   v
 verify_solvability()          -- 3-stage check per (spawn, goal) pair:
   |                              1. A* reachability on triangle graph
@@ -128,7 +139,7 @@ Three modes control what happens when unsolvable agents are found:
 ### 1.3 The step loop
 
 Each call to `step(actions)` in
-[CrowdEnv.step()](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L174)
+[CrowdEnv.step()](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L300)
 runs the following pipeline:
 
 ```
@@ -136,35 +147,44 @@ raw actions (N, 4)             values in [-1, 1]
        |
        v
   1. interpret_actions_batch()     -> desired velocities + new orientations
+     (speed-turn coupling clamp when enabled; heading re-anchored to torso)
        |
        v
-  2. Velocity blending             v = 0.05 * v_desired + 0.95 * v_old
+  2. Velocity blending             v = w * v_desired + (1 - w) * v_old
        |
        v
   3. detect_collisions()           -> list of (i, j, overlap) tuples
      compute_contact_forces()      -> agent-agent spring-damper + wall repulsion
+                                      (Newtons / mass -> accelerations)
        |
        v
   4. Physics integration
-       v += forces * dt            apply impulse
+       v += accel * dt             apply impulse
        clamp ||v|| <= 3.0 m/s     prevent blow-up
        pos += v * dt               explicit Euler position update
        |
        v
   5. enforce_wall_boundaries()     hard projection back inside polygon
+                                   -> wall-contact mask for the reward step
        |
        v
   6. compute_rewards()             sparse + shaped + smoothness signals
      - wall distances precomputed outside (compute_min_wall_distances)
+     - goal-progress distance = navmesh remaining-path length
+       (straight-line fallback), computed outside and passed in
      - agent-agent pair distances computed *inside* compute_rewards
        so the graded agent-proximity ramp can use per-pair contact
        distances r_i + r_j (not a global scalar threshold)
        |
        v
-  7. Deactivate goal-reached agents, check timeout
+  7. Deactivate goal-reached agents; optional stuck termination
+     (rolling path-progress window, default off); check timeout
        |
        v
-  8. build_observations_batch()    -> (N, obs_dim) for next step
+  8. Update temporal / neighbour memory state (ring buffers, ID tracker)
+       |
+       v
+  9. build_observations_batch()    -> (N, obs_dim) for next step
 ```
 
 Steps 1-5 form the physics pipeline (Section A). Step 6 is the reward pipeline
@@ -182,7 +202,7 @@ bad if the physics engine makes it impossible.
 ### A.1 Action interpretation: what the network controls
 
 The 4D action output in [-1, 1] is mapped by
-[interpret_actions_batch()](../packages/crowdrl-core/src/crowdrl_core/action.py#L162):
+[interpret_actions_batch()](../packages/crowdrl-core/src/crowdrl_core/action.py#L232):
 
 | Output | Maps to | Range | Physical meaning |
 |--------|---------|-------|------------------|
@@ -193,7 +213,16 @@ The 4D action output in [-1, 1] is mapped by
 
 Speed is mapped linearly and asymmetrically: `desired_speed = -0.5 + (a[0] + 1) / 2 * 2.5`,
 so a[0]=-1 means backing up at 0.5 m/s, a[0]=0 means +0.75 m/s, and a[0]=+1
-means the 2.0 m/s forward cap.
+means the 2.0 m/s forward cap (standing still requires a[0]=-0.6).
+
+**Speed-turn coupling** (`ActionConfig.speed_turn_coupling`, default off; ON
+in the shipped run): when enabled, the heading and torso deltas are
+additionally clamped to `min(turn_pivot_rate, turn_lat_accel / v) * dt` -- a
+lateral-acceleration budget that forces slowing down before sharp turns (the
+head channel is never coupled). Defaults: 120 deg/s pivot rate, 2.0 m/s^2
+lateral budget. The shipped r0125 run trains at 240 deg/s with the flat
+heading/torso caps raised to 4.8 deg/step, so this envelope is the binding
+constraint: ~2.4 deg/step at standstill, ~1.15 at 1 m/s, ~0.57 at 2 m/s.
 
 **What this constrains:**
 
@@ -210,25 +239,33 @@ means the 2.0 m/s forward cap.
 
 - **Head and torso are independent.** The head can rotate up to 1.72 deg/step
   (172 deg/s) with a hard clamp at +/-90 deg from the torso
-  ([action.py:114-116](../packages/crowdrl-core/src/crowdrl_core/action.py#L114)).
+  ([action.py:275-280](../packages/crowdrl-core/src/crowdrl_core/action.py#L275)).
   This means an agent can look around a corner while walking straight -- or
   scan for gaps in a crowd while maintaining its walking direction.
 
-**Heading is not persistent state.** The heading (velocity direction) starts
-from the current torso orientation each step, receives a delta, and is used
-only to compute the desired velocity vector. Only torso and head orientations
-are written back into WorldState
-([crowd_env.py:219-220](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L219)).
+**Heading is not persistent state.** The heading (velocity direction) is
+re-anchored to the current torso orientation each step, receives a delta, and
+is used only to compute the desired velocity vector. Only torso and head
+orientations are written back into WorldState
+([crowd_env.py:338-354](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L338));
+the JuPedSim deployment adapter anchors identically (divergence channel 8,
+fixed 2026-07-30).
 
 ### A.2 Velocity blending: simulated inertia
 
 After the action interpreter produces a desired velocity, the environment
 blends it with the agent's current velocity
-([crowd_env.py:215-218](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L215)):
+([crowd_env.py:349-352](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L349)):
 
 ```
-v_new = 0.05 * v_desired + 0.95 * v_current
+v_new = w * v_desired + (1 - w) * v_current     # w = desired_velocity_weight
 ```
+
+The bullets below describe the config default `w = 0.05`. The shipped r0125
+line trains at `w = 0.8` (tau ~12 ms -- the filter nearly transparent), with
+inertia supplied by the speed-turn coupling envelope and contact physics
+instead; the trained value travels in the ONNX dynamics metadata so
+deployment self-configures to match the run.
 
 **What this constrains:**
 
@@ -253,7 +290,7 @@ v_new = 0.05 * v_desired + 0.95 * v_current
 Agents are not circles -- they are oriented ellipses parameterised by
 `shoulder_width` (lateral semi-axis) and `chest_depth` (forward semi-axis),
 rotated by `torso_orientation`. Detection is handled by
-[detect_collisions()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L69):
+[detect_collisions()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L108):
 
 ```
 Broad phase:
@@ -294,7 +331,7 @@ was inside the other ellipse.
 ### A.4 Contact forces: spring-damper model
 
 When agents overlap,
-[compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L255)
+[compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L345)
 computes a spring-damper response:
 
 ```
@@ -347,7 +384,7 @@ dynamics where body mass affects collision outcomes.
 ### A.5 Wall repulsion: exponential force field
 
 Walls exert a smooth exponential repulsion force
-([collision.py:322-352](../packages/crowdrl-core/src/crowdrl_core/collision.py#L322)),
+([collision.py:416-446](../packages/crowdrl-core/src/crowdrl_core/collision.py#L416)),
 divided by agent mass:
 
 ```
@@ -373,14 +410,17 @@ The force direction points from the nearest wall point toward the agent.
   before contact occurs.
 
 - **All wall segments contribute.** In a corner, the agent feels repulsion from
-  both walls simultaneously. This creates a natural tendency to walk down the
-  centre of corridors.
+  both walls simultaneously (there is no distance cutoff -- the exponential
+  makes far segments negligible). This creates a natural tendency to walk down
+  the centre of corridors. Note `wall_strength` / `wall_range` are core-level
+  defaults with no `CrowdEnvConfig` surface; the torch training env duplicates
+  the same 400 N / 0.3 m values.
 
 ### A.6 Speed clamping: velocity ceiling
 
 After contact forces are applied as velocity impulses, the total speed is
 clamped
-([crowd_env.py:246-251](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L246)):
+([crowd_env.py:387-392](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L387)):
 
 ```
 max_vel = 3.0 m/s        # max_velocity_magnitude (above the 2.0 m/s forward cap)
@@ -391,10 +431,12 @@ if ||v|| > max_vel:
 
 **What this constrains:**
 
-- **Contact forces cannot launch agents.** Without this clamp, a stiff spring
-  (2000 m/s^2) on deep penetration could accelerate an agent to unrealistic speeds.
-  The clamp allows brief bursts above the 2.0 m/s forward ceiling (e.g. being
-  pushed by a crowd) but caps the maximum at 3.0 m/s.
+- **Contact forces cannot launch agents.** Without this clamp, the stiff
+  spring (30 kN per unit overlap, ~375 m/s^2 on an 80 kg agent at full overlap
+  -- more for lighter agents or multi-contact pile-ups) could accelerate an
+  agent to unrealistic speeds. The clamp allows brief bursts above the 2.0 m/s
+  forward ceiling (e.g. being pushed by a crowd) but caps the maximum at
+  3.0 m/s.
 
 - **Direction is preserved.** The clamping rescales the velocity vector without
   changing its direction. An agent being pushed sideways by a collision will
@@ -404,10 +446,10 @@ if ||v|| > max_vel:
 
 After the position update, any agent that has penetrated the walkable polygon
 boundary is corrected by
-[enforce_wall_boundaries()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L362):
+[enforce_wall_boundaries()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L460):
 
 ```
-Fast pre-filter (vectorised):
+Fast pre-filter (vectorised; skipped entirely when the polygon has holes):
   Skip agents far from walls (dist > 3x body radius)
   Always check agents moving fast (speed > 10x body radius per step)
 
@@ -434,6 +476,8 @@ Detailed check (Shapely, per-agent):
   with high speed (`speed > 10 * radius`), because a single-step position
   update could teleport them through a thin wall. This prevents tunnelling
   artifacts.
+- **The contact mask is a reward input.** The function returns which agents
+  needed correction; that mask drives the `wall_collision_penalty` (B.1).
 
 ### A.8 Summary: the physics inductive bias
 
@@ -467,7 +511,7 @@ agent collisions, and the wasted timesteps from being pushed off course.
 
 The reward function
 ([reward.py](../packages/crowdrl-env/src/crowdrl_env/reward.py)) is computed by
-[compute_rewards()](../packages/crowdrl-env/src/crowdrl_env/reward.py#L112)
+[compute_rewards()](../packages/crowdrl-env/src/crowdrl_env/reward.py#L222)
 every timestep. It combines sparse task rewards, shaped progress signals, and
 smoothness priors to guide the policy toward human-like pedestrian behaviour.
 
@@ -509,6 +553,13 @@ if agent is overlapping any other agent AND both are active:
 - **Implicit learning**: combined with the spring-damper force (A.4), the agent
   learns that collisions both hurt (reward) and push it off course (physics).
   The double signal reinforces avoidance.
+- **Impact-speed weighting (optional)**: with `use_velocity_weighted_collision`
+  (default off; ON in the shipped run) the per-step penalty is scaled by
+  `max(floor + scale * closing_speed, 0)` against the worst overlapping
+  neighbour (closing speed capped at 10 m/s), and `collision_penalty_cap`
+  bounds the scaled penalty from below (discount-only, default off). Standing
+  in contact is then cheap while plowing in at speed is expensive -- the
+  distinction that un-froze moderate-density scenarios.
 
 #### Agent proximity: graded linear ramp (per-step, worst neighbour)
 
@@ -561,6 +612,10 @@ meaningful depth regardless of agent size.
   during overlap; the graded proximity ramp fires earlier and with smaller
   magnitude, creating a smoother gradient that encourages the policy to
   maintain distance before the hard collision signal kicks in.
+- **Optional closing-speed weighting**: `use_velocity_weighted_proximity`
+  (default off; ON in the shipped run) scales the ramp by
+  `max(floor + scale * closing_speed, 0)`, so a fast mutual approach is
+  penalised harder than standing near a neighbour.
 
 #### Timeout: -5.0
 
@@ -575,6 +630,10 @@ if episode reaches 5000 steps (50 seconds at dt=0.01):
   that standing still or taking detours is costly. But the timeout penalty alone
   is weaker than the goal bonus (+10.0), so the agent is better off reaching
   the goal even with a few collisions along the way.
+- **Stuck termination (optional)**: with `stuck_termination_enabled` (default
+  off), any still-active agent whose navmesh path progress over the last 300
+  steps is below 0.2 m is deactivated early and pays the same timeout penalty
+  -- dense episodes stop carrying frozen agents to the horizon.
 
 #### Wall proximity: -0.1 per step
 
@@ -594,16 +653,39 @@ if distance_to_nearest_wall < threshold AND agent is active:
   less dangerous than agent-agent interpenetration. An agent in a narrow
   corridor cannot avoid triggering this penalty, so making it too large would
   create unlearnable situations.
+- **A band, not a gradient**: the penalty is flat inside the threshold; the
+  smooth near-wall gradient comes from the physics-side exponential repulsion
+  (A.5).
+
+#### Wall collision: -1.0 per step
+
+```
+if enforce_wall_boundaries() reported hard wall contact for the agent:
+    reward += -1.0        (wall_collision_penalty; 0.0 disables)
+```
+
+- **Incentivises**: never actually reaching the hard boundary -- the proximity
+  band warns, this one punishes contact.
+- **Impact-speed variant**: when the collision weighting is on, this penalty
+  is scaled by the agent's *own* pre-contact speed (there is no wall-normal
+  closing speed to measure), so sliding along a wall costs little and slamming
+  into one costs a lot. The shipped run uses -0.5.
 
 ### B.2 Shaped progress reward
 
-#### Progress: +1.0 * distance_closed
+#### Progress: +1.0 * path_distance_closed
 
 ```
-progress = previous_goal_distance - current_goal_distance
+progress = previous_remaining_path - current_remaining_path
 reward += 1.0 * progress
 ```
 
+- **Route-aware**: the distance is the remaining **navmesh shortest-path
+  length** to the goal (straight-line only as a fallback when no navmesh is
+  present). Walking the corridor toward the goal is rewarded even where the
+  straight-line bearing points into a wall -- the old straight-line form
+  punished correct detours in Tier 2+ geometries. (Goal *detection* still
+  uses the straight-line 0.5 m radius.)
 - **Incentivises**: moving toward the goal, not just reaching it.
 - **Potential-based**: the reward depends on the *change* in distance, not the
   absolute distance. Moving 1m closer yields +1.0 regardless of how far away
@@ -705,6 +787,11 @@ reward      += -0.005 * |speed - preferred|
   "maintain preferred speed" and "don't collide". The current weight
   (-0.005) keeps the preference gentle enough that the collision and
   proximity signals win when they need to.
+- **Off in the shipped run.** r0125 trains with `use_smoothness: false` and
+  `speed_deviation_weight: 0.0`, so it ignores the preferred-speed observation
+  and cruises near its 2.0 m/s ceiling. Notebook 11 clamps the commanded speed
+  to the preferred speed as an interim deployment shim; retraining with this
+  term on and randomised preferred speeds is the planned fix.
 
 ### B.5 Action-rate and inverse-distance signals
 
@@ -715,12 +802,13 @@ action_change  = ||actions_t - actions_{t-1}||
 reward        += weight * action_change
 ```
 
-Enabled by default (`action_rate_weight = -0.01`) since the Layer 1 reward
-rebalance. It directly penalises large changes in the raw policy output
-between consecutive steps -- more direct than the jerk penalty because it
-targets the network's output before the nonlinear action interpretation and
-velocity blending. Some experiment configs set it back to 0 to isolate other
-reward changes (e.g. the collision-suppression retune).
+Enabled by default (`action_rate_weight = -0.01`; the shipped run uses
+-0.001) since the Layer 1 reward rebalance. It directly penalises large
+changes in the raw policy output between consecutive steps -- more direct
+than the jerk penalty because it targets the network's output before the
+nonlinear action interpretation and velocity blending. In the shipped run it
+is the *only* active smoothness regulariser (the Tier-2 block is disabled
+there).
 
 #### Inverse distance to goal (weight = 0.0, disabled)
 
@@ -761,6 +849,11 @@ crowded phases. The smoothness priors (speed deviation, angular acceleration,
 jerk) are deliberately kept tiny so they regularise without overriding the
 task objective.
 
+(The shipped r0125 run rebalances the same structure -- goal +20, collision -2
+with impact-speed scaling and a -2.0 cap, progress x2, proximity -0.025/-0.001
+inside 0.75 m, smoothness off, action rate -0.001 -- but the hierarchy above
+is unchanged.)
+
 ### B.7 Emergent behaviours from reward-physics interaction
 
 The combination of physical constraints (Section A) and reward signals
@@ -787,7 +880,7 @@ torso when passing through narrow gaps because:
 - The elliptical body model (A.3) means a rotated torso is narrower
 - Collisions carry a -1.0/step penalty
 - The torso rotation action is cheap (no direct penalty, only the very
-  small indirect angular acceleration cost of -1e-4 * |omega_dot|)
+  small indirect angular acceleration cost of -1e-2 * |omega_dot|)
 
 **Speed modulation near obstacles.** Agents slow down in congested areas
 because:
@@ -812,18 +905,22 @@ body because:
 
 ## Appendix: Physics and reward parameter reference
 
-### Physics parameters ([CrowdEnvConfig](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L40))
+### Physics parameters ([CrowdEnvConfig](../packages/crowdrl-env/src/crowdrl_env/crowd_env.py#L44))
 
 | Parameter | Default | Unit | Role |
 |-----------|---------|------|------|
 | `dt` | 0.01 | s | Simulation timestep |
-| `desired_velocity_weight` | 0.05 | -- | Weight on desired velocity; 0.05 = 5% desired + 95% carry-over (tau ~200ms at dt=0.01s). Higher = less smoothing. Layer 1 of agent_dynamics_refactor (was 0.8). Renamed from `velocity_damping`. |
+| `desired_velocity_weight` | 0.05 (shipped run: 0.8) | -- | Weight on desired velocity; 0.05 = 5% desired + 95% carry-over (tau ~200ms at dt=0.01s). Higher = less smoothing. Per-run dynamics choice, recorded in the ONNX `crowdrl.dynamics` metadata. Renamed from `velocity_damping`. |
 | `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
 | `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
 | `max_velocity_magnitude` | 3.0 | m/s | Hard velocity clamp; safety vs contact-force blowup. Sits above max_forward_speed so policy commands are never the binding constraint. Experimental starting point. |
-| `max_steps` | 5000 | steps | Episode timeout (50 seconds) |
+| `max_steps` | 5000 (shipped run: 3000) | steps | Episode timeout |
+| `stuck_termination_enabled` | False | -- | Deactivate agents making no path progress (timeout penalty applied) |
+| `stuck_window_steps` | 300 | steps | Rolling window for the stuck check |
+| `stuck_progress_threshold` | 0.2 | m | Minimum path progress over the window |
+| `solvability_clearance_factor` | 1.2 | -- | Safety margin on agent radius in the 3-stage solvability check |
 
-### Action limits ([ActionConfig](../packages/crowdrl-core/src/crowdrl_core/action.py#L27))
+### Action limits ([ActionConfig](../packages/crowdrl-core/src/crowdrl_core/action.py#L32))
 
 Desired speed is asymmetric: humans walk forward much faster than backward.
 action[0] linearly remaps [-1, 1] -> [-max_backward_speed, +max_forward_speed].
@@ -837,8 +934,16 @@ Negative desired_speed means motion opposite to heading (backing up).
 | `max_torso_change` | 0.010 | rad/step | 57 deg/s (hip constraints) |
 | `max_head_change` | 0.030 | rad/step | 172 deg/s (head scans fastest) |
 | `head_limit` | pi/2 | rad | +/-90 deg from torso |
+| `speed_turn_coupling` | False | -- | Speed-dependent turn envelope (A.1); heading/torso only |
+| `turn_lat_accel` | 2.0 | m/s^2 | Lateral-acceleration turn budget when coupled |
+| `turn_pivot_rate` | 2.0944 rad/s | 120 deg/s | Low-speed pivot cap when coupled (`turn_pivot_rate_deg` in YAML) |
 
-### Wall forces (in [compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L255))
+The shipped r0125 run overrides: `speed_turn_coupling: true`,
+`turn_pivot_rate_deg: 240`, and flat heading/torso caps raised to 4.8 deg/step
+(so the coupled envelope, not the flat cap, governs turning); the head cap
+stays at the default.
+
+### Wall forces (in [compute_contact_forces()](../packages/crowdrl-core/src/crowdrl_core/collision.py#L345))
 
 | Parameter | Default | Unit |
 |-----------|---------|------|
@@ -847,23 +952,33 @@ Negative desired_speed means motion opposite to heading (backing up).
 
 ### Reward weights ([RewardConfig](../packages/crowdrl-env/src/crowdrl_env/reward.py#L21))
 
-| Signal | Weight | Active by default |
-|--------|--------|-------------------|
-| `goal_bonus` | +10.0 | Yes |
-| `collision_penalty` | -1.0 | Yes |
-| `agent_proximity_penalty_near` | -0.005 | Yes (at contact, `r_i + r_j`) |
-| `agent_proximity_penalty_far` | -0.0001 | Yes (at `personal_space_radius`) |
-| `personal_space_radius` | 1.0 m | Yes (absolute, not body-relative) |
-| `timeout_penalty` | -5.0 | Yes |
-| `wall_proximity_penalty` | -0.1 | Yes |
-| `wall_proximity_threshold` | 1.5x radius | Yes |
-| `existence_penalty` | -0.01 | Yes |
-| `progress_weight` | +1.0 | Yes |
-| `jerk_penalty_weight` | -1e-5 | Yes (Tier 2; Layer 1 v2: 10x down from Layer 1's -1e-4) |
-| `angular_accel_penalty_weight` | -1e-2 | Yes (Tier 2; Layer 1: 100x up from -1e-4) |
-| `speed_deviation_weight` | -5e-3 | Yes (Tier 2; Layer 1 v2: down from -1e-1 to escape ice-skating) |
-| `action_rate_weight` | -1e-2 | Yes (Layer 1: enabled, was 0.0) |
-| `inverse_distance_weight` | 0.0 | No |
+The "shipped r0125" column is the override set recorded in
+`example_model/config_resolved.yaml`; other experiment configs vary freely.
+
+| Signal | Default | Shipped r0125 | Notes |
+|--------|---------|---------------|-------|
+| `goal_bonus` | +10.0 | +20.0 | at `goal_radius` 0.5 m (straight-line) |
+| `collision_penalty` | -1.0 | -2.0 | per step while overlapping |
+| `use_velocity_weighted_collision` | False | True | impact-speed scaling (B.1) |
+| `collision_speed_floor` / `_scale` | 0.5 / 0.5 | 0.25 / 0.5 | multiplier = max(floor + scale*closing, 0) |
+| `collision_penalty_cap` | 0.0 (off) | -2.0 | discount-only floor on the scaled penalty |
+| `agent_proximity_penalty_near` | -0.005 | -0.025 | at contact, `r_i + r_j` |
+| `agent_proximity_penalty_far` | -0.0001 | -0.001 | at `personal_space_radius` |
+| `personal_space_radius` | 1.0 m | 0.75 m | absolute, not body-relative |
+| `use_velocity_weighted_proximity` | False | True | closing-speed scaling of the ramp |
+| `proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.0 / 0.5 | |
+| `timeout_penalty` | -5.0 | -10.0 | also paid on stuck termination |
+| `wall_proximity_penalty` | -0.1 | -0.1 | flat band inside the threshold |
+| `wall_proximity_threshold` | 1.5x radius | 1.5x radius | |
+| `wall_collision_penalty` | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables |
+| `existence_penalty` | -0.01 | -0.01 | |
+| `progress_weight` | +1.0 | +2.0 | on navmesh remaining-path length |
+| `use_smoothness` | True | False | gates jerk / angular accel / speed deviation |
+| `jerk_penalty_weight` | -1e-5 | (off) | Tier 2; Layer 1 v2: 10x down from -1e-4 |
+| `angular_accel_penalty_weight` | -1e-2 | (off) | Tier 2; measured on the torso orientation |
+| `speed_deviation_weight` | -5e-3 | 0.0 | r0125 ignores preferred speed (nb11 clamp shim) |
+| `action_rate_weight` | -1e-2 | -1e-3 | Layer 1: enabled, was 0.0 |
+| `inverse_distance_weight` | 0.0 | 0.0 | disabled (not potential-based) |
 
 The agent proximity penalty replaced a binary "inside 2x radius -> flat -0.3"
 term with a graded linear ramp from `near` (at contact distance `r_i + r_j`)
@@ -872,11 +987,14 @@ to `far` (at the absolute `personal_space_radius`). Each agent receives the
 its personal-space zone, so the signal tracks the worst encroachment rather
 than summing over density. See Section B.1 for the motivation.
 
-### Agent body dimensions ([SpawnConfig](../packages/crowdrl-env/src/crowdrl_env/spawner.py#L20))
+### Agent body dimensions and spawning ([SpawnConfig](../packages/crowdrl-env/src/crowdrl_env/spawner.py#L20))
 
-| Parameter | Distribution | Notes |
-|-----------|-------------|-------|
-| `shoulder_width` | N(0.22, 0.02) m | Half-width; full shoulder ~0.44m |
-| `chest_depth` | N(0.12, 0.015) m | Half-depth; full chest ~0.24m |
+| Parameter | Distribution / value | Notes |
+|-----------|---------------------|-------|
+| `shoulder_width` | N(0.22, 0.02) m | Half-width; full shoulder ~0.44m; clipped >= 0.08 |
+| `chest_depth` | N(0.12, 0.015) m | Half-depth; full chest ~0.24m; clipped >= 0.08 |
 | `mass` | N(80, 15) kg | Clamped >= 40 kg |
 | `preferred_speed` | N(1.34, 0.26) m/s | Clamped to [0.5, 2.0] m/s |
+| `n_agents_range` | (5, 30) | Default; the curriculum overrides per phase |
+| `min_spawn_separation` | 0.3 m | Effective floor: max(0.3, 2x max body radius) |
+| `min_spawn_goal_distance` | 3.0 m | Goals rejection-sampled at least this far from spawn |
