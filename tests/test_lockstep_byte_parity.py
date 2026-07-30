@@ -126,7 +126,12 @@ def run_native_reference(area, exit_polygon, spawns, goal, max_steps):
             cum[i] += deltas[k]
             pos_h[i, wi] = world.positions[k]
             g_h[i, wi] = gdists[k]
-            if exit_poly.contains(shapely.Point(positions[i])):
+            # ``covers`` mirrors JuPedSim's boundary-INCLUSIVE exit test
+            # (Polygon::IsInside -> CGAL bounded_side != ON_UNBOUNDED_SIDE) and
+            # therefore LockstepPolicyModel's freeze predicate. Must stay in
+            # step with it: a mismatched predicate desyncs the rosters on a
+            # landing exactly on an exit edge.
+            if exit_poly.covers(shapely.Point(positions[i])):
                 exits[i] = step
             else:
                 still.append(i)
@@ -157,20 +162,31 @@ def run_lockstep_jupedsim(area, exit_polygon, spawns, max_steps):
     while sim.agent_count() > 0 and steps < max_steps:
         sim.iterate()
         steps += 1
-        history.append(
-            {
-                id2idx[a.id]: np.asarray(a.position)
-                for a in sim.agents()
-                if a.id not in model._frozen
-            }
-        )
+        # Exclude rows this model already retired: JuPedSim's exit stage lags
+        # removal by 2 iterations, so they linger in sim.agents().
+        frozen = model.frozen_agent_ids
+        snapshot = {
+            id2idx[a.id]: np.asarray(a.position) for a in sim.agents() if a.id not in frozen
+        }
+        history.append(snapshot)
+        if not snapshot:
+            # Stop where the native loop stops -- on the step that retires the
+            # last agent. JuPedSim itself would iterate twice more (its exit
+            # stage lags removal), appending empty snapshots that make the two
+            # histories different lengths for a purely bookkeeping reason.
+            break
     exits = {id2idx[jid]: s for jid, s in model.exit_steps.items()}
     return history, exits
 
 
 def assert_byte_identical(native_history, jps_history):
-    steps = min(len(native_history), len(jps_history))
-    for t in range(steps):
+    # Compare lengths first: without this, a run that stops early passes on the
+    # prefix it did produce.
+    assert len(native_history) == len(jps_history), (
+        f"different number of steps: native {len(native_history)} vs "
+        f"jupedsim {len(jps_history)} -- one side stopped early"
+    )
+    for t in range(len(native_history)):
         assert set(native_history[t]) == set(jps_history[t]), (
             f"step {t + 1}: roster differs "
             f"({sorted(native_history[t])} vs {sorted(jps_history[t])})"
@@ -197,7 +213,13 @@ class TestCorridorWithExits:
         jps_history, jps_exits = run_lockstep_jupedsim(
             self.AREA, self.EXIT, self.SPAWNS, max_steps=1500
         )
-        assert native_exits and native_exits == jps_exits
+        # Completion, not just agreement: equal-but-incomplete would pass the
+        # exit comparison with a single agent through.
+        assert len(native_exits) == len(self.SPAWNS), (
+            f"only {len(native_exits)}/{len(self.SPAWNS)} agents exited in the "
+            "native reference -- the run did not complete"
+        )
+        assert native_exits == jps_exits
         assert_byte_identical(native_history, jps_history)
 
 
@@ -214,4 +236,9 @@ class TestCornerSegment:
             self.AREA, self.EXIT, self.SPAWNS, self.GOAL, max_steps=300
         )
         jps_history, _ = run_lockstep_jupedsim(self.AREA, self.EXIT, self.SPAWNS, max_steps=300)
+        # No agent exits within 300 steps here, so both sides must have run the
+        # full segment with the full roster -- otherwise "identical" could mean
+        # "identically truncated".
+        assert len(native_history) == 300
+        assert all(len(step) == len(self.SPAWNS) for step in native_history)
         assert_byte_identical(native_history, jps_history)

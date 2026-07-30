@@ -39,6 +39,20 @@ Requirements and caveats:
 * Fixed final goals per agent are assumed (single exit stage journeys).
 * Roughly 2 navmesh path queries per agent per step -- markedly slower than
   ``LearnedPolicyModel``; intended for validation, not interactive use.
+* **Observation scope**: the neighbour-memory blocks (A+/A++,
+  ``use_neighbor_vel_history`` / ``use_neighbor_trajectory_features``) are
+  never populated here, so byte-exactness is scoped to configs that leave them
+  disabled. The ego temporal block is fully maintained.
+* **Roster scope**: pass boundaries are detected by seeing an agent id twice,
+  which needs at least one agent to survive from one iteration to the next.
+  Letting the entire roster exit and then adding new agents raises ``KeyError``
+  in ``compute_next_state``. Safe for the validation runs this model is for
+  (fixed roster, agents only leave), because JuPedSim's agent container is a
+  deque with order-stable removal, so any survivor fires first and triggers the
+  pass. ``Simulation.iteration_count()`` is readable inside callbacks and would
+  remove this failure class entirely by keying passes on it -- it needs the
+  Simulation handle passed to the model after construction, so it is left as a
+  follow-up rather than a silent partial fix.
 """
 
 from __future__ import annotations
@@ -258,6 +272,17 @@ class LockstepPolicyModel(CustomOperationalModel):
         self._pass_count = 0
         self._dt_checked = False
 
+    @property
+    def frozen_agent_ids(self) -> frozenset[int]:
+        """Agents already removed under native semantics.
+
+        JuPedSim's own exit stage lags removal by 2 iterations, so these ids
+        still appear in ``simulation.agents()`` for a step or two after this
+        model stopped simulating them. Anything comparing against a native run
+        must exclude them.
+        """
+        return frozenset(self._frozen)
+
     # -- batch pass -----------------------------------------------------------
 
     def _world_from(self, rows: list[_Row]) -> WorldState:
@@ -344,7 +369,16 @@ class LockstepPolicyModel(CustomOperationalModel):
             row.gdist_hist[write_idx] = gdists[i]
 
             point = shapely.Point(row.position)
-            if any(poly.contains(point) for poly in self.exit_polygons):
+            # ``covers``, not ``contains``: JuPedSim's exit test is
+            # boundary-INCLUSIVE (Polygon::IsInside -> CGAL bounded_side !=
+            # ON_UNBOUNDED_SIDE, libsimulator/src/Polygon.cpp:43-47), and
+            # shapely's ``contains`` excludes the boundary. With ``contains``,
+            # an agent landing exactly on an exit edge is marked by JuPedSim one
+            # iteration before lockstep freezes it; if it is then pushed back
+            # out, JuPedSim erases an agent lockstep never froze and the roster
+            # handler drops the row while the native reference keeps simulating
+            # it. Measure-zero under float dynamics, but a real desync.
+            if any(poly.covers(point) for poly in self.exit_polygons):
                 self._frozen[aid] = row
                 self.exit_steps[aid] = self._pass_count
                 del self._rows[aid]
