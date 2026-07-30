@@ -116,7 +116,10 @@ class CrowdRLAgentState:
     velocity: tuple[float, float] = (0.0, 0.0)
 
     heading: float = 0.0
-    """Direction of travel (radians). Distinct from torso_angle."""
+    """Last commanded direction of travel (radians). Output only -- it is NOT
+    an input to the next step: the model re-anchors the commanded heading to
+    ``torso_angle`` every step, exactly as both training engines do. Kept for
+    inspection/plotting; writing to it does not steer the agent."""
 
     torso_angle: float = 0.0
     """Torso orientation (radians); sets the collision-ellipse axis."""
@@ -469,9 +472,17 @@ class LearnedPolicyModel(CustomOperationalModel):
         raw_action = self.policy(obs)
 
         velocity = np.asarray(state.velocity, dtype=np.float64)
+        # Heading is ANCHORED TO THE TORSO, not free-integrated: both training
+        # engines pass torso_orientations as *both* current_headings and
+        # current_torsos (crowd_env.py:334-341, lockstep.native_batch_step),
+        # so the commanded velocity direction is re-derived from the previous
+        # torso every step and can never sit more than one heading delta away
+        # from it. Feeding the previously integrated ``state.heading`` here
+        # instead would let heading and torso drift apart without bound and
+        # silently change the action->motion mapping vs training.
         result = interpret_action(
             np.asarray(raw_action, dtype=np.float64),
-            current_heading=state.heading,
+            current_heading=state.torso_angle,
             current_torso=state.torso_angle,
             current_head=state.head_angle,
             config=self.action_config,

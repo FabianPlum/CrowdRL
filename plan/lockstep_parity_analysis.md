@@ -19,6 +19,37 @@ Micro-ablations on identical inputs, corner geometry, the shipped
 | 5 | **Waypoint source: navmesh funnel vs router `next_target`** | **up to 116 deg direction; p_dev 0.29-0.46 vs 0.0** | **dominant channel; must compute the nav block from the same funnel** |
 | 6 | Physics application: per-agent (ego row) vs synchronous batch | neighbour velocities pre- vs post-filter in the damping term | run the physics once, batched |
 | 7 | Exit removal timing | JuPedSim's exit stage removes agents **2 iterations after** they enter the exit area | apply native removal inside the model |
+| 8 | **Heading anchoring: torso-derived (training) vs free-integrated (interactive adapter)** | **unbounded drift between heading and torso** | **interactive-model-only; fixed 2026-07-30 -- anchor to torso** |
+
+Channel 8 was found in the 2026-07-29 end-of-session review and never
+affected lockstep. Both training engines pass `torso_orientations` as *both*
+`current_headings` and `current_torsos` (`crowd_env.py:334-341`;
+`native_batch_step`, which is why byte-parity held and why the byte-parity
+test could not have caught this). Heading is therefore *derived* in training:
+re-anchored to the previous torso every step, so the commanded velocity
+direction never sits more than one per-step delta (~4.8 deg for the shipped
+artefact) from the previous torso. `LearnedPolicyModel` instead fed its own
+persisted `state.heading` back in and stored `result.new_heading`, letting
+the two free-integrate apart without bound and systematically changing the
+action->motion mapping vs training. `CrowdRLAgentState.heading` is now
+documented as output-only.
+
+Measured effect of closing channel 8 (shipped artefact, trained dynamics
+w=0.8, `LearnedPolicyModel`, contact physics on):
+
+| Scenario | Before | After |
+|----------|--------|-------|
+| Corner, 4 agents | 3/4 exit; 1 pinned at (11.8, 1.7) for all 4000 steps | **4/4 exit**, steps 738/821/903/979 (9.8 s) |
+| Bottleneck, 12 agents, 1.4 m | 11/12 exit; 1 pinned before the neck; min pairwise 0.350 m | **12/12 exit** in 7.4 s; min pairwise 0.410 m |
+
+This **retracts the "policy absorbing state" attribution** for the lost
+agent in both e2e scenarios and in notebook 10's parity section. The
+wall-facing state itself is real (identical obs and action across engines at
+the captured state), but what was *driving* agents into it was channel 8, an
+adapter defect. No committed scenario reaches it now, so nothing in the repo
+currently demonstrates an absorbing state -- treat it as an open question,
+not an established policy property, until a scenario reproduces it under
+torso-anchored headings.
 
 Channel 5 deserves emphasis: along the corner approach corridor the native
 policy sees `path_deviation` of 0.29-0.46 -- **+3 to +4 sigma** under the
@@ -77,10 +108,12 @@ segment (funnel corners + wall projection), both compared with
 
 - **`LearnedPolicyModel`** stays the interactive/production adapter: router
   waypoint, per-agent callbacks, no `triangle` dependency, tolerant of
-  arbitrary journeys. Route-level faithful, not byte-exact. Optional
-  `waypoint_clearance` mitigates the router's corner-targeting (off by
-  default; flipping it reshuffles which marginal agent meets the
-  checkpoint's freeze/absorbing state).
+  arbitrary journeys. Route-level faithful, not byte-exact -- channels 6
+  (neighbour one-step staleness in the contact damping) and 7 (the exit lag
+  leaking removed agents into neighbours' observations) remain step-level
+  semantic differences by design, and no amount of retraining removes them.
+  Optional `waypoint_clearance` mitigates the router's corner-targeting (off
+  by default).
 - **`LockstepPolicyModel`** is the validation instrument: IAS-7-style
   comparisons, regression baselines, and any claim of the form "JuPedSim
   reproduces the CrowdRL result" should run through it.

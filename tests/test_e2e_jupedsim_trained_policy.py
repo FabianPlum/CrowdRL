@@ -113,7 +113,12 @@ def run_scenario(model, area, exit_poly, spawns, max_steps):
 
 
 def assert_all_exited(sim, steps, ids, trajectories, *_):
-    stuck = {i: t[-1] for i, t in trajectories.items() if t and sim.agent_count() > 0}
+    # Report only the agents actually still in the simulation, not every agent.
+    stuck = {
+        a.id: tuple(round(c, 2) for c in trajectories[a.id][-1])
+        for a in sim.agents()
+        if trajectories.get(a.id)
+    }
     assert sim.agent_count() == 0, (
         f"{sim.agent_count()}/{len(ids)} agents still in the simulation "
         f"after {steps} steps; last positions: {stuck}"
@@ -132,10 +137,21 @@ def assert_inside(area, trajectories):
 @pytest.mark.skipif(not EXAMPLE_MODEL.is_file(), reason="shipped example model missing")
 class TestSelfConfiguredCorner:
     """The shipped schema-v2 artefact: configs AND dynamics self-configure,
-    so this runs at the TRAINED dynamics (w=0.8, clamp 3.0). At those
-    dynamics the r0400 checkpoint deterministically loses one agent to its
-    wall-facing absorbing state (see plan/lockstep_parity_analysis.md) --
-    the expectations below are the honest trained-dynamics baseline."""
+    so this runs at the TRAINED dynamics (w=0.8, clamp 3.0).
+
+    Baseline: 4/4 exit in ~9.8 s sim (exit steps 738/821/903/979). Until
+    2026-07-30 this scenario lost one agent, which was attributed to a policy
+    absorbing state; it was in fact divergence channel 8 -- the adapter
+    free-integrated a heading instead of re-anchoring it to the torso the way
+    both training engines do (see plan/lockstep_parity_analysis.md). With that
+    closed, no agent is lost.
+
+    Machine scope: exit steps and the exact completion count rest on ONNX
+    Runtime being run-to-run deterministic for this session/hardware. Expect
+    ULP-level drift cross-machine, which can shift an exit step by one and, in
+    principle, flip a marginal agent -- read a near-miss failure here as
+    numerical scope, not a broken adapter.
+    """
 
     @pytest.fixture(scope="class")
     def result(self):
@@ -145,19 +161,19 @@ class TestSelfConfiguredCorner:
         return run_scenario(model, CORNER_AREA, CORNER_EXIT, CORNER_SPAWNS, max_steps=4000)
 
     def test_agents_reach_the_exit_at_trained_dynamics(self, result):
-        """3 of 4 observed: the 4th enters the absorbing state (a policy
-        property, not an adapter defect -- byte-identical across engines)."""
-        sim, steps, ids, trajectories, _ = result
-        exited = len(ids) - sim.agent_count()
-        assert exited >= 3, f"only {exited}/{len(ids)} exited in {steps} steps"
+        """All 4 exit at the trained dynamics."""
+        assert_all_exited(*result)
 
     def test_exiting_agents_actually_rounded_the_corner(self, result):
         """The route must pass through the vertical corridor -- the pre-#1626
-        failure mode was every agent pinned at the lower wall (y=2.0)."""
-        _, steps, _, trajectories, _ = result
+        failure mode was every agent pinned at the lower wall (y=2.0).
+
+        Every trajectory is examined (no straggler exemption): the scenario
+        completes, so an unexamined trajectory would mean a regression.
+        """
+        _, _, ids, trajectories, _ = result
+        assert len(trajectories) == len(ids)
         for agent_id, traj in trajectories.items():
-            if len(traj) == steps:  # the absorbing-state straggler
-                continue
             ys = np.array([p[1] for p in traj])
             assert ys.max() > 9.0, (
                 f"agent {agent_id} never entered the vertical corridor "
@@ -185,11 +201,17 @@ class TestSelfConfiguredBottleneck:
     """Crowd behaviour, not just solo navigation: 12 agents, 1.4 m aperture,
     at the trained dynamics (self-configured from the schema-v2 artefact).
 
-    Observed baseline: 11/12 exit within 60 s; one agent enters the
-    absorbing state near the lower wall before the neck. Spacing is a real
-    criterion with contact physics active: pre-physics this scenario
-    bottomed out at ~0.04 m centre distance (ghosting); observed floor at
-    trained dynamics is 0.35 m.
+    Baseline: 12/12 exit in ~7.4 s sim (first 4.21 s, median 6.06 s, last
+    7.38 s). Until 2026-07-30 one agent was lost here too -- same cause as in
+    the corner scenario, divergence channel 8 (heading anchoring), not a
+    policy absorbing state.
+
+    Spacing is a real criterion with contact physics active: pre-physics this
+    scenario bottomed out at ~0.04 m centre distance (ghosting); observed
+    floor at trained dynamics is 0.41 m.
+
+    Machine scope: as in the corner scenario, exit steps are ONNX-Runtime
+    determinism-scoped to this session/hardware.
     """
 
     @pytest.fixture(scope="class")
@@ -200,15 +222,13 @@ class TestSelfConfiguredBottleneck:
         )
 
     def test_crowd_flows_through_at_trained_dynamics(self, result):
-        sim, steps, ids, _, _ = result
-        exited = len(ids) - sim.agent_count()
-        assert exited >= 11, f"only {exited}/{len(ids)} exited in {steps} steps"
+        """All 12 clear the neck and exit."""
+        assert_all_exited(*result)
 
     def test_exiting_agents_passed_the_aperture(self, result):
-        _, steps, _, trajectories, _ = result
+        _, _, ids, trajectories, _ = result
+        assert len(trajectories) == len(ids)
         for agent_id, traj in trajectories.items():
-            if len(traj) == steps:  # absorbing-state straggler
-                continue
             xs = np.array([p[0] for p in traj])
             assert xs.max() > 7.2, f"agent {agent_id} never cleared the neck"
 
