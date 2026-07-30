@@ -22,19 +22,35 @@ Provenance (also readable via `OnnxPolicy(...).metadata.provenance`):
   waypoint alone), navmesh block, 6D temporal memory
 - action: speed/turn-coupled interpreter (240 deg/s pivot), dt=0.01
 - dynamics: `desired_velocity_weight=0.8`, speed clamp 3.0 m/s, contact
-  stiffness 30000 / damping 500 -- the values the checkpoint trained under.
-  Self-configured runs therefore use the TRAINED dynamics; at those, the
-  checkpoint deterministically loses one agent per corner/bottleneck
-  scenario to its wall-facing absorbing state (a known policy trait, see
-  plan/lockstep_parity_analysis.md).
+  stiffness 30000 / damping 500 -- the values the checkpoint trained under, so
+  self-configured runs use the TRAINED dynamics. `desired_velocity_weight` is
+  read from that run's `config_resolved.yaml`; the other three are not
+  expressible in the YAML schema and were asserted at re-export time (see
+  `dynamics_provenance` in the artefact's provenance, and the chain-of-evidence
+  note in `plan/final_review_2026-07-29.md`).
 
-Regenerated (bit-exact vs. the run's original `policy_r0400.onnx`) via:
+At those dynamics the corner scenario exits 4/4 and the bottleneck 12/12.
+(Before 2026-07-30 each lost one agent, which was attributed to a wall-facing
+absorbing state; the real cause was divergence channel 8 in the interactive
+adapter -- see `plan/lockstep_parity_analysis.md`. That attribution is
+retracted.)
+
+Regenerated via:
 
 ```bash
 uv run python scripts/reexport_onnx.py results_exp_nogoaldir_stable_bigrooms_density_v4 \
     checkpoint_rollout_0400.pt --output example_model/policy_r0400.onnx \
-    --verify-against results_exp_nogoaldir_stable_bigrooms_density_v4/policy_r0400.onnx
+    --verify-against results_exp_nogoaldir_stable_bigrooms_density_v4/policy_r0400.onnx \
+    --max-velocity-magnitude 3.0 --contact-stiffness 30000 --contact-damping 500
 ```
+
+The three dynamics flags are required: the script refuses to stamp values the
+run's YAML does not record as though they were trained (they would otherwise
+come from whatever `CrowdEnvConfig` defaults to at re-export time).
+
+`--verify-against` measured **max |diff| 0.000e+00** over 256 random inputs --
+i.e. bit-identical outputs -- though the gate it enforces is `<= 1e-5`, so
+"bit-identical" is the observed result, not the guarantee the check makes.
 
 Used by `tests/test_e2e_jupedsim_trained_policy.py` (the self-configured
 scenarios run whenever a JuPedSim 2.0 build is on `sys.path`; no environment
