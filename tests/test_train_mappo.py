@@ -76,6 +76,7 @@ class TestCfgDictRoundTrip:
         "observation": {
             "use_navmesh": True,
             "use_goal_direction": False,
+            "use_jupedsim_style_routing": True,
             "use_temporal_memory": True,
             "temporal_memory_window": 50,
         },
@@ -146,6 +147,20 @@ class TestCfgDictRoundTrip:
         ec0, ec1 = self._round_trip(self.SOURCE_CFG)
         assert ec1.obs.temporal_memory_max_steps == ec1.max_steps == 3000
         assert ec1.obs.temporal_memory_dt == ec1.dt
+
+    def test_jupedsim_style_routing_parses_and_defaults_off(self):
+        """The routing-contract flag must survive YAML -> config -> YAML, and a
+        config that never mentions it (every pre-flag run) must parse False."""
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        assert ec0.obs.use_jupedsim_style_routing is True
+        assert ec1.obs.use_jupedsim_style_routing is True
+        legacy = {k: v for k, v in self.SOURCE_CFG.items()}
+        legacy["observation"] = {
+            k: v
+            for k, v in self.SOURCE_CFG["observation"].items()
+            if k != "use_jupedsim_style_routing"
+        }
+        assert build_env_config(legacy).obs.use_jupedsim_style_routing is False
 
     def test_defaults_only_config_round_trips(self):
         """A config that relies entirely on defaults must also round-trip."""

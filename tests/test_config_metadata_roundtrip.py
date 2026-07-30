@@ -86,6 +86,42 @@ class TestRoundTrip:
         assert resolved_obs == OBS
 
 
+class TestRoutingContractTravel:
+    """use_jupedsim_style_routing rides in the metadata: a flag-on artefact
+    self-describes its navigation contract, and a same-width explicit config
+    that disagrees on the flag raises instead of silently deploying the wrong
+    contract (the flag does not change obs_dim, so width checks cannot catch
+    the mismatch -- same landmine class as use_goal_direction)."""
+
+    @pytest.fixture(scope="class")
+    def flag_on_policy(self, tmp_path_factory):
+        obs = ObsConfig(
+            use_navmesh=True,
+            use_goal_direction=False,
+            use_jupedsim_style_routing=True,
+            use_temporal_memory=True,
+        )
+        actor = Actor(
+            NetworkConfig(obs_dim=obs.obs_dim, action_dim=4, actor_hidden_sizes=(32, 32))
+        )
+        path = tmp_path_factory.mktemp("export_flag") / "policy_flag.onnx"
+        export_onnx(actor, normalizer=None, output_path=path, obs_config=obs, action_config=ACTION)
+        return path, obs
+
+    def test_flag_travels_and_self_configures(self, flag_on_policy):
+        path, obs = flag_on_policy
+        resolved_obs, _ = resolve_configs(OnnxPolicy(path))
+        assert resolved_obs.use_jupedsim_style_routing is True
+        assert resolved_obs == obs
+
+    def test_same_width_flag_mismatch_raises(self, flag_on_policy):
+        path, obs = flag_on_policy
+        flag_off = ObsConfig(use_navmesh=True, use_goal_direction=False, use_temporal_memory=True)
+        assert flag_off.obs_dim == obs.obs_dim  # width cannot catch this
+        with pytest.raises(ValueError, match="use_jupedsim_style_routing"):
+            resolve_configs(OnnxPolicy(path), flag_off, ACTION)
+
+
 class TestDynamicsRoundTrip:
     def test_deployment_self_configures_dynamics(self, exported_policy):
         """Schema v2: the trained physics travel with the artefact -- the
