@@ -81,7 +81,7 @@ the improvement rather than flattering it.
 
 The high-density scenarios (`composed_hi` at 60-100 agents) remain the weakest
 and are where the later checkpoints lost ground -- see
-`plan/CrowdRL_Project_Plan_v9.md` for what that implies for retraining.
+`plan/CrowdRL_Project_Plan_v10.md` for what that implies for retraining.
 
 Regenerated via:
 
@@ -99,7 +99,7 @@ parity against the checkpoint is verified at export.
 ## Deployment baselines
 
 Measured with this artefact through `LearnedPolicyModel` on a JuPedSim 2.0
-source build (see `plan/CrowdRL_Project_Plan_v9.md` for the build recipe):
+source build (see `plan/CrowdRL_Project_Plan_v10.md` for the build recipe):
 
 | scenario | result |
 |---|---|
@@ -111,5 +111,6 @@ whenever a JuPedSim 2.0 build is on `sys.path`; no environment variables
 required) and demonstrated in `examples/10_jupedsim_learned_model.ipynb`.
 
 Not shipped, kept local (see `.gitignore`): `checkpoint_rollout_0400.pt` (the
-baseline this run initialised from) and `viz_r0125_tier3B.mp4` (a regenerable
-training-time render).
+baseline this run initialised from), `config_resolved_r0400_run.yaml` (that
+baseline's own resolved config) and `viz_r0400_tier3B.mp4` / `.log` (a
+regenerable training-time render).
