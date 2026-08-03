@@ -1,5 +1,25 @@
 # Agent Memory for CrowdRL: Research Findings and Design Options
 
+> **Implementation status (verified 2026-08-03): Option A shipped; B, C and D are still
+> open options.**
+>
+> - **Option A (+6D ego temporal memory): SHIPPED and on in the production line.**
+>   `use_temporal_memory` with the exact six scalars proposed here; it is part of the 89D
+>   shipped observation.
+> - **Option B (ego-state history), Option C (GRU recurrent policy), Option D (spatial
+>   visit counts): NOT BUILT.** No `ego_history`, `GRU`, `recurrent` or `visit_count`
+>   anywhere in `packages/`.
+> - The follow-on neighbour-memory work (A+/A++) is built but off by default -- see
+>   `plan/neighbor_memory_extension.md`.
+>
+> The literature survey, the quantified rejections (occupancy grids, ICM/RND, transformers)
+> and the bibliography are reference material and do not go stale. Section 2.8 -- the
+> surveyed finding that no major pedestrian-simulation approach includes self-trajectory
+> memory -- is the publication-relevant claim and is worth re-checking before it is cited.
+>
+> Note the observation width quoted in Section 1 (79D) predates the ego-state block gaining
+> raw preferred speed; the base is 80D today.
+
 ## 1. Problem statement
 
 CrowdRL agents observe a purely Markovian 79D snapshot (ego state, social sensing, raycasts). The policy cannot know:
