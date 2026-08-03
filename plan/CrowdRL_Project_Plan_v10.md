@@ -1667,13 +1667,18 @@ Ordered by what unblocks the most:
       observation and cruises near the 2.0 m/s ceiling. Notebook 11's
       speed-clamp shim is the interim compensation; the real fix is training
       the preference in, then deleting the shim.
-- [ ] Make Windows multi-GPU launch work out of the box in `train_mappo.py`
+- [ ] **(#22)** Make Windows multi-GPU launch work out of the box in `train_mappo.py`
       (direct-rank fallback when the libuv rendezvous is unavailable).
-- [ ] **YAML lossy-gap guard** in `cfg_dict_from_env_config` (`train_mappo.py:197`;
+- [ ] **(#21) YAML lossy-gap guard** in `cfg_dict_from_env_config` (`train_mappo.py:197`;
       carried from the 2026-07-29 review, still docstring-only): raise when a non-default
       `RaycastConfig` / `k_neighbours` / `head_limit` would be silently dropped.
       See "Two serialisation schemes, on purpose" in Section 3.6 for why this gap exists.
-- [ ] **`inverse_distance_weight` is a dead knob on the training path.** It exists on the
+- [ ] **(#14) `ActionConfig.dt` and `CrowdEnvConfig.dt` can desynchronise.**
+      `train_mappo.py:158` sets the action-layer `dt` from the YAML key; the
+      `CrowdEnvConfig(...)` construction never does. With speed-turn coupling on, a
+      non-default `dt` would give the turn envelope a different budget from the
+      integrator, silently. Latent -- every config uses the default `dt`.
+- [ ] **(#11) `inverse_distance_weight` is a dead knob on the training path.** It exists on the
       numpy `RewardConfig` and is parsed by `train_mappo.py`, but was never ported to
       `crowdrl-torch` -- so on the GPU path (the real training path) setting it does
       nothing, silently. Either port it or reject it at config-parse time. It is 0.0 in
@@ -1705,23 +1710,23 @@ that asserts three things which are no longer true (it called `policy_r0400.onnx
 the shipped artefact, cited corner 3/4 and bottleneck 11/12 as committed
 results, and rested on the retracted absorbing-state reading).
 
-- [ ] **`preferred_speeds` for temporal-off configs.** `crowd_env.py:247`
+- [ ] **(#12) `preferred_speeds` for temporal-off configs.** `crowd_env.py:247`
       populates `world.preferred_speeds` only inside the
       `if self.config.obs.use_temporal_memory:` guard at `:235`, so a
       temporal-OFF config feeds the constant 1.34 into the ego observation
       while the torch training twin always feeds the sampled per-agent speeds.
       A real train/eval twin inconsistency -- moot for the shipped temporal-on
       artefact, live for any ablation that turns temporal memory off.
-- [ ] **No full-step numpy-vs-torch trajectory equivalence test.** The twins are
+- [ ] **(#23) No full-step numpy-vs-torch trajectory equivalence test.** The twins are
       equivalence-tested at component level (atol 1e-4) and the navmesh signal
       only at spawn (they intentionally diverge off-route: numpy re-funnels,
       torch follows a stored path cursor). Worth having before IAS-7 validation
       leans on the numpy env as "the" reference.
-- [ ] **NaN policy differs between the two observation builders.**
+- [ ] **(#13) NaN policy differs between the two observation builders.**
       `build_observations_batch` sanitises with `nan_to_num`;
       `build_observation` -- the one the interactive adapter calls -- does not.
       One builder, two failure modes.
-- [ ] **Temporal-offset hazard in the observation layout**
+- [ ] **(#15) Temporal-offset hazard in the observation layout**
       (`observation.py:672-707`). The temporal block's `offset += 6` sits inside
       `if config.use_temporal_memory and _memory_state_populated(world)`, while
       the neighbour-velocity-history block below does not test
@@ -1733,10 +1738,10 @@ results, and rested on the retracted absorbing-state reading).
       features** (it never populates neighbour-memory state) -- was documented in
       `model.py` but not in `lockstep.py`. **Closed:** `lockstep.py:42-45` now
       carries the scope note in its own module docstring.
-- [ ] **Body dimensions are duplicated rather than shared:** `chest_depth = 0.15`
+- [ ] **(#18) Body dimensions are duplicated rather than shared:** `chest_depth = 0.15`
       is a default on `CrowdRLAgentState` and hardcoded again in
       `lockstep.py`. One constant, two homes.
-- [ ] **Two test-honesty items:** the e2e route assertions subsample
+- [ ] **(#24) Two test-honesty items:** the e2e route assertions subsample
       trajectories with `traj[:: max(1, len(traj) // 200)]`, so a fault between
       samples is invisible; and `test_lockstep_byte_parity.py` derives its goal
       from `centroid.coords[0]`, which is the exit centroid only for convex
@@ -1763,14 +1768,14 @@ were repointed at the current source.
 Small code-level facts surfaced by the audit sweep, recorded so they are not
 re-found (all verified against source; none blocks anything):
 
-- `CrowdEnv._generate_episode` forwards only 9 `GeometryConfig` fields when
+- **(#16)** `CrowdEnv._generate_episode` forwards only 9 `GeometryConfig` fields when
   `geometry_tiers` is set (crowd_env.py:572-583): the Tier-3 knobs
   (`obstacle_*`, `column_*`, `door_width_range`, `shared_goal_probability`,
   `n_rooms_range`, `max_wall_segments`) silently revert to defaults in
   tier-randomised episodes. Harmless for the shipped runs (they override only
   sides/corridor ranges) but a trap for obstacle-density experiments, and the
   same copy-site hazard class as the torch `episode_factory` propagation.
-- `wall_strength` / `wall_range` have no `CrowdEnvConfig` surface: the numpy
+- **(#17)** `wall_strength` / `wall_range` have no `CrowdEnvConfig` surface: the numpy
   path always uses the core defaults (400 N / 0.3 m, collision.py:349-350)
   and the torch `EnvConfig` duplicates the same values without mapping them
   in `from_crowd_env_config`. One knob, two homes, no config exposure.
@@ -1778,10 +1783,10 @@ re-found (all verified against source; none blocks anything):
   torch twin does (`REWARD_COMPONENT_NAMES`, 10 components, `(E, N, C)`
   tensor). Reward-decomposition plots therefore describe the training path
   only.
-- The observation builder's preferred-speed fallback is inconsistent: 1.34 in
+- **(#19)** The observation builder's preferred-speed fallback is inconsistent: 1.34 in
   the ego block vs 1.3 in the temporal/neighbour features
   (observation.py:358/:585 vs :496/:689).
-- In 2-channel raycasts `HIT_AGENT == HIT_NONE == 1.0` (sensing.py:24-27); an
+- **(#20)** In 2-channel raycasts `HIT_AGENT == HIT_NONE == 1.0` (sensing.py:24-27); an
   agent hit at exactly max range is indistinguishable from no hit.
 - The `interpret_actions_batch` speed remap is one straight line over
   [-0.5, +2.0] m/s, so the zero action commands +0.75 m/s; standing still
