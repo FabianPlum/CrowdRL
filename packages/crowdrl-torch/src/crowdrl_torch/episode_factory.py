@@ -9,6 +9,8 @@ stay on CPU, only the resulting arrays go to GPU.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -17,7 +19,9 @@ from crowdrl_core.navmesh import JUPEDSIM_ROUTER_INSET, first_waypoint_headings,
 from crowdrl_env.crowd_env import CrowdEnvConfig
 from crowdrl_env.geometry_generator import GeometryConfig, generate_geometry
 from crowdrl_env.solvability import verify_solvability
-from crowdrl_env.spawner import spawn_agents
+from crowdrl_env.spawner import SpawnShortfallError, spawn_agents
+
+logger = logging.getLogger(__name__)
 
 
 def make_episode_factory(
@@ -42,7 +46,8 @@ def make_episode_factory(
     def make_episode(seed: int) -> dict[str, NDArray]:
         rng = np.random.default_rng(seed)
 
-        for _attempt in range(env_config.max_regeneration_attempts):
+        for attempt in range(env_config.max_regeneration_attempts):
+            is_last_attempt = attempt == env_config.max_regeneration_attempts - 1
             # Pick tier
             if env_config.geometry_tiers is not None:
                 weights = env_config.tier_weights
@@ -81,14 +86,26 @@ def make_episode_factory(
                 continue
 
             # Spawn agents
+            # Must match CrowdEnv exactly (see its call site): walkable enables both
+            # the body-radius wall clearance and entry-zone dilation.
             spawn_result = spawn_agents(
                 rng,
                 geom.spawn_regions,
                 geom.goal_regions,
                 env_config.spawn,
+                walkable=geom.polygon,
             )
 
             if spawn_result.n_agents == 0:
+                continue
+
+            # Bail early on a spawn shortfall -- same contract as CrowdEnv, so the
+            # two engines deliver the same crowd size for a given seed.
+            if (
+                spawn_result.is_short
+                and not is_last_attempt
+                and env_config.spawn.spawn_shortfall_policy == "regenerate"
+            ):
                 continue
 
             # Solvability check
@@ -131,6 +148,27 @@ def make_episode_factory(
                 chest_depths = spawn_result.chest_depths
                 goal_positions = spawn_result.goal_positions
                 preferred_speeds = spawn_result.preferred_speeds
+
+            # Final delivered count, after both drop paths (placement + solvability).
+            requested_n = spawn_result.requested_n
+            if len(positions) < requested_n:
+                policy = env_config.spawn.spawn_shortfall_policy
+                if policy == "raise":
+                    raise SpawnShortfallError(
+                        requested_n,
+                        len(positions),
+                        spawn_result.spawn_area_m2,
+                        spawn_result.capacity,
+                    )
+                if not is_last_attempt and policy == "regenerate":
+                    continue
+                logger.warning(
+                    "agent-count shortfall after %d attempt(s): %s after_solvability=%d tier=%s",
+                    attempt + 1,
+                    spawn_result.shortfall_summary,
+                    len(positions),
+                    geom.tier.name,
+                )
 
             # Pre-compute funnel waypoints per agent (CPU, amortised over episode)
             n_agents = len(positions)

@@ -13,6 +13,7 @@ Designed for MAPPO with parameter sharing: one policy network, many agents.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import gymnasium as gym
@@ -38,7 +39,9 @@ from crowdrl_core.world_state import WorldState
 from crowdrl_env.geometry_generator import GeometryConfig, GeometryTier, generate_geometry
 from crowdrl_env.reward import RewardConfig, RewardState, compute_rewards
 from crowdrl_env.solvability import SolvabilityMode, filter_by_solvability, verify_solvability
-from crowdrl_env.spawner import SpawnConfig, spawn_agents
+from crowdrl_env.spawner import SpawnConfig, SpawnShortfallError, spawn_agents
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -274,6 +277,14 @@ class CrowdEnv(gym.Env):
             "n_agents": self._n_agents,
             "geometry_tier": geom_metadata.get("tier"),
             "geometry_shape": geom_metadata.get("shape"),
+            # Density provenance -- see _generate_episode. "n_agents" above is the
+            # count actually simulated; "requested_n" is what was asked for. They
+            # differ on a shortfall, and downstream reporting must not conflate them.
+            "requested_n": geom_metadata.get("requested_n"),
+            "spawn_area_m2": geom_metadata.get("spawn_area_m2"),
+            "spawn_capacity": geom_metadata.get("spawn_capacity"),
+            "walkable_area_m2": geom_metadata.get("walkable_area_m2"),
+            "achieved_density": geom_metadata.get("achieved_density"),
         }
 
         return obs, info
@@ -559,7 +570,8 @@ class CrowdEnv(gym.Env):
         """
         cfg = self.config
 
-        for _attempt in range(cfg.max_regeneration_attempts):
+        for attempt in range(cfg.max_regeneration_attempts):
+            is_last_attempt = attempt == cfg.max_regeneration_attempts - 1
             # Pick tier
             if cfg.geometry_tiers is not None:
                 weights = cfg.tier_weights
@@ -591,12 +603,27 @@ class CrowdEnv(gym.Env):
             wall_segments = extract_wall_segments(geom.polygon)
 
             # Spawn agents
+            # walkable is what lets the spawner (a) keep every body a full radius
+            # clear of the walls and (b) dilate the entry zone within the geometry
+            # when it is too small to hold the requested crowd.
             spawn_result = spawn_agents(
                 self._rng,
                 geom.spawn_regions,
                 geom.goal_regions,
                 cfg.spawn,
+                walkable=geom.polygon,
             )
+
+            # Bail early on a spawn shortfall: no point paying for solvability
+            # verification on a crowd that is already the wrong size. Mirrors the same
+            # check in crowdrl-torch's episode factory, so both engines regenerate on
+            # the same episodes for a given seed.
+            if (
+                spawn_result.is_short
+                and not is_last_attempt
+                and cfg.spawn.spawn_shortfall_policy == "regenerate"
+            ):
+                continue
 
             # Per-agent clearance radius: use the larger body half-dimension
             # (same convention as the observation builder's navmesh signals)
@@ -655,6 +682,30 @@ class CrowdEnv(gym.Env):
             if len(positions) == 0:
                 continue
 
+            # Final delivered count, after BOTH drop paths (spawn placement and
+            # solvability pruning). Either can silently shrink the crowd, so the
+            # shortfall policy is applied to the number that actually gets simulated.
+            requested_n = spawn_result.requested_n
+            delivered_n = len(positions)
+            if delivered_n < requested_n:
+                policy = cfg.spawn.spawn_shortfall_policy
+                if policy == "raise":
+                    raise SpawnShortfallError(
+                        requested_n,
+                        delivered_n,
+                        spawn_result.spawn_area_m2,
+                        spawn_result.capacity,
+                    )
+                if not is_last_attempt and policy == "regenerate":
+                    continue
+                logger.warning(
+                    "agent-count shortfall after %d attempt(s): %s after_solvability=%d tier=%s",
+                    attempt + 1,
+                    spawn_result.shortfall_summary,
+                    delivered_n,
+                    geom.tier.name,
+                )
+
             # Orient agents toward their first navmesh waypoint rather than the
             # global goal (which may sit behind a wall relative to that waypoint).
             # Falls back to the goal bearing per-agent when no path exists. When
@@ -691,6 +742,16 @@ class CrowdEnv(gym.Env):
                 "tier": geom.tier.name,
                 "shape": geom.metadata.get("shape", "unknown"),
                 **geom.metadata,
+                # Density provenance LAST: every episode carries what was asked for,
+                # what was delivered, and the area it was delivered into, so no
+                # downstream figure can silently mislabel its own density. Placed after
+                # the geom.metadata spread so a generator key can never shadow it.
+                "requested_n": requested_n,
+                "placed_n": delivered_n,
+                "spawn_area_m2": spawn_result.spawn_area_m2,
+                "spawn_capacity": spawn_result.capacity,
+                "walkable_area_m2": float(geom.polygon.area),
+                "achieved_density": delivered_n / float(geom.polygon.area),
             }
 
             return world, preferred_speeds, metadata
