@@ -1,5 +1,21 @@
 # MAPPO / PPO Implementation Best Practices — Literature Review
 
+> **Still the source of record for `crowdrl-train`'s defaults** (`config.py` cites this file
+> in its module docstring). Reference material -- the evidence does not go stale.
+>
+> **One recommendation has since been overturned by our own experience, 2026-06.** This
+> review recommends *clipping* actions and explicitly advises against tanh squashing
+> (following Huang et al. 2022, detail #27). The codebase now uses a **tanh-squashed
+> Gaussian** with the change-of-variables log-prob correction, and exports `tanh(mu)` as the
+> deterministic action. That change, together with truncation-aware GAE, came out of the
+> 2026-06 stabilisation campaign, where clip-only proved to be one of the sources of
+> instability at scale. Where this document and the code disagree on the policy head, the
+> code is right; see the 2026-05-26 progress-log entry in `plan/CrowdRL_Project_Plan_v10.md`.
+>
+> Other values here that the shipped r0125 run overrides for its own reasons (not because
+> the review is wrong): lr 5e-4 -> 2e-4, entropy 0.01 -> 0.003, grad-norm 10.0 -> 1.0, and
+> Huber value loss on with delta 10.
+
 **Compiled**: March 2026
 **Purpose**: Ground every design decision in `crowdrl-train` with empirical evidence.
 **Context**: MAPPO with parameter sharing, continuous 4D action space, 20–100 homogeneous agents, variable agent counts, procedural environments.
