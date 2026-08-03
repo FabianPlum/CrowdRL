@@ -46,6 +46,9 @@ features. Chosen small enough that it doesn't affect realistic scenarios
 enough to avoid division-by-zero artefacts.
 """
 
+_DEFAULT_PREFERRED_SPEED = 1.34
+"""Bohannon (1997) population mean used when a world omits per-agent speeds."""
+
 
 @dataclass(frozen=True)
 class ObsConfig:
@@ -355,7 +358,9 @@ def build_observation(
     # so it knows what it's being asked to track. Falls back to the Bohannon
     # 1997 population mean if the field isn't populated.
     preferred_speed = (
-        float(world.preferred_speeds[agent_idx]) if world.preferred_speeds is not None else 1.34
+        float(world.preferred_speeds[agent_idx])
+        if world.preferred_speeds is not None
+        else _DEFAULT_PREFERRED_SPEED
     )
 
     # Torso angle (relative to velocity direction, or 0 if standing still)
@@ -493,7 +498,9 @@ def _per_agent_temporal_features(
     gdist_window = world.gdist_history[agent_idx, read_idx]
 
     preferred_speed = (
-        world.preferred_speeds[agent_idx] if world.preferred_speeds is not None else 1.3
+        world.preferred_speeds[agent_idx]
+        if world.preferred_speeds is not None
+        else _DEFAULT_PREFERRED_SPEED
     )
 
     return _temporal_features(
@@ -582,7 +589,7 @@ def build_observations_batch(
     if world.preferred_speeds is not None:
         preferred_speed = world.preferred_speeds[active_idx].astype(np.float64)
     else:
-        preferred_speed = np.full(M, 1.34, dtype=np.float64)
+        preferred_speed = np.full(M, _DEFAULT_PREFERRED_SPEED, dtype=np.float64)
 
     # Torso angle in ego frame is 0 by construction
     torso_angle = np.zeros(M, dtype=np.float64)
@@ -686,7 +693,7 @@ def build_observations_batch(
         if world.preferred_speeds is not None:
             pref_a = world.preferred_speeds[active_idx]
         else:
-            pref_a = np.full(M, 1.3, dtype=np.float64)
+            pref_a = np.full(M, _DEFAULT_PREFERRED_SPEED, dtype=np.float64)
 
         temporal = _temporal_features(
             pos_now=pos_now_a,
@@ -773,7 +780,7 @@ def build_observations_batch(
         if world.preferred_speeds is not None:
             pref_j = np.maximum(world.preferred_speeds[ids_safe], eps)
         else:
-            pref_j = np.full_like(cum_j, 1.3)
+            pref_j = np.full_like(cum_j, _DEFAULT_PREFERRED_SPEED)
         exp_win = np.maximum(pref_j * (W * dt), eps)  # (M, K)
 
         disp_j = np.linalg.norm(pos_j_now - spawn_j, axis=-1)  # (M, K)
@@ -855,7 +862,7 @@ def _per_agent_neighbor_trajectory_features(
         if world.preferred_speeds is not None:
             pref_j = max(float(world.preferred_speeds[j]), _TEMPORAL_EPS)
         else:
-            pref_j = 1.3
+            pref_j = _DEFAULT_PREFERRED_SPEED
         exp_win = max(pref_j * W * dt, _TEMPORAL_EPS)
 
         disp_j = float(np.linalg.norm(pos_j_now - spawn_j))

@@ -433,6 +433,34 @@ class TestTemporalMemory:
         # progress = 9.9 - 9.5 = 0.4, normalised = 1.0
         assert abs(goal_win - 1.0) < 1e-9
 
+    def test_missing_preferred_speed_uses_bohannon_default_for_temporal_features(self):
+        """Temporal normalisation must use the same default as the ego feature."""
+        W = 4
+        dt = 0.1
+        config = self._make_config(W=W, max_steps=100, dt=dt)
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[0.0, 0.0]]),
+            goal_positions=np.array([[10.0, 0.0]]),
+        )
+        _attach_memory_state(world, W=W)
+        world.preferred_speeds = None
+
+        world.positions[0] = [0.4, 0.0]
+        world.cumulative_path_length[0] = 0.4
+        world.pos_history[0, 0] = [0.0, 0.0]
+        world.gdist_history[0, 0] = 10.0
+        world.step_count = W
+
+        obs = build_observation(world, 0, config)
+        batch = build_observations_batch(world, config)[0]
+        expected_window = 1.34 * W * dt
+
+        assert obs[5] == 1.34
+        assert abs(obs[-2] - 0.4 / expected_window) < 1e-9
+        assert abs(obs[-1] - 0.4 / expected_window) < 1e-9
+        np.testing.assert_allclose(batch, obs, atol=1e-12)
+
     def test_memory_features_batched_matches_per_agent(self):
         """build_observations_batch should produce the same memory features as build_observation."""
         W = 4
