@@ -29,7 +29,7 @@ from crowdrl_train.curriculum import CurriculumManager
 from crowdrl_train.mappo import MAPPOUpdater
 from crowdrl_train.networks import ActorCritic
 from crowdrl_train.normalizer import RunningNormalizer
-from crowdrl_train.train import collect_episode, save_checkpoint, load_checkpoint
+from crowdrl_train.train import _save_final, collect_episode, save_checkpoint, load_checkpoint
 
 
 def _run_python(code: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -187,3 +187,58 @@ class TestCheckpointing:
 
         # Verify normalizer stats match
         np.testing.assert_array_equal(normalizer.mean, fresh_normalizer.mean)
+
+
+class TestFinalExport:
+    """The train-time ONNX export must be self-describing (issue #7)."""
+
+    def test_final_onnx_carries_training_config(
+        self, tmp_path: Path, tiny_train_config, tiny_actor_critic: ActorCritic
+    ):
+        """_save_final embeds the run's configs, dynamics and provenance."""
+        import json
+        from dataclasses import replace
+
+        import onnx
+
+        from crowdrl_core.config_io import (
+            META_ACTION_CONFIG_KEY,
+            META_DYNAMICS_KEY,
+            META_OBS_CONFIG_KEY,
+            META_PROVENANCE_KEY,
+            action_config_from_dict,
+            obs_config_from_dict,
+        )
+        from crowdrl_train.config import CurriculumConfig
+
+        config = replace(tiny_train_config, checkpoint_dir=str(tmp_path))
+        updater = MAPPOUpdater(tiny_actor_critic, PPOConfig(), torch.device("cpu"))
+        curriculum = CurriculumManager(CurriculumConfig())
+
+        _save_final(
+            config,
+            tiny_actor_critic,
+            updater,
+            None,
+            None,
+            curriculum,
+            total_steps=1000,
+            rollout_count=42,
+        )
+
+        props = {p.key: p.value for p in onnx.load(str(tmp_path / "policy.onnx")).metadata_props}
+        assert obs_config_from_dict(json.loads(props[META_OBS_CONFIG_KEY])) == config.env.obs
+        assert (
+            action_config_from_dict(json.loads(props[META_ACTION_CONFIG_KEY])) == config.env.action
+        )
+        assert json.loads(props[META_DYNAMICS_KEY]) == {
+            "desired_velocity_weight": config.env.desired_velocity_weight,
+            "max_velocity_magnitude": config.env.max_velocity_magnitude,
+            "contact_stiffness": config.env.contact_stiffness,
+            "contact_damping": config.env.contact_damping,
+        }
+        provenance = json.loads(props[META_PROVENANCE_KEY])
+        assert provenance["rollout"] == 42
+        assert provenance["source"] == "crowdrl_train.train"
+        assert provenance["run"] == tmp_path.name
+        assert provenance["git_rev"]
