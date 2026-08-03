@@ -3,7 +3,7 @@
 # =============================================================================
 # The canonical training baseline. Promoted from the density lineage's surviving
 # config (formerly exp_nogoaldir_stable_bigrooms_density_v4). Full lineage and the
-# rationale for every choice below: plan/agent_dynamics_refactor_merge_review.md.
+# rationale for every choice below: plan/archive/agent_dynamics_refactor_merge_review.md.
 #
 # COMPOSITION
 #   Stability (the deep fixes): tanh-squashed policy, truncation-aware GAE, robust
