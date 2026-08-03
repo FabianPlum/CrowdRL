@@ -1,5 +1,27 @@
 # Agent Dynamics Refactor: From Kinematic Targets to Bounded Accelerations
 
+> **Implementation status (verified 2026-08-03) -- this doc is half shipped, half design.**
+>
+> - **Layer 1 (parameter recalibration): SHIPPED.** The recalibrated caps are now the
+>   dataclass defaults -- heading `0.020` rad/step (115 deg/s), torso `0.010` (57 deg/s),
+>   head `0.030` (172 deg/s), `desired_velocity_weight` 0.05 (renamed from
+>   `velocity_damping`), smoothness weights rescaled. `crowdrl_core/action.py` and
+>   `crowdrl_env/{crowd_env,reward}.py` cite this file by name at those defaults. See the
+>   2026-05-26 entry in `plan/CrowdRL_Project_Plan_v10.md`.
+> - **Layer 2 (second-order action semantics -- accelerations, explicit yaw-rate state,
+>   3D non-holonomic action space, `dynamics_mode` gate): DESIGNED, NEVER BUILT.**
+>   `dynamics_mode`, `second_order`, `yaw_rate` and `longitudinal_speed` appear nowhere in
+>   `packages/`, `configs/` or `train_mappo.py`. **Section 4 below is the only record of
+>   that design.**
+> - **What shipped instead of Layer 2:** the *speed-turn coupling* clamp
+>   (`ActionConfig.speed_turn_coupling`, heading/torso deltas additionally limited to
+>   `min(turn_pivot_rate, turn_lat_accel / v) * dt`). It expresses Layer 2's intent --
+>   you must slow down to turn sharply -- as a Layer-1 constraint, without the state-space
+>   change. The shipped r0125 run trains with it on at a 240 deg/s pivot rate.
+>
+> Read Sections 1-3 as history (the diagnosis was correct and led to the shipped fix), and
+> Section 4 as a live, unbuilt proposal.
+
 **Status:** Draft for internal discussion
 **Author:** Plum (with assistance)
 **Scope:** `crowdrl-core/action.py`, `crowdrl-torch/{action,step,types}.py`, `crowdrl-env/crowd_env.py`, observation builders, reward weights
