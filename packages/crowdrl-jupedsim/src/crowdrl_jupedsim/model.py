@@ -5,7 +5,7 @@ JuPedSim 2.0 lets an operational model be written in pure Python by subclassing
 agent per iteration, in a compute-then-apply pass, and applies the position on
 the returned state **verbatim**.
 
-That makes the division of labour sharp (see Project Plan v9, Section 3.6):
+That makes the division of labour sharp (see the project plan, Section 3.6):
 
 * JuPedSim supplies the walkable geometry and wall segments (through the
   per-step ``EnvironmentQuery``), the agent's final goal ``ped.final_target``
@@ -506,7 +506,7 @@ class LearnedPolicyModel(CustomOperationalModel):
         velocity = np.asarray(state.velocity, dtype=np.float64)
         # Heading is ANCHORED TO THE TORSO, not free-integrated: both training
         # engines pass torso_orientations as *both* current_headings and
-        # current_torsos (crowd_env.py:334-341, lockstep.native_batch_step),
+        # current_torsos (crowd_env.py:338-345, lockstep.native_batch_step),
         # so the commanded velocity direction is re-derived from the previous
         # torso every step and can never sit more than one heading delta away
         # from it. Feeding the previously integrated ``state.heading`` here
