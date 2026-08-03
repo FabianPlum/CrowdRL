@@ -1,3 +1,21 @@
+> **ARCHIVED point-in-time record (2026-04-11).** Not maintained. Current state is in
+> `plan/CrowdRL_Project_Plan_v10.md`.
+>
+> **Its headline recommendation has since been reversed.** This sweep concluded that
+> stuck-agent termination + `progress_weight 1.5` should be the standard configuration.
+> `stuck_termination_enabled` now defaults to **`False`**, deliberately: once the temporal
+> memory features landed, agents could read path-efficiency and window signals that
+> correlate with the stuck threshold, and the policy learned to *self-diagnose and accept
+> the timeout penalty* rather than escape the deadlock. That interaction is written up in
+> `plan/neighbor_memory_extension.md` (section 7) and
+> `plan/archive/2026-06-18_agent_dynamics_refactor_branch_summary.md`. Do not adopt the
+> "Recommended configuration" section below.
+>
+> **Still worth having:** the noise-floor protocol and its two numbers
+> (|d goal_rate| > 0.055, |d reward| > 1.43), which later sweeps reused as the
+> significance standard; the per-tier Wilson-CI table; and the three process lessons at
+> the end.
+
 # Overnight Experiment Sweep — Results Summary
 
 **Run window**: 2026-04-10 evening → 2026-04-11 morning
