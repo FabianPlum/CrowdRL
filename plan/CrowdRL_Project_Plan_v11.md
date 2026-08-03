@@ -50,6 +50,14 @@ deploy it faithfully. We cannot yet:
   both, which is exactly the failure we are currently chasing at high density);
 - hand the whole thing to a colleague without walking them through it.
 
+**None of that depends on JuPedSim.** CrowdRL is already a self-contained research
+instrument: the environment, the training path and the ablation surface are all ours, and
+trajectories export to the standard pedpy "ped data archive" HDF5, so the established
+analysis ecosystem applies directly to CrowdRL runs. JuPedSim integration is how policies
+reach downstream users and how they get compared against the hand-crafted models on their
+own ground — important, and on someone else's release schedule. It should not set the pace
+of the work above.
+
 So the near-term framing is explicit:
 
 > **CrowdRL is infrastructure for scientific exploration. The deliverable is capability,
@@ -482,15 +490,34 @@ saying how they differ. The clearest evidence is C7 itself — the failing regim
 completion. Two of the three headline numbers moved the "right" way while the behaviour
 got worse.
 
-The metrics we actually want are specified already, in `plan/validation_benchmark_plan.md`
-— lane-formation order parameter and rotation range, Voronoi density and specific flow,
-trajectory-level statistics, and the body-level metrics that are unique to this project
-(head-scanning frequency, shoulder rotation at bottlenecks, gaze-action lag). None are
-implemented. The document has been a design for a year.
+**Most of this is a wiring problem, not a research problem**, because the hard part is
+already built and is easy to under-rate. `crowdrl_env.kinora_export` writes the standard
+**pedpy "ped data archive" HDF5** (DOI 10.34735/ped.2020.3): the walkable area travels as
+WKT-with-holes into a pedpy `WalkableArea`, the trajectory into a pedpy
+`TrajectoryData`, and there is a round-trip test against pedpy's own loader. So every
+macroscopic metric — density, speed, flow, fundamental diagrams — is a library call on an
+artefact we already emit, not something to reimplement. It is already wired into
+`scorecard.py` and `scripts/eval_scorecard.py`, just off by default.
 
-**Met when:** the scorecard is a validation package rather than a training-loop side
-effect, it reports behavioural metrics alongside task metrics, and it runs against both a
-CrowdRL run and a JuPedSim run through the same code path.
+That leaves two things genuinely ours to build:
+
+1. **Make the artefact routine rather than opt-in.** Trajectory export is currently a flag.
+   If every scored run emits its HDF5, analysis becomes a question asked of stored data
+   rather than a run that has to be repeated with the right flag set.
+2. **The body-level metrics, which nobody else can compute.** The exporter already carries
+   `torso_angle` and `head_angle` as extra trajectory columns, and body dimensions in
+   `personal_details`. **No other pedestrian simulator produces those** — agents elsewhere
+   are discs with no posture. Head-scanning frequency, shoulder rotation at bottlenecks,
+   anticipatory gaze and gaze-action lag are therefore measurable here and only here, and
+   `plan/validation_benchmark_plan.md` already specifies them. This is the part of the
+   measurement layer that is a contribution rather than an integration.
+
+The remaining scenario-specific metrics from that document — the lane-formation order
+parameter and rotation range — sit between the two: not in pedpy, but small.
+
+**Met when:** every scored run emits a pedpy-readable trajectory artefact by default; the
+macroscopic metrics come from pedpy rather than from us; the body-level metrics exist; and
+a policy can be characterised without re-running it.
 
 ### T3 — Ablation harness
 
@@ -512,36 +539,53 @@ Worth noting what this unlocks immediately: the head/torso decoupling question i
 (is 4D worth it over 3D or 2D?) has been open since v1 and is a single sweep once this
 exists.
 
-### T4 — Deployment hardening
+### T4 — Deployment hardening *(open-ended; externally gated)*
 
 > *Capability: a named collaborator can install the platform, run a scenario, and compare
 > models without reverse-engineering the setup.*
 
-Scoped to **IAS-7 and named collaborators**, not a public release. That distinction is
-load-bearing: JuPedSim 2.0 is unreleased and the adapter tracks a moving upstream branch,
-so a `pip install`-clean public story is gated on upstream and is not ours to schedule.
-What *is* ours: a verified install path with the pinned revision, the packaged
-cross-model benchmark runner (notebook 11 is a first cut with one macroscopic metric), and
-enough documentation that the setup is followed rather than reconstructed.
+**This one is deliberately not given an exit criterion, because its schedule is not ours.**
+JuPedSim 2.0 is unreleased and the adapter tracks a moving upstream branch; a clean
+install story is gated on the JuPedSim team shipping 2.0. T4 therefore stays open and
+absorbs whatever is cheap at the time — keeping the pinned revision current, keeping the
+install notes true, folding the cross-model benchmark runner in when the comparison is
+wanted. It is not a track to be finished before the phase ends.
 
-**Met when:** someone who did not build it can go from clone to a model comparison, on a
-documented path, without asking us a question that is not already answered in the repo.
+**It is also not on the critical path for research use**, which is the point worth being
+explicit about:
 
-## 4.4 These four are a chain, not a fan-out
+> **CrowdRL is a complete research instrument without JuPedSim.** Training, the
+> environment, the ablation surface, and the analysis route are all self-contained. The
+> trajectory artefact is a *standard* format that pedpy reads directly, so the analysis
+> ecosystem is available whether or not a JuPedSim build is present — and every
+> JuPedSim-dependent test skips itself, so a clone without one is fully green.
+
+JuPedSim integration matters for **downstream use**: it is how a learned policy reaches
+people who run JuPedSim, and how CrowdRL policies get compared against CollisionFreeSpeed,
+Social Force and the rest on their home ground. That is a real and important goal. It is
+not a prerequisite for asking scientific questions here, and v11 should not let an
+externally gated dependency set the pace of work that does not need it.
+
+## 4.4 T1–T3 are a chain, not a fan-out
 
 The ordering matters more than the contents, and it is the main thing v11 asserts:
 
 ```
-T1 integrity  ->  T2 measurement  ->  T3 ablation harness
-                                                          T4 hardening (parallel)
+T1 integrity  ->  T2 measurement  ->  T3 ablation harness      = the phase
+        T4 hardening ................................ open, externally gated
 ```
 
 - **T1 before T2**, because a metric computed on a run whose config was silently ignored
-  is a confident wrong answer, which is worse than a missing one.
+  is a confident wrong answer, which is worse than a missing one. C7 is the worked
+  example: we would have been characterising density behaviour on episodes that were not
+  dense.
 - **T2 before T3**, because a sweep needs something to compare. Running an ablation
-  harness against goal rate alone would industrialise the exact blindness that C7 exposed
-  — it would produce a large, tidy table of the wrong measurement.
-- **T4 in parallel**, because it shares little with the others and is gated externally.
+  harness against goal rate alone would industrialise the exact blindness C7 exposed — it
+  would produce a large, tidy table of the wrong measurement.
+- **T4 alongside, on its own clock.** It shares little with the others, its dependency is
+  external, and nothing in T1–T3 waits on it.
+
+The phase ends when T1–T3 are met. T4 does not gate that.
 
 The temptation will be to build T3 first: it is the most visible, and it is the one that
 looks like science. Doing so would mean generating results faster than we can trust them.
@@ -572,6 +616,8 @@ is recorded rather than just the outcome.
 | **Geometry complexity ceiling** | Stop at tiers 0–3b; park 4–5 | Tiers 0–3b already generate more behavioural complexity than we can characterise. Harder geometry lengthens episodes and makes failures harder to attribute without making the behaviour more interesting or the solutions more elegant. **The binding constraint is description, not difficulty.** |
 | **Supervision sequencing** | Tier 3 after measurement and ablation, not before | Tier 3 is a supervision technique whose whole claim is that it changes trajectory *style*. Adding it before we can measure style, or run it against a control, would make it unfalsifiable in practice. |
 | **Audience** | IAS-7 and named collaborators | A public release is gated on upstream JuPedSim 2.0, which is not ours to schedule. Scoping to collaborators buys a working install path without owing API stability. |
+| **Analysis boundary** | The pedpy-format trajectory file, not a CrowdRL analysis API | Exporting the standard "ped data archive" HDF5 means macroscopic analysis is a solved problem we consume rather than a component we own, and it makes CrowdRL runs legible to the wider PedPy ecosystem. We build only what is uniquely ours: the body-level metrics, which exist because `torso_angle` / `head_angle` travel in the file and no other simulator has them. |
+| **JuPedSim is downstream, not upstream** | Research capability does not wait on the integration | CrowdRL is complete as a research instrument without a JuPedSim build; every JuPedSim-dependent test skips itself. The integration is how policies reach users and how they are compared on JuPedSim's home ground — both valuable, both externally paced. Treating it as a prerequisite would import someone else's release schedule into ours. |
 | **Two engines, held by tests** | Keep numpy reference + torch training twin | The duplication is real and the parity tests are the mitigation. Collapsing to one would cost either throughput or the readable reference implementation. The gap to close is the missing full-episode parity test (#23), not the duplication itself. |
 
 ## 5.2 Standing architectural decisions
@@ -2269,10 +2315,24 @@ decisions taken.
 
 Concretely:
 
-- **Four near-term tracks**, in dependency order: experiment integrity (T1), measurement
-  (T2), ablation harness (T3), with deployment hardening (T4) in parallel. The ordering is
-  the substantive claim -- building the harness first would industrialise the measurement
-  blindness that the 100-agent regime already exposed.
+- **Three near-term tracks in dependency order** -- experiment integrity (T1),
+  measurement (T2), ablation harness (T3) -- plus deployment hardening (T4) running open
+  on its own clock. The ordering is the substantive claim: building the harness first
+  would industrialise the measurement blindness that the 100-agent regime already exposed.
+  The phase ends when T1-T3 are met; T4 does not gate it.
+- **CrowdRL is a complete research instrument without JuPedSim**, and v11 says so
+  explicitly. Trajectories already export to the standard pedpy "ped data archive" HDF5
+  (`crowdrl_env.kinora_export`, round-trip tested against pedpy's own loader), so the
+  established analysis ecosystem applies directly to CrowdRL runs. This has a
+  scope-reducing consequence for T2: the macroscopic metrics are a library call on an
+  artefact we already emit, not a component to reimplement. What is genuinely ours to
+  build is the body-level metrics -- head-scanning, shoulder rotation at bottlenecks,
+  gaze-action lag -- which are measurable *only* here, because `torso_angle` and
+  `head_angle` travel in the file and other simulators' agents are discs with no posture.
+- **JuPedSim integration is downstream, not upstream.** It is how policies reach users and
+  how they are compared against the hand-crafted models on their home ground; both matter,
+  and both are paced by an unreleased upstream. Treating it as a prerequisite would import
+  someone else's release schedule into ours.
 - **The 100-agent composed regime stays active**, and is the only behavioural workstream
   that survived -- but with its sequencing corrected. #10 shows the spawner delivers 51.7%
   of requested agents in the terminal curriculum phase, and that two of the three
