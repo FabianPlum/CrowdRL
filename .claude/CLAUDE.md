@@ -134,9 +134,9 @@ Head and torso are independently actuated. Raycasts follow head. Torso change al
 ## Current state
 
 - **All five packages are active.** crowdrl-core, crowdrl-env, crowdrl-torch (the GPU training path that `train_mappo.py` actually drives), crowdrl-train, and crowdrl-jupedsim.
-- **Delivered**: the JuPedSim deployment path — `LearnedPolicyModel`, the self-describing ONNX artefact (`example_model/policy_r0125.onnx`, schema v2: obs/action config + trained dynamics + provenance embedded), e2e scenarios, and `LockstepPolicyModel` as a byte-exact validation instrument. Suite: 662 tests.
+- **Delivered**: the JuPedSim deployment path — `LearnedPolicyModel`, the self-describing ONNX artefact (`example_model/policy_r0125.onnx`, schema v2: obs/action config + trained dynamics + provenance embedded), e2e scenarios, and `LockstepPolicyModel` as a byte-exact validation instrument. Suite: 663 tests (610 without a local JuPedSim 2.0 build -- the 53 JuPedSim-dependent tests `importorskip` away).
 - **Open**: Tier 3 (distributional/style) reward, Tier 4–5 geometry, the IAS-7 geometry importer, the cross-model benchmark runner (LearnedPolicyModel vs CollisionFreeSpeedModel/SocialForceModel), and the behavioural weak spot — high-density scenarios where the policy trades goal completion for collision avoidance.
-- **Reference doc**: `plan/CrowdRL_Project_Plan_v9.md` (full design rationale, milestones, risks, and the dated implementation progress log). v8 and earlier are superseded.
+- **Reference doc**: `plan/CrowdRL_Project_Plan_v10.md` (full design rationale, milestones, risks, and the dated implementation progress log). v9 and earlier are superseded. Superseded plan docs, handovers and branch summaries live in `plan/archive/`.
 
 ## Development tooling
 
