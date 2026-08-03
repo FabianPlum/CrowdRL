@@ -19,6 +19,7 @@ import textwrap
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from crowdrl_env.crowd_env import CrowdEnv
@@ -29,7 +30,13 @@ from crowdrl_train.curriculum import CurriculumManager
 from crowdrl_train.mappo import MAPPOUpdater
 from crowdrl_train.networks import ActorCritic
 from crowdrl_train.normalizer import RunningNormalizer
-from crowdrl_train.train import _save_final, collect_episode, save_checkpoint, load_checkpoint
+from crowdrl_train.train import (
+    _git_rev,
+    _save_final,
+    collect_episode,
+    save_checkpoint,
+    load_checkpoint,
+)
 
 
 def _run_python(code: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -242,3 +249,42 @@ class TestFinalExport:
         assert provenance["source"] == "crowdrl_train.train"
         assert provenance["run"] == tmp_path.name
         assert provenance["git_rev"]
+
+
+class TestGitRev:
+    """Provenance lookup must never take down a finished training run.
+
+    ``_git_rev`` is called from ``_save_final``, i.e. after every rollout has been
+    spent. Any exception escaping it destroys the final ONNX export at the one
+    moment it is most expensive to lose, so every failure mode has to degrade to
+    "unknown" instead.
+    """
+
+    def test_returns_a_revision_in_this_repo(self):
+        assert _git_rev()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            subprocess.TimeoutExpired(cmd="git", timeout=5),
+            FileNotFoundError("no git binary"),
+            PermissionError("git not executable"),
+            subprocess.SubprocessError("something else went wrong"),
+        ],
+        ids=["timeout", "missing-binary", "not-executable", "generic-subprocess"],
+    )
+    def test_degrades_to_unknown_instead_of_raising(self, monkeypatch, exc):
+        def _raise(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        assert _git_rev() == "unknown"
+
+    def test_non_zero_exit_degrades_to_unknown(self, monkeypatch):
+        """e.g. "not a git repository" -- exits non-zero with empty stdout."""
+
+        def _fail(*args, **kwargs):
+            return subprocess.CompletedProcess(args=["git"], returncode=128, stdout="", stderr="x")
+
+        monkeypatch.setattr(subprocess, "run", _fail)
+        assert _git_rev() == "unknown"
