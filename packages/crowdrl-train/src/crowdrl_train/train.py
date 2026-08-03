@@ -11,6 +11,7 @@ sharing. Deliverable: trained .onnx policy files and training logs.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import time
 from pathlib import Path
 
@@ -596,6 +597,21 @@ def _log_and_checkpoint(
         )
 
 
+def _git_rev() -> str:
+    """Short git revision of the working tree, or "unknown" outside a repo."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def _save_final(
     config,
     actor_critic,
@@ -606,7 +622,7 @@ def _save_final(
     total_steps,
     rollout_count,
 ) -> None:
-    """Save final checkpoint and export ONNX."""
+    """Save final checkpoint and export a self-describing ONNX policy (issue #7)."""
     final_ckpt = Path(config.checkpoint_dir) / "checkpoint_final.pt"
     save_checkpoint(
         final_ckpt,
@@ -620,7 +636,25 @@ def _save_final(
     )
 
     onnx_path = Path(config.checkpoint_dir) / "policy.onnx"
-    export_onnx(actor_critic.actor, obs_normalizer, onnx_path)
+    export_onnx(
+        actor_critic.actor,
+        obs_normalizer,
+        onnx_path,
+        obs_config=config.env.obs,
+        action_config=config.env.action,
+        dynamics={
+            "desired_velocity_weight": config.env.desired_velocity_weight,
+            "max_velocity_magnitude": config.env.max_velocity_magnitude,
+            "contact_stiffness": config.env.contact_stiffness,
+            "contact_damping": config.env.contact_damping,
+        },
+        provenance={
+            "run": Path(config.checkpoint_dir).name,
+            "rollout": rollout_count,
+            "git_rev": _git_rev(),
+            "source": "crowdrl_train.train",
+        },
+    )
     print(f"\nTraining complete. ONNX policy exported to: {onnx_path}")
 
 
