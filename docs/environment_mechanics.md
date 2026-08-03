@@ -41,7 +41,8 @@ WorldState
   |     chest_depths       (N,)      metres (ellipse semi-axis)
   |     masses             (N,)      kg (scales contact-force response)
   |     goal_positions     (N, 2)    metres
-  |     preferred_speeds   (N,) | None   m/s (obs falls back to 1.34 if absent)
+  |     preferred_speeds   (N,) | None   m/s (fallback if absent: 1.34 in the ego
+  |                                       block, 1.3 in temporal/neighbour features)
   |
   |-- Geometry (shared, static within an episode)
   |     walkable_polygon   Shapely Polygon (exterior = boundary, holes = obstacles)
@@ -70,7 +71,9 @@ sim-to-real transfer guarantee.
 reset()
   |
   v
-generate_geometry()           -- procedural Shapely polygon (Tier 0-5)
+generate_geometry()           -- procedural Shapely polygon
+                                 (TIER_0, TIER_1, TIER_2, TIER_3A, TIER_3B;
+                                  Tiers 4-5 are design only, not implemented)
   |
   v
 build_navmesh()               -- constrained Delaunay triangulation + adjacency
@@ -190,6 +193,16 @@ raw actions (N, 4)             values in [-1, 1]
 Steps 1-5 form the physics pipeline (Section A). Step 6 is the reward pipeline
 (Section B). Both shape what the policy learns.
 
+**Two things sit outside this loop but on the critical path.** First, observations are
+normalised (running mean/std + clip) before reaching the actor, and rewards are scaled by a
+running return-std estimate before reaching PPO -- all three `normalize_*` flags default
+True, and the obs normaliser is baked into the exported ONNX. Every raw number in this
+document is therefore the normaliser's input, not the network's. Second, **the loop above
+is the numpy env**; training runs the GPU twin in `crowdrl-torch`, which re-implements
+steps 1-9 as batched tensor ops. The two are held in step by component-level parity tests
+rather than by shared code, and the places they intentionally differ are called out where
+they matter (wall enforcement in A.7, navmesh waypoints in the observation section).
+
 ---
 
 ## Section A: Physics constraints on agent behaviour
@@ -219,18 +232,26 @@ means the 2.0 m/s forward cap (standing still requires a[0]=-0.6).
 in the shipped run): when enabled, the heading and torso deltas are
 additionally clamped to `min(turn_pivot_rate, turn_lat_accel / v) * dt` -- a
 lateral-acceleration budget that forces slowing down before sharp turns (the
-head channel is never coupled). Defaults: 120 deg/s pivot rate, 2.0 m/s^2
-lateral budget. The shipped r0125 run trains at 240 deg/s with the flat
-heading/torso caps raised to 4.8 deg/step, so this envelope is the binding
-constraint: ~2.4 deg/step at standstill, ~1.15 at 1 m/s, ~0.57 at 2 m/s.
+head channel is never coupled). The `v` used is the agent's *actual pre-blend*
+speed at the start of the step, not the commanded speed, floored at 1e-3.
+Defaults: 120 deg/s pivot rate, 2.0 m/s^2 lateral budget.
+
+With **stock flat caps** the coupling barely bites: it binds on heading above
+~1.0 m/s and on torso only above ~2.0 m/s, which is the forward speed ceiling.
+The shipped r0125 run trains at 240 deg/s *and raises the flat heading/torso
+caps to 4.8 deg/step*, which is what makes this envelope the binding
+constraint rather than the flat cap: ~2.4 deg/step at standstill, ~1.15 at
+1 m/s, ~0.57 at 2 m/s.
 
 **What this constrains:**
 
-- **No instant direction reversal.** At +/-1.15 deg per step (115 deg/s at
-  dt=0.01s, the recalibrated heading cap), a 180-degree reversal takes ~157
-  steps (~1.6s). This now sits inside the human walking-yaw envelope (Hicheur
-  2007: 30-60 deg/s comfortable, ~120 deg/s aggressive) rather than far above
-  it, as the earlier 1500 deg/s cap did.
+- **No instant direction reversal.** The binding constraint is the *torso*, not the
+  heading. Because heading is re-anchored to the torso every step (see below), the
+  velocity direction can never sit more than one heading delta (1.15 deg) away from the
+  torso, so genuinely reversing travel direction requires rotating the torso 180 deg at
+  0.573 deg/step -- **314 steps (~3.1 s)**. Both rates now sit inside the human
+  walking-yaw envelope (Hicheur 2007: 30-60 deg/s comfortable, ~120 deg/s aggressive)
+  rather than far above it, as the earlier 1500 deg/s caps did.
 
 - **Speed is bounded and asymmetric.** The network can request forward speeds
   up to 2.0 m/s (upper end of comfortable walking / lower end of slow running)
@@ -262,7 +283,9 @@ v_new = w * v_desired + (1 - w) * v_current     # w = desired_velocity_weight
 ```
 
 The bullets below describe the config default `w = 0.05`. The shipped r0125
-line trains at `w = 0.8` (tau ~12 ms -- the filter nearly transparent), with
+line trains at `w = 0.8` (nominally tau ~12 ms by the `dt/w` convention the code
+docstrings use; the exact discrete constant `-dt/ln(1-w)` is ~6 ms -- either way the
+filter is nearly transparent), with
 inertia supplied by the speed-turn coupling envelope and contact physics
 instead; the trained value travels in the ONNX dynamics metadata so
 deployment self-configures to match the run.
@@ -401,8 +424,9 @@ The force direction points from the nearest wall point toward the agent.
 **What this constrains:**
 
 - **Walls have a "soft boundary" aura.** The exponential means repulsion is
-  negligible beyond ~1m but ramps up sharply within 30cm. An agent 5cm from a
-  wall feels ~38x the force of an agent at 30cm.
+  negligible beyond ~1m but ramps up sharply within 30cm. Because `wall_range = 0.3 m`,
+  the force multiplies by `e` for every 30cm closer: an agent 5cm from a wall feels
+  `exp((0.30 - 0.05)/0.3) ~ 2.3x` the force of one at 30cm, and ~20x that of one at 1.2 m.
 
 - **Smooth gradient for learning.** Unlike a hard wall constraint (which has
   zero gradient until contact), the exponential provides a continuous signal
@@ -451,10 +475,11 @@ boundary is corrected by
 ```
 Fast pre-filter (vectorised; skipped entirely when the polygon has holes):
   Skip agents far from walls (dist > 3x body radius)
-  Always check agents moving fast (speed > 10x body radius per step)
+  Always check agents moving fast (speed > 10x body radius, m/s vs metres --
+    no dt factor; at radius 0.22 the trigger is 2.2 m/s)
 
 Detailed check (Shapely, per-agent):
-  if outside polygon OR too close to boundary:
+  if outside polygon OR within one body radius of the boundary:
     1. Find nearest point on polygon boundary
     2. Compute inward normal
     3. Project agent to: nearest_point + radius * inward_normal
@@ -467,6 +492,18 @@ Detailed check (Shapely, per-agent):
   constraint, not a soft penalty. Even if the exponential repulsion (A.5) is
   insufficient (e.g. due to very high contact forces), this step catches the
   violation and corrects it.
+
+- **It fires on clearance, not on penetration.** An agent still fully inside the polygon
+  but within one body radius of the wall is repositioned *and* flagged in the
+  wall-contact mask. So `wall_collision_penalty` is really a "body touching the wall"
+  signal, not a "left the walkable area" signal -- and the projection means an agent
+  cannot press closer than one radius, no matter what the policy commands.
+
+- **Training runs a different implementation.** The Shapely/pre-filter version above is
+  `crowdrl_core/collision.py`, used by the numpy env and the deployment adapter. The GPU
+  training env uses `crowdrl_torch/walls.py`: vectorised ray-crossing point-in-polygon
+  plus nearest-segment, with no pre-filter and no Shapely. Same contract, independent
+  code, held together by parity tests.
 
 - **Velocity into walls is cancelled.** The agent does not "bounce" -- the wall
   simply absorbs its inward momentum. It can still slide along the wall (the
@@ -598,9 +635,9 @@ meaningful depth regardless of agent size.
   hand-crafted model. Instead, CrowdRL provides this as a reward signal,
   giving the policy gradient information to learn spacing behaviour without
   prescribing the mechanism. The policy is free to discover its own avoidance
-  strategies. See Project Plan v9, Section 3.2.
+  strategies. See the project plan, Section 3.2.
 - **Why a ramp and not a threshold?** The previous threshold-based form
-  ("flat -0.3 if within 2x radius") has zero gradient outside the zone and
+  (flat -0.005 if within 2x radius) has zero gradient outside the zone and
   a discontinuity at the boundary. The ramp gives the policy a continuous
   incentive to widen the gap even when it is already outside the critical
   region, and removes the "suddenly-safe" cliff.
@@ -620,10 +657,14 @@ meaningful depth regardless of agent size.
 #### Timeout: -5.0
 
 ```
-if episode reaches 5000 steps (50 seconds at dt=0.01):
-    reward += -5.0 for all still-active agents
-    all agents are truncated
+if episode reaches max_steps:
+    reward += timeout_penalty for all still-active agents
+    those agents are marked truncated; all agents are then deactivated
 ```
+
+Agents that already reached their goal are **terminated**, not truncated -- only the
+still-active ones carry the truncation flag, which is what lets GAE bootstrap them from
+the critic rather than treating them as terminal.
 
 - **Incentivises**: not dawdling, not getting permanently stuck.
 - **Implicit learning**: combined with the existence penalty, the agent learns
@@ -664,12 +705,17 @@ if enforce_wall_boundaries() reported hard wall contact for the agent:
     reward += -1.0        (wall_collision_penalty; 0.0 disables)
 ```
 
-- **Incentivises**: never actually reaching the hard boundary -- the proximity
-  band warns, this one punishes contact.
+- **Incentivises**: never bringing the body up against the wall -- the proximity
+  band warns, this one punishes contact. Note the mask fires at one body radius of
+  clearance (A.7), not on actual penetration.
 - **Impact-speed variant**: when the collision weighting is on, this penalty
   is scaled by the agent's *own* pre-contact speed (there is no wall-normal
   closing speed to measure), so sliding along a wall costs little and slamming
   into one costs a lot. The shipped run uses -0.5.
+- **`collision_penalty_cap` does not apply here.** The cap bounds only the agent-agent
+  term. So in r0125 the agent-collision penalty is strictly discount-only (base -2.0,
+  cap -2.0) while this one is uncapped and can be *amplified* above its base -- at 3 m/s,
+  `-0.5 * (0.25 + 0.5*3.0) = -0.875`.
 
 ### B.2 Shaped progress reward
 
@@ -788,8 +834,11 @@ reward      += -0.005 * |speed - preferred|
   (-0.005) keeps the preference gentle enough that the collision and
   proximity signals win when they need to.
 - **Off in the shipped run.** r0125 trains with `use_smoothness: false` and
-  `speed_deviation_weight: 0.0`, so it ignores the preferred-speed observation
-  and cruises near its 2.0 m/s ceiling. Notebook 11 clamps the commanded speed
+  `speed_deviation_weight: 0.0`, so it cruises near its 2.0 m/s ceiling. Note the
+  preferred speed **is** in its observation regardless (ego index 5) -- what is missing is
+  any reward incentive to track it, so the policy has no reason to use the channel.
+  Note also that 0.0 is the `train_mappo.py` default: r0125 did not switch this off, no
+  recent run has ever switched it on. Notebook 11 clamps the commanded speed
   to the preferred speed as an interim deployment shim; retraining with this
   term on and randomised preferred speeds is the planned fix.
 
@@ -849,10 +898,19 @@ crowded phases. The smoothness priors (speed deviation, angular acceleration,
 jerk) are deliberately kept tiny so they regularise without overriding the
 task objective.
 
+All figures above are **pre-normalisation**. PPO sees rewards scaled by a running estimate
+of the return standard deviation (`normalize_rewards` defaults True), so the table is a
+guide to relative weight, not to the numbers the advantage estimator consumes.
+
 (The shipped r0125 run rebalances the same structure -- goal +20, collision -2
 with impact-speed scaling and a -2.0 cap, progress x2, proximity -0.025/-0.001
 inside 0.75 m, smoothness off, action rate -0.001 -- but the hierarchy above
-is unchanged.)
+is unchanged. One row does change in kind rather than degree: with
+`proximity_speed_floor = 0.0` the proximity ramp is multiplied by
+`max(0.5 * closing_speed, 0)`, so in r0125 a stationary or separating neighbour costs
+**exactly zero**. The proximity term there is an approach-speed penalty, not a spacing
+penalty, and its episode total is correspondingly smaller than the -0.5 to -2.5 shown
+above.)
 
 ### B.7 Emergent behaviours from reward-physics interaction
 
@@ -914,7 +972,7 @@ body because:
 | `contact_stiffness` | 30,000 | N / overlap | Agent-agent spring force |
 | `contact_damping` | 500 | N*s/m | Agent-agent approach damping |
 | `max_velocity_magnitude` | 3.0 | m/s | Hard velocity clamp; safety vs contact-force blowup. Sits above max_forward_speed so policy commands are never the binding constraint. Experimental starting point. |
-| `max_steps` | 5000 (shipped run: 3000) | steps | Episode timeout |
+| `max_steps` | 5000 (**driver default 2000**; shipped run 3000) | steps | Episode timeout |
 | `stuck_termination_enabled` | False | -- | Deactivate agents making no path progress (timeout penalty applied) |
 | `stuck_window_steps` | 300 | steps | Rolling window for the stuck check |
 | `stuck_progress_threshold` | 0.2 | m | Minimum path progress over the window |
@@ -934,6 +992,8 @@ Negative desired_speed means motion opposite to heading (backing up).
 | `max_torso_change` | 0.010 | rad/step | 57 deg/s (hip constraints) |
 | `max_head_change` | 0.030 | rad/step | 172 deg/s (head scans fastest) |
 | `head_limit` | pi/2 | rad | +/-90 deg from torso |
+| `action_dim` | 4 | -- | Gates the torso (3D) and head (4D) channels; 2D = speed + heading only |
+| `dt` | 0.01 | s | Converts the coupled yaw envelope (rad/s) into a per-step cap. Set from the YAML `dt` key -- note `CrowdEnvConfig.dt` is **not**, so a non-default `dt` desynchronises the two |
 | `speed_turn_coupling` | False | -- | Speed-dependent turn envelope (A.1); heading/torso only |
 | `turn_lat_accel` | 2.0 | m/s^2 | Lateral-acceleration turn budget when coupled |
 | `turn_pivot_rate` | 2.0944 rad/s | 120 deg/s | Low-speed pivot cap when coupled (`turn_pivot_rate_deg` in YAML) |
@@ -952,35 +1012,59 @@ stays at the default.
 
 ### Reward weights ([RewardConfig](../packages/crowdrl-env/src/crowdrl_env/reward.py#L21))
 
-The "shipped r0125" column is the override set recorded in
-`example_model/config_resolved.yaml`; other experiment configs vary freely.
+**There are three layers of "default", and they disagree.** Read the columns as:
 
-| Signal | Default | Shipped r0125 | Notes |
-|--------|---------|---------------|-------|
-| `goal_bonus` | +10.0 | +20.0 | at `goal_radius` 0.5 m (straight-line) |
-| `collision_penalty` | -1.0 | -2.0 | per step while overlapping |
-| `use_velocity_weighted_collision` | False | True | impact-speed scaling (B.1) |
-| `collision_speed_floor` / `_scale` | 0.5 / 0.5 | 0.25 / 0.5 | multiplier = max(floor + scale*closing, 0) |
-| `collision_penalty_cap` | 0.0 (off) | -2.0 | discount-only floor on the scaled penalty |
-| `agent_proximity_penalty_near` | -0.005 | -0.025 | at contact, `r_i + r_j` |
-| `agent_proximity_penalty_far` | -0.0001 | -0.001 | at `personal_space_radius` |
-| `personal_space_radius` | 1.0 m | 0.75 m | absolute, not body-relative |
-| `use_velocity_weighted_proximity` | False | True | closing-speed scaling of the ramp |
-| `proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.0 / 0.5 | |
-| `timeout_penalty` | -5.0 | -10.0 | also paid on stuck termination |
-| `wall_proximity_penalty` | -0.1 | -0.1 | flat band inside the threshold |
-| `wall_proximity_threshold` | 1.5x radius | 1.5x radius | |
-| `wall_collision_penalty` | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables |
-| `existence_penalty` | -0.01 | -0.01 | |
-| `progress_weight` | +1.0 | +2.0 | on navmesh remaining-path length |
-| `use_smoothness` | True | False | gates jerk / angular accel / speed deviation |
-| `jerk_penalty_weight` | -1e-5 | (off) | Tier 2; Layer 1 v2: 10x down from -1e-4 |
-| `angular_accel_penalty_weight` | -1e-2 | (off) | Tier 2; measured on the torso orientation |
-| `speed_deviation_weight` | -5e-3 | 0.0 | r0125 ignores preferred speed (nb11 clamp shim) |
-| `action_rate_weight` | -1e-2 | -1e-3 | Layer 1: enabled, was 0.0 |
-| `inverse_distance_weight` | 0.0 | 0.0 | disabled (not potential-based) |
+- **Library** -- the `RewardConfig` dataclass default. This is what you get from
+  `crowdrl-env` directly, and what the JuPedSim deployment path sees.
+- **Driver** -- what `train_mappo.build_env_config` substitutes when a YAML key is
+  *absent*. **No training run this project has ever done saw the library defaults.**
+- **Shipped r0125** -- `example_model/config_resolved.yaml`. Other experiment configs vary
+  freely.
 
-The agent proximity penalty replaced a binary "inside 2x radius -> flat -0.3"
+| Signal | Library | Driver | Shipped r0125 | Notes |
+|--------|---------|--------|---------------|-------|
+| `goal_bonus` | +10.0 | **+20.0** | +20.0 | at `goal_radius` 0.5 m (straight-line) |
+| `collision_penalty` | -1.0 | **-5.0** | -2.0 | per step while overlapping |
+| `use_velocity_weighted_collision` | False | False | True | impact-speed scaling (B.1) |
+| `collision_speed_floor` / `_scale` | 0.5 / 0.5 | 0.5 / 0.5 | 0.25 / 0.5 | multiplier = max(floor + scale*closing, 0) |
+| `collision_penalty_cap` | 0.0 (off) | 0.0 | -2.0 | discount-only floor; agent-agent term **only** |
+| `agent_proximity_penalty_near` | -0.005 | -0.005 | -0.025 | at contact, `r_i + r_j` |
+| `agent_proximity_penalty_far` | -0.0001 | -0.0001 | -0.001 | at `personal_space_radius` |
+| `personal_space_radius` | 1.0 m | 1.0 m | 0.75 m | absolute, not body-relative |
+| `use_velocity_weighted_proximity` | False | False | True | closing-speed scaling of the ramp |
+| `proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.25 / 0.5 | **0.0** / 0.5 | floor 0 => a stationary neighbour costs nothing |
+| `timeout_penalty` | -5.0 | **-10.0** | -10.0 | also paid on stuck termination |
+| `wall_proximity_penalty` | -0.1 | -0.1 | -0.1 | flat band inside the threshold |
+| `wall_proximity_threshold` | 1.5x radius | 1.5x radius | 1.5x radius | |
+| `wall_collision_penalty` | -1.0 | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables; **not** covered by the cap |
+| `existence_penalty` | -0.01 | -0.01 | -0.01 | |
+| `progress_weight` | +1.0 | +1.0 | +2.0 | on navmesh remaining-path length |
+| `use_smoothness` | True | True | False | gates jerk / angular accel / speed deviation |
+| `jerk_penalty_weight` | -1e-5 | *not parsed* | (off) | Tier 2; Layer 1 v2: 10x down from -1e-4 |
+| `angular_accel_penalty_weight` | -1e-2 | *not parsed* | (off) | Tier 2; measured on the torso orientation |
+| `speed_deviation_weight` | -5e-3 | **0.0** | 0.0 | r0125 never turned this *off* -- the driver default is already 0.0 |
+| `action_rate_weight` | -1e-2 | -1e-2 | -1e-3 | Layer 1: enabled, was 0.0 |
+| `inverse_distance_weight` | 0.0 | 0.0 | 0.0 | disabled -- and **inert on the GPU path**, see below |
+
+Three consequences that the two-column version of this table used to hide:
+
+- **r0125 did not "double" the collision penalty.** Against the library default (-1.0) it
+  looks doubled; against what the driver actually hands you (-5.0) it is *less than half*.
+- **`goal_bonus +20` and `timeout_penalty -10` are inherited, not overrides.** A YAML that
+  omits them lands on exactly the same values.
+- **`speed_deviation_weight` was never switched off by r0125.** It has been 0.0 by driver
+  default all along, which is why no recent run tracks its preferred speed.
+
+**`inverse_distance_weight` does nothing on the training path.** It exists on the numpy
+`RewardConfig` and `train_mappo.py` parses it, but it was never ported to `crowdrl-torch` --
+and the GPU env is what training runs. Setting it non-zero changes nothing, silently.
+
+**Fields the appendix lists that `build_env_config` never parses** (so they are reachable
+only in code, not from a training YAML): `jerk_penalty_weight`,
+`angular_accel_penalty_weight`, `goal_radius`, `contact_stiffness`, `contact_damping`,
+`max_velocity_magnitude`, `solvability_clearance_factor`, and every `SpawnConfig` field.
+
+The agent proximity penalty replaced a binary "inside 2x radius -> flat -0.005"
 term with a graded linear ramp from `near` (at contact distance `r_i + r_j`)
 to `far` (at the absolute `personal_space_radius`). Each agent receives the
 *minimum* (most negative) per-pair penalty from any active neighbour inside

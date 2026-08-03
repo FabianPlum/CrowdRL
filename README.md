@@ -52,7 +52,7 @@ contract*, so it was trained on the signal JuPedSim can actually supply. See
 > repo's `python_modules/jupedsim`. Your `site-packages` must not contain a
 > competing `jupedsim` install. Upstream is a moving branch, so expect to track
 > it; the build recipe and the revision this was validated against are in
-> [`plan/CrowdRL_Project_Plan_v9.md`](plan/CrowdRL_Project_Plan_v9.md).
+> [`plan/CrowdRL_Project_Plan_v10.md`](plan/CrowdRL_Project_Plan_v10.md).
 >
 > Everything else in this repo — training, the environment, the example
 > notebooks 01-09 — works without JuPedSim. The JuPedSim-dependent tests skip
@@ -178,6 +178,109 @@ cd CrowdRL
 uv sync --all-packages --extra dev
 ```
 
+`make dev` does the same thing and additionally installs the pre-commit hooks.
+
+Verify the base install:
+
+```bash
+uv run python -c "import crowdrl_core, crowdrl_env, crowdrl_train, crowdrl_torch, crowdrl_jupedsim; print('ok')"
+uv run pytest -q
+```
+
+Everything above is enough for training and for notebooks 01-09. Notebooks 10
+and 11 need two more things -- see the next section.
+
+### Notebooks 10 and 11: JuPedSim 2.0 and the analysis stack
+
+[`10_jupedsim_learned_model.ipynb`](examples/10_jupedsim_learned_model.ipynb) and
+[`11_model_comparison.ipynb`](examples/11_model_comparison.ipynb) are the only
+parts of this repo that need more than `uv sync`. They need:
+
+**1. The analysis stack** -- `pedpy` (walkable-area plots, trajectory analysis)
+and `plotly` (the JuPedSim animation widget). Both are declared in the `dev`
+extra, so a normal `uv sync --all-packages --extra dev` installs them.
+
+> [!TIP]
+> If your venv was created *before* `pedpy`/`plotly` were added to the extra,
+> `import pedpy` fails with `ModuleNotFoundError` even though `pyproject.toml`
+> lists it. Just re-run the sync. It is idempotent, and it does **not** remove
+> the hand-written JuPedSim `.pth` described below.
+
+**2. A JuPedSim 2.0 source build** -- there is no wheel for it (see the note at
+the top of this README). Recipe below.
+
+#### Building JuPedSim 2.0
+
+Clone with submodules (CGAL, fmt, glm, googletest, pybind11) and build out of
+tree. Any CPython 3.12 works as the `Python_EXECUTABLE`; pointing it at this
+project's venv is the simplest choice, since what has to match is the ABI tag
+(`cp312`), not the specific interpreter.
+
+```bash
+git clone --recurse-submodules https://github.com/PedestrianDynamics/jupedsim.git
+cd jupedsim
+
+# Windows: run this from a shell where VS 2022's vcvars64.bat has been sourced.
+cmake -S . -B ../jupedsim-build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DPython_EXECUTABLE="/path/to/CrowdRL/.venv/Scripts/python.exe"
+cmake --build ../jupedsim-build --config Release
+```
+
+`-G Ninja` is a fine and faster generator choice on Windows; plain Makefiles
+work too. The build produces the Python extension in `../jupedsim-build/lib/`:
+`py_jupedsim.cp312-win_amd64.pyd` on Windows,
+`py_jupedsim.cpython-312-*.so` elsewhere.
+
+Upstream `main` is a moving branch. The revision this integration is validated
+against is **`49e3ddebd`** (`v1.3.0-138-g49e3ddebd`).
+
+#### Wiring the build into the venv
+
+Add a `.pth` file to the venv's `site-packages` -- `.venv/Lib/site-packages/`
+on Windows, `.venv/lib/python3.12/site-packages/` elsewhere -- named anything
+you like (`_jupedsim_2_0_dev.pth` is what this repo's development machines
+use), containing exactly two lines: the build's `lib/` and the source repo's
+`python_modules/jupedsim`.
+
+```
+C:\Users\you\dev\jupedsim-build\lib
+C:\Users\you\dev\jupedsim\python_modules\jupedsim
+```
+
+Your `site-packages` must not contain a competing `jupedsim` install -- a 1.x
+wheel silently shadows the source build and lacks the custom-model API entirely.
+
+#### Verifying the full notebook 10/11 setup
+
+```bash
+uv run python -c "
+import jupedsim as jps, pedpy, plotly
+from jupedsim.models.custom_model import CustomOperationalModel
+from jupedsim.internal.notebook_utils import animate, read_sqlite_file
+from crowdrl_jupedsim import CrowdRLAgentState, LearnedPolicyModel, OnnxPolicy
+print('jupedsim', jps.__version__, '->', jps.__file__)
+print('pedpy', pedpy.__version__, '| plotly', plotly.__version__)
+"
+```
+
+`jps.__version__` must report `2.0.0` and `jps.__file__` must point inside your
+JuPedSim **source** tree. Anything else means a wheel is shadowing the build.
+
+A stronger check is the test suite. The 53 JuPedSim-dependent tests (41 adapter
++ 12 root e2e) `importorskip` themselves away when no 2.0 build is importable,
+so `uv run pytest` collecting those extra 53 -- and passing them -- confirms the
+build is not merely importable but behaving.
+
+#### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `ModuleNotFoundError: No module named 'pedpy'` (or `plotly`) | venv predates those entries in the `dev` extra | `uv sync --all-packages --extra dev` |
+| `jps.__version__` reports 1.x, or `jupedsim.models.custom_model` does not exist | a PyPI `jupedsim` wheel is shadowing the source build | `uv pip uninstall jupedsim`, confirm nothing named `jupedsim` remains in `site-packages` |
+| `ImportError: DLL initialization routine failed` from `onnxruntime` and/or `triton` (Windows) | system VC++ runtime too new (seen at 14.50.35719) | preload the VS 2022 14.44 redist CRT via a venv-local `sitecustomize.py` -- see [`plan/CrowdRL_Project_Plan_v10.md`](plan/CrowdRL_Project_Plan_v10.md) |
+| Notebook animations render blank | the docs-build plotly renderer is not available | the notebooks already set `pio.renderers.default = "plotly_mimetype"`; keep it |
+
 ### GPU training and Triton
 
 The GPU-vectorised training pipeline (`crowdrl-torch`) uses `torch.compile` for
@@ -205,11 +308,21 @@ ranks via parallel Welford. `MAPPOUpdater` auto-detects the distributed
 context and uses a globally-reduced KL for early stopping so all ranks
 agree on the stop decision (preventing NCCL collective mismatches).
 
-Launch with `torchrun`:
+**You do not launch `torchrun` yourself.** `train_mappo.py` detects multiple
+visible GPUs and re-launches itself under `torch.distributed.run`, so the
+command is the ordinary one:
 
 ```bash
-torchrun --standalone --nproc_per_node=N train_mappo.py
+uv run python train_mappo.py --config configs/baseline.yaml
+uv run python train_mappo.py --config configs/baseline.yaml --gpus 2   # override the count
 ```
+
+> [!NOTE]
+> On Windows the auto-relaunch does not work: the PyTorch wheels are built
+> without libuv and the elastic rendezvous requests the libuv TCPStore
+> regardless. Launch the ranks directly with `RANK` / `LOCAL_RANK` /
+> `WORLD_SIZE` / `MASTER_ADDR` set, plus `USE_LIBUV=0`, and put
+> `ddp_backend: gloo` in the config (NCCL does not exist on win32).
 
 Design rationale and synchronisation details are in
 [`plan/ddp_single_node.md`](plan/ddp_single_node.md).
@@ -260,7 +373,13 @@ The [examples/](examples/) directory contains Jupyter notebooks that walk throug
 | `07_complex_geometry.ipynb` | Tier 3a/3b procedural geometry: rooms with obstacles, multi-room layouts, navmesh pathfinding |
 | `08_lane_formation_test.ipynb` | Bidirectional-corridor lane-formation benchmark with order-parameter metric |
 | `09_reward_landscape.ipynb` | Per-step reward decomposition across canonical scenarios (cruise, brake, wall approach, head-on, yield) |
-| `10_jupedsim_learned_model.ipynb` | **The deployment story**: the shipped policy driving JuPedSim agents through the jupedsim#1625 corner and a 12-agent bottleneck, plus a trajectory-level fidelity comparison against the training engine. Needs a JuPedSim 2.0 source build (see above) |
+| `10_jupedsim_learned_model.ipynb` | **The deployment story**: the shipped policy driving JuPedSim agents through the jupedsim#1625 corner and a 12-agent bottleneck, plus a trajectory-level fidelity comparison against the training engine |
+| `11_model_comparison.ipynb` | Local copy of upstream JuPedSim's model-comparison notebook, with the learned policy added as a sixth model: CrowdRL vs CSM / AVM / SFM / GCFM / WarpDriver across five scenarios |
+
+Notebooks 01-09 need only the base install. **Notebooks 10 and 11 additionally
+need a JuPedSim 2.0 source build plus `pedpy`/`plotly`** -- see
+[Notebooks 10 and 11](#notebooks-10-and-11-jupedsim-20-and-the-analysis-stack)
+above.
 
 ```bash
 uv run jupyter lab
@@ -268,7 +387,7 @@ uv run jupyter lab
 
 ## Current status
 
-**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v9.md) for details):
+**Milestone progress** (see [project plan](plan/CrowdRL_Project_Plan_v10.md) for details):
 
 | Milestone | Status |
 |-----------|--------|
@@ -287,6 +406,20 @@ JuPedSim's own models, and Tier 3 reward (distributional style matching from
 PeTrack data)
 
 **Not started**: Tier 4-5 geometry, IAS-7 geometry importer
+
+## Documentation
+
+| Where | What | Maintained |
+|-------|------|-----------|
+| [`plan/CrowdRL_Project_Plan_v10.md`](plan/CrowdRL_Project_Plan_v10.md) | **Start here.** Design rationale, milestones, risks, and the dated implementation progress log. Canonical for current state | Yes |
+| [`docs/agent_pipeline.md`](docs/agent_pipeline.md) | How an observation becomes a movement: perception, network, action interpretation, physics, collisions, reward | Yes |
+| [`docs/environment_mechanics.md`](docs/environment_mechanics.md) | Why agents learn what they learn -- each behaviour traced back to a specific constraint or reward term | Yes |
+| [`plan/`](plan/) | Living design and reference docs: the parity analysis, the memory and dynamics designs, the MAPPO literature review, the validation benchmark plan | Yes |
+| [`plan/archive/`](plan/archive/) | Dated point-in-time records: handovers, sweep results, branch reviews. Kept for the evidence they hold, **not** as current advice -- each carries a banner saying what superseded it | **No** |
+
+Rule of thumb: anything with a date in its filename is a record, and records are
+not updated. If a doc in `plan/archive/` disagrees with the project plan, the
+plan is right.
 
 ## License
 

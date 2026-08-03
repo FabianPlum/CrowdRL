@@ -1,3 +1,20 @@
+> **ARCHIVED point-in-time record (2026-06-18).** Not maintained. Current state is in
+> `plan/CrowdRL_Project_Plan_v10.md`.
+>
+> **Stale where it describes the frontier.** The "where it landed" section names a live run
+> on `exp_nogoaldir_stable_bigrooms_Aplus.yaml` with an **A+ (~104D)** observation stack.
+> That line was superseded twice over: first by the `density_v4` config promoted to
+> `configs/baseline.yaml`, then by the shipped artefact `example_model/policy_r0125.onnx`,
+> which is **89D with neighbour memory OFF** and adds `use_jupedsim_style_routing`. Read
+> `example_model/config_resolved.yaml` for what actually shipped.
+>
+> **Still worth having, and the reason this file is kept:** the 19-row **avenue map** --
+> every avenue attempted with a verdict (KEPT / PARKED / DEAD END / NEVER BUILT /
+> SUPERSEDED / FRONTIER) and the evidence behind it -- and the explicit "dead ends, do not
+> re-try without new evidence" list. It is the best single index of what has already been
+> tried. Its verdict that **Layer 2 acceleration dynamics was never built** is still
+> accurate as of 2026-08-03; the design lives in `plan/agent_dynamics_refactor.md`.
+
 # agent_dynamics_refactor — Branch Summary & Avenue Map
 
 Branch: `agent_dynamics_refactor` (HEAD = `42f5f93`)
@@ -146,8 +163,8 @@ precursor.
 | Live run output | `results_exp_nogoaldir_stable_bigrooms_Aplus/`, log `train_nogoaldir_bigrooms_Aplus.log` |
 | Founding design plan (Layer 1/2) | `plan/agent_dynamics_refactor.md` |
 | Memory research + A/A+/A++ results | `plan/agent_memory_research.md`, `plan/neighbor_memory_extension.md` |
-| Layer 1 v2 handover | `plan/CrowdRL_Project_Plan_v9.md`, the 2026-05-26 progress-log entry |
-| Stuck-agent tuning sweep | `docs/2026-04-11_stuck_agent_tuning_summary.md` |
+| Layer 1 v2 handover | `plan/CrowdRL_Project_Plan_v10.md`, the 2026-05-26 progress-log entry |
+| Stuck-agent tuning sweep | `plan/archive/2026-04-11_stuck_agent_tuning_summary.md` |
 | Per-run hypotheses/verdicts | `results_*/notes.md` |
 | Noise-floor + stuck diagnostics | `scripts/analyze_run.py`, `scripts/diagnose_stuck_agents.py` |
 | Stabilization tests | `test_collector_gae`, `test_cursor`, `test_nan_robustness`, `test_navmesh_parity` |

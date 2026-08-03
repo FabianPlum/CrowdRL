@@ -43,7 +43,7 @@
   <rect x="60" y="290" width="260" height="110" rx="12"/>
   <text class="th" x="190" y="322" text-anchor="middle" dominant-baseline="central">crowdrl-env</text>
   <text class="ts" x="190" y="344" text-anchor="middle" dominant-baseline="central">Gymnasium interface</text>
-  <text class="ts" x="190" y="362" text-anchor="middle" dominant-baseline="central">procedural generator (tiers 0–5)</text>
+  <text class="ts" x="190" y="362" text-anchor="middle" dominant-baseline="central">procedural generator (tiers 0–3b)</text>
   <text class="ts" x="190" y="380" text-anchor="middle" dominant-baseline="central">reward modules · solvability verifier</text>
 </g>
 

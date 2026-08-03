@@ -6,7 +6,7 @@ are detected, resolved, and penalised.
 
 ---
 
-## 1. Perception: building the observation vector (80-D base, up to 129-D)
+## 1. Perception: building the observation vector (80-D base, up to 145-D)
 
 Every timestep, each agent receives an **egocentric** observation assembled in
 `crowdrl_core/observation.py` from a `WorldState` struct. Everything is rotated
@@ -18,17 +18,22 @@ into the agent's own torso-heading frame via a 2-D rotation matrix built from
 | **Ego state** | 8 | Goal direction (2, unit vector), velocity (2, ego frame), scalar speed (1), preferred speed (1, raw m/s), torso angle (1, always 0 in ego frame), head angle relative to torso (1, wrapped to [-pi, pi]) |
 | **Social** | 56 | 8 nearest neighbours x 7: relative position (2), relative velocity (2), body orientation relative to ego (1), shoulder width (1), chest depth (1). Zero-padded when fewer than 8 neighbours exist |
 | **Raycasts** | 16 | 16 rays over 200 deg FOV anchored to the **head** (not torso). Max range 5 m. Each ray yields a normalised distance in [0, 1] where 1.0 = max range / no hit. Optional 2-channel mode adds a hit-type channel |
-| **Navmesh** *(optional)* | 3 | Next-waypoint direction in ego frame (2) + path deviation from A\* shortest path (1). With `use_jupedsim_style_routing` the waypoint is served router-style at JuPedSim's fixed 0.2 m portal inset and `path_deviation` is pinned to 0.0 |
+| **Navmesh** *(optional)* | 3 | Next-waypoint direction in ego frame (2) + path deviation (1), which is a detour *ratio* `(remaining_path / euclidean) - 1`, not a perpendicular offset. With `use_jupedsim_style_routing` the waypoint is served router-style at JuPedSim's fixed 0.2 m portal inset and `path_deviation` is pinned to 0.0. **The two engines serve this differently**: the numpy env re-runs the funnel every step, while the GPU env pre-computes the waypoint list at reset (cap `navmesh_max_waypoints = 1024`) and advances a monotonic cursor at a 0.5 m crossing threshold -- so they agree on-route and intentionally diverge once an agent is pushed off it |
 | **Temporal memory** *(optional)* | 6 | Own-trajectory summary: displacement-from-spawn, cumulative path, path efficiency, elapsed fraction, windowed displacement + goal-progress (window W=50) |
 | **Neighbour velocity history** *(optional)* | K x 2 = 16 | Per tracked neighbour: velocity change over the last W_n=5 steps in ego frame (acceleration proxy). Needs the persistent neighbour-ID tracker |
 | **Neighbour trajectory** *(optional)* | K x 3 = 24 | Per tracked neighbour: its own path-efficiency + windowed displacement/goal-progress. Off in the current run |
 
-**Total**: `8 + (8 x 7) + 16 = 80` base (single-channel rays, all optional blocks off). The optional blocks add +3 (navmesh), +6 (temporal memory), +16 (neighbour velocity history), +24 (neighbour trajectory); 2-channel rays add a further +16. The **production config** (shipped `example_model/policy_r0125.onnx`) enables navmesh + temporal memory -> **obs_dim = 89**, with `use_goal_direction = false` (goal-direction slots kept but zeroed -- the agent navigates by the routed waypoint alone) and `use_jupedsim_style_routing = true` (router-style waypoint at JuPedSim's fixed 0.2 m portal inset, `path_deviation` pinned to 0.0). The earlier Layer 1 v2 line (navmesh + temporal memory + neighbour velocity history) was 105D; full instrumentation reaches 129.
+**Total**: `8 + (8 x 7) + 16 = 80` base (single-channel rays, all optional blocks off). The optional blocks add +3 (navmesh), +6 (temporal memory), +16 (neighbour velocity history), +24 (neighbour trajectory); 2-channel rays add a further +16. The **production config** (shipped `example_model/policy_r0125.onnx`) enables navmesh + temporal memory -> **obs_dim = 89**, with `use_goal_direction = false` (goal-direction slots kept but zeroed -- the agent navigates by the routed waypoint alone) and `use_jupedsim_style_routing = true` (router-style waypoint at JuPedSim's fixed 0.2 m portal inset, `path_deviation` pinned to 0.0). The earlier Layer 1 v2 line (navmesh + temporal memory + neighbour velocity history) was 105D; full instrumentation reaches 129 with single-channel rays, or 145 with 2-channel.
+
+`ObsConfig.obs_dim` is the authority. Do not add these up by hand.
 
 Key implementation details:
 - Goal direction is safe-divided (zero vector if at goal).
 - Batch path (`build_observations_batch`) is fully vectorised for training throughput.
-- Social sensing uses `argpartition` (O(N) per row) for KNN, not full sort.
+- Social sensing uses `argpartition` (O(N) per row) for KNN, not a full sort -- but only
+  on the batch path (`knn_social_batch`). The per-agent `knn_social`, which is what the
+  JuPedSim adapter calls, builds a Python list and sorts it. Same result, different cost
+  profile.
 - Ray-wall intersection: standard parametric ray-segment test.
 - Ray-agent intersection: transform ray into ellipse-local frame (where the
   ellipse becomes a unit circle), solve the standard quadratic.
@@ -38,7 +43,12 @@ Key implementation details:
   supply.
 - The batch builder sanitises its output with `nan_to_num`; the per-agent
   builder (the one the JuPedSim adapter calls) does not -- a known open
-  asymmetry (see plan v9 carried items).
+  asymmetry (see the carried items in the project plan). The GPU step has a
+  matching one-sided guard: it `nan_to_num`s velocities after the speed clamp,
+  and the numpy env does not.
+- The preferred-speed fallback when `world.preferred_speeds` is absent is **1.34 m/s in
+  the ego block but 1.3 in the temporal and neighbour features** -- a small inconsistency,
+  live only for configs that leave preferred speeds unpopulated.
 
 ---
 
@@ -84,6 +94,28 @@ replaced the earlier clip-only scheme (Huang et al. 2022, detail #27) in the
 All agents use the same network weights. Heterogeneity (body size, preferred
 speed) enters through the observation vector, not through separate networks.
 
+### Normalisation: the actor never sees a raw observation
+
+This is easy to miss because it sits outside both the environment and the network, but it
+is on the critical path in every real run. `TrainConfig.normalize_obs`,
+`normalize_rewards` and `normalize_values` all default to **True**.
+
+- **Observations** pass through a running mean/std normaliser (Welford, merged across DDP
+  ranks) and are clipped before reaching the actor. So the 89 numbers Section 1 describes
+  are the normaliser's *input*, not the network's.
+- **Rewards** are scaled by a running estimate of the return standard deviation before
+  PPO sees them. The reward magnitudes in Section 6 are therefore pre-normalisation
+  quantities -- useful for reasoning about which signal dominates, but not the numbers the
+  advantage estimator works with.
+- **Values** are normalised on the same principle.
+
+At export time the frozen obs mean/std/clip are **baked into the ONNX graph in front of
+the actor** (`crowdrl_train/export.py`), which is why the deployed artefact takes raw
+observations and why a deployment-side config mismatch is dangerous rather than merely
+wrong: an observation channel built differently lands at a different point of a
+distribution the network was calibrated against. Both running normalisers cap their merged
+sample count at 1e8 -- see Section 8.13 for the overflow that motivated it.
+
 ---
 
 ## 3. Action interpretation: from 4 scalars to movement
@@ -106,9 +138,17 @@ commands +0.75 m/s -- standing still requires a[0] = -0.6.
 turn envelope on top of the flat caps: the per-step heading and torso deltas
 are additionally clamped to `min(turn_pivot_rate, turn_lat_accel / v) * dt`
 (defaults `turn_pivot_rate` = 120 deg/s, `turn_lat_accel` = 2.0 m/s^2; the
-head channel is never coupled). The effective cap is
-`min(flat cap, coupled cap)`, so with stock flat caps the coupling only binds
-above ~1.0 m/s. The shipped r0125 run trains with coupling ON
+head channel is never coupled). The `v` fed to the envelope is the agent's
+*actual pre-blend* speed at the start of the step, not the commanded speed,
+floored at 1e-3 to avoid a division blow-up at standstill.
+
+The effective cap is `min(flat cap, coupled cap)`. With stock flat caps that
+means the coupling binds on the **heading** channel above ~1.0 m/s
+(`2.0 rad/s / v < 2.0 rad/s`), and on the **torso** channel only above
+~2.0 m/s -- which is the forward speed ceiling, so in practice never. Since
+the torso is the real steering bottleneck (see the nuance below), stock
+defaults leave the coupling with almost no grip on steering; it is the raised
+flat caps in the shipped run that give it any. The shipped r0125 run trains with coupling ON
 (`turn_pivot_rate_deg: 240`, `turn_lat_accel: 2.0`) and raises the flat
 heading/torso caps to 4.8 deg/step so the coupled envelope is the real
 governor: ~2.4 deg/step near standstill, ~1.15 deg/step at 1 m/s,
@@ -192,10 +232,18 @@ positions += velocities * dt
 
 ### Step 5: Wall boundary enforcement
 
-Hard constraint: any agent that has penetrated the walkable polygon boundary is
-projected back inside with body clearance, and its velocity component into the
-wall is cancelled. The returned wall-contact mask feeds the
-`wall_collision_penalty` reward term. See section 5.
+Hard constraint: any agent that is outside the walkable polygon **or within one body
+radius of its boundary** is projected to exactly `nearest_point + radius * inward_normal`,
+and its velocity component into the wall is cancelled. Note this fires on *clearance*, not
+on penetration -- an agent still fully inside the polygon but hugging a wall is flagged and
+repositioned. The returned wall-contact mask feeds the `wall_collision_penalty` reward
+term. See section 5.
+
+**Engine note.** The above describes the numpy path (`crowdrl_core/collision.py`, Shapely
+containment with a hole-aware pre-filter). Training runs the torch twin
+(`crowdrl_torch/walls.py`), which is fully vectorised ray-crossing point-in-polygon plus
+nearest-segment, with no pre-filter and no Shapely. Same intent, independent
+implementation; they are held together by component-level parity tests, not by shared code.
 
 ### Physics parameters
 
@@ -321,7 +369,7 @@ The **agent proximity penalty** is a reward signal (not a physics force) that
 teaches the policy to maintain personal space. Unlike JuPedSim's Social Force
 Model which prescribes exponential repulsion as a world force, CrowdRL lets
 the policy discover its own avoidance strategy through this tunable reward
-term. See Project Plan v9, Section 3.2, and Section 8.3 below for the
+term. See the project plan, Section 3.2, and Section 8.3 below for the
 current graded-ramp form.
 
 **Impact-speed (velocity-weighted) variants.** `use_velocity_weighted_collision`
@@ -335,6 +383,16 @@ collision weighting is on. `collision_penalty_cap` (default 0.0 = off; shipped
 run -2.0) is a discount-only floor on the scaled per-step collision penalty.
 Net effect: standing in contact is cheap, plowing in at speed is expensive --
 the retune that un-froze moderate-density scenarios.
+
+Two asymmetries worth knowing in the shipped run:
+- **The cap does not cover the wall penalty.** `collision_penalty_cap` applies only to the
+  agent-agent term. With base -2.0 and cap -2.0 that term is strictly *discount-only*,
+  while the uncapped wall term can be **amplified** -- at 3 m/s it reaches
+  `-0.5 * (0.25 + 0.5*3.0) = -0.875`, above its own base.
+- **`proximity_speed_floor = 0.0` removes the static proximity signal entirely.** With
+  floor 0 the multiplier is `max(0.5 * closing_speed, 0)`, so a stationary or *separating*
+  neighbour contributes exactly zero. In r0125 the proximity ramp is purely an
+  approach-speed penalty, not a spacing penalty.
 
 ### Tier 2: Progress shaping (potential-based)
 
@@ -380,6 +438,10 @@ speed-deviation term on and randomised preferred speeds is the planned fix.
 observations (N, 89)             80D base + 3D navmesh + 6D temporal memory
        |                         (production config; goal-direction slots zeroed,
        |                          path_deviation pinned under jps-style routing)
+       v
+  Obs normaliser (running mean/std + clip; ON by default)
+  -- baked into the ONNX graph at export
+       |
        v
   Actor network: obs -> mu (4) + sigma
   Sample u ~ N(mu, sigma^2), action = tanh(u)
@@ -431,9 +493,23 @@ Critic evaluates V(s) from the same observation for GAE advantage
 estimation (gamma=0.99, lambda=0.95; truncation-aware -- truncated segments
 bootstrap from the critic at the post-step observation). PPO updates run up
 to 10 full-batch epochs per rollout (n_minibatches=1) with clip ratio
-epsilon=0.2, entropy bonus 0.01 (shipped run 0.003), and KL early stopping:
-stop when the approximate KL -- averaged across DDP ranks -- exceeds
-1.5 * target_kl (target_kl = 0.02).
+epsilon=0.2 and KL early stopping: stop when the approximate KL -- averaged
+across DDP ranks -- exceeds 1.5 * target_kl (target_kl = 0.02).
+
+Remaining PPO knobs, several of which the shipped run overrides:
+
+| Knob | Default | Shipped r0125 |
+|---|---|---|
+| `lr_actor` / `lr_critic` | 5e-4 | **2e-4** |
+| `lr_schedule` | constant | **cosine** |
+| `entropy_coef` | 0.01 | **0.003** |
+| `max_grad_norm` | 10.0 | **1.0** |
+| `use_huber_loss` / `huber_delta` | False | **True / 10.0** |
+| `adam_eps` | 1e-5 | 1e-5 |
+| `normalize_advantages` | True | True |
+
+The Huber value loss and the 10x tighter gradient clip are both from the 2026-06
+stabilisation campaign; they are not cosmetic tuning.
 
 ---
 
@@ -458,15 +534,16 @@ Configurable via `RewardConfig.wall_proximity_penalty` (default -0.1) and
 ### 8.2 Smoothness improvements -- IMPLEMENTED
 
 **A. Action rate penalty** -- Penalises frame-to-frame changes in the raw policy
-output. Configured via `RewardConfig.action_rate_weight` (default 0.0 -- disabled).
-Targets the network's output before the nonlinear action interpretation.
+output. Configured via `RewardConfig.action_rate_weight` (default **-0.01, enabled**
+since the Layer 1 rebalance; the shipped r0125 run uses -0.001). Targets the
+network's output before the nonlinear action interpretation.
 
 **B. Biomechanical orientation limits** -- Per-step rate caps were re-grounded
 in the human walking envelope in the agent-dynamics refactor (Layer 1): heading
 0.020 rad/step (115 deg/s), torso 0.010 rad/step (57 deg/s), head 0.030 rad/step
 (172 deg/s). These replaced the earlier pi/12 (1500 deg/s) heading/torso and
 pi/3 (6000 deg/s) head caps, which were far above human capability. See
-`plan/agent_dynamics_refactor.md` and Project Plan v9, Section 3.3.
+`plan/agent_dynamics_refactor.md` and the project plan, Section 3.3.
 
 ### 8.3 Agent proximity penalty (graded linear ramp) -- IMPLEMENTED
 
@@ -569,7 +646,7 @@ sync and normaliser sync hooks wired into `crowdrl_train.mappo`.
 | `cleanup_distributed()` | Destroys the process group |
 | `is_distributed` / `is_main_rank` / `get_rank` / `get_world_size` | Rank queries (fall back to single-process values) |
 | `allreduce_gradients(model)` | Flattens every `.grad` into one buffer, issues a single `all_reduce(SUM)`, divides by world size, unflattens |
-| `TorchRunningNormalizer.sync_across_ranks()` | Merges obs-normaliser statistics via parallel Welford (weighted mean + variance) |
+| `TorchRunningNormalizer.sync_across_ranks()` *(defined in `normalizer.py`, not `distributed.py`)* | Merges obs-normaliser statistics via parallel Welford (weighted mean + variance) |
 | `sync_reward_normalizer(rnorm, device)` | Same parallel Welford merge for the reward normalizer's return-variance tracker, plus averaged running return |
 | `gather_episode_stats(local)` | `all_gather_object` episode dicts to rank 0 |
 | `broadcast_curriculum_state(mgr)` | After rank 0 decides phase advancement, broadcast the new state to all ranks |
@@ -592,11 +669,20 @@ all ranks agree. Regression tests live in
 `packages/crowdrl-train/tests/test_mappo.py` (two subprocess-based tests
 that spin up a `world_size=1` gloo group and spy on the KL collective).
 
-Launch pattern:
+Launch pattern -- **you do not invoke `torchrun` yourself**. `train_mappo.py` detects
+multiple visible GPUs and re-launches itself under `torch.distributed.run`
+(train_mappo.py:1838-1848), short-circuiting to the worker path when `WORLD_SIZE` is
+already set. So the command is the ordinary one:
 
 ```
-torchrun --standalone --nproc_per_node=N train_mappo.py
+uv run python train_mappo.py --config configs/<your>.yaml     # --gpus N to override the count
 ```
+
+(`--config` is required, so the bare `torchrun ... train_mappo.py` line this document
+used to show would have exited on an argparse error.) On Windows the auto-relaunch does
+not work -- these wheels are built without libuv and the elastic rendezvous requests the
+libuv TCPStore regardless -- so ranks must be launched directly with
+`RANK`/`LOCAL_RANK`/`WORLD_SIZE`/`MASTER_ADDR`, `USE_LIBUV=0` and `ddp_backend: gloo`.
 
 Full design rationale, synchronisation table and launch script are in
 `plan/ddp_single_node.md`.

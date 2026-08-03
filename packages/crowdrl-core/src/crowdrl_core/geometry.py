@@ -12,7 +12,7 @@ approach used by JuPedSim's RoutingEngine.
 lazily inside :func:`triangulate_polygon` -- its only consumer. Deployment
 builds a WorldState from an existing geometry rather than triangulating one, so
 keeping this module importable without it lets crowdrl-jupedsim ship without a
-compiled triangulation library. See Project Plan v9, Section 3.6.
+compiled triangulation library. See the project plan, Section 3.6.
 """
 
 from __future__ import annotations

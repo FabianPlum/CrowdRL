@@ -25,7 +25,7 @@ dependencies = [
 # (site-packages must not contain a competing jupedsim install, since .pth
 # entries are appended *after* site-packages on sys.path.)
 #
-# See plan/CrowdRL_Project_Plan_v9.md Section 3.6 for the operational-model
+# See plan/CrowdRL_Project_Plan_v10.md Section 3.6 for the operational-model
 # contract and the rationale.
 
 [tool.uv.sources]

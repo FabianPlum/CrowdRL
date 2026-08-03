@@ -1,5 +1,16 @@
 # CrowdRL Validation Benchmark Plan
 
+> **Live roadmap (status refreshed 2026-08-03).** This is the design for Module D and for
+> milestones M4 and M7, both still open. It is the only place the scenario specifications,
+> the order-parameter and rotation-range formulae, and the body-level metrics (head-scanning
+> frequency, shoulder turning at bottlenecks, anticipatory gaze) are written down.
+>
+> Progress against the four-phase roadmap in Section 6: **Phase 1 done**
+> (`examples/08_lane_formation_test.ipynb`), **Phase 4 has a committed first cut**
+> (`examples/11_model_comparison.ipynb`), **Phases 2 and 3 not started**. The notebook
+> filenames the roadmap proposes are stale -- those numbers are taken; see the note in
+> Section 6.
+
 ## 1. Purpose
 
 This document details the validation and benchmarking strategy for CrowdRL learned
@@ -373,20 +384,24 @@ Frame rate: 100 Hz (CrowdRL dt=0.01s), downsampled to 10 Hz for analysis.
 - [ ] Faster-is-slower speed sweep
 - [ ] Single-file corridor with density sweep
 - [ ] Fundamental diagram comparison
-- Notebooks: `examples/09_bottleneck_test.ipynb`, `examples/10_single_file_test.ipynb`
+- Notebooks: **numbers 09-13 below are stale** -- `examples/09` through `11` are now
+  occupied by the reward-landscape, JuPedSim-deployment and model-comparison notebooks.
+  Phase 2-3 work should claim `12+` or, better, live in a package rather than a notebook.
 
 ### Phase 3: Complex Scenarios
 - [ ] Corner movement (L-bend from Tier 2 generator)
 - [ ] Room evacuation
 - [ ] T-junction merging flow
-- Notebooks: `examples/11_corner_test.ipynb`, `examples/12_evacuation_test.ipynb`
 
 ### Phase 4: Full Comparison Suite
-- [ ] Implement crowdrl-jupedsim adapter (LearnedPolicyModel)
-- [ ] Run all scenarios with all JuPedSim models
+- [x] Implement crowdrl-jupedsim adapter (LearnedPolicyModel) -- delivered 2026-07-30
+- [~] Run all scenarios with all JuPedSim models -- **first cut committed** as
+  `examples/11_model_comparison.ipynb`: five scenarios (crossing rooms, following,
+  head-on, perpendicular crossing, bottleneck) across six models (CSM, AVM, SFM, GCFM,
+  WarpDriver, CrowdRL r0125). It reports one macroscopic metric (evacuation time), so it
+  does not yet discharge this item
 - [ ] Statistical comparison tables
 - [ ] Publication-quality figures
-- Notebook: `examples/13_model_comparison.ipynb`
 
 ---
 

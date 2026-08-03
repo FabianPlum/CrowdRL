@@ -1,3 +1,19 @@
+> **ARCHIVED point-in-time record (2026-06-19).** Not maintained. Current state is in
+> `plan/CrowdRL_Project_Plan_v10.md`.
+>
+> Everything reviewed here was merged; the fixes are on `master`, and the `density_v4`
+> config discussed below is what became `configs/baseline.yaml`. The record is the point of
+> the file.
+>
+> **Still worth having, and the reason this file is kept:** (1) the root cause of the
+> deterministic ~r355 / ~r360 training collapses -- a float64 count overflow in *both*
+> running normalisers, because each DDP sync all-reduced the already-merged total so the
+> count roughly doubled every rollout; (2) the fix-vs-tuning-vs-feature taxonomy with commit
+> hashes; and (3) the **17-row experiment lineage**, which is the only record of what each
+> untracked `exp_*.yaml` taught -- including negative results such as `density_v3_slow60`
+> ("capping speed at 60% BACKFIRED into worse gridlock"). `.gitignore` and
+> `configs/baseline.yaml` both point here for exactly that reason.
+
 # agent_dynamics_refactor -- Merge Review
 
 Deep review of the `agent_dynamics_refactor` branch ahead of merging to `master`.

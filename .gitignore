@@ -74,7 +74,7 @@ diagnostic_*/
 .claude/settings*.json
 
 # Experimental configs are kept LOCAL (untracked). Lineage + learnings recorded in
-# plan/agent_dynamics_refactor_merge_review.md. Only the baseline + canonical
+# plan/archive/agent_dynamics_refactor_merge_review.md. Only the baseline + canonical
 # templates are tracked; new exp_/smoke_ configs are auto-ignored (use `git add -f`
 # to deliberately track a new one).
 configs/*.yaml
