@@ -1,5 +1,24 @@
 # Neighbor-Memory Extension to Option A
 
+> **Implementation status (verified 2026-08-03): fully built, deliberately switched OFF.**
+>
+> All three layers exist in the code -- `use_neighbor_memory` (persistent neighbour identity
+> via `match_persistent_neighbors`), `use_neighbor_vel_history` (A+, +16D) and
+> `use_neighbor_trajectory_features` (A++, +24D) -- across `crowdrl-core`, `crowdrl-env` and
+> `crowdrl-torch`, and `crowdrl_core/observation.py` cites this file by section number for
+> the feature semantics.
+>
+> **The shipped policy does not use them.** `example_model/policy_r0125.onnx` is 89D:
+> ego + social + rays + navmesh + ego temporal memory, with neighbour memory off. So this
+> file describes a capability that is available and tested but not currently on the
+> critical path -- it is an ablation axis, not the production configuration.
+>
+> Section 7 (the A+ experimental results) is the part worth reading before re-enabling
+> anything: it records the measured deltas, *and* the observation-times-environment-design
+> trap where memory features let the policy self-diagnose as stuck and accept the timeout
+> penalty rather than escape the deadlock. That interaction is why
+> `stuck_termination_enabled` now defaults to `False`.
+
 Follow-up to `plan/agent_memory_research.md`. Assumes Option A (ego temporal
 memory, +6D) is already landed. Targets the failure modes Option A does not
 address: social-coordination pathologies (oscillation, deadlocks, lane
