@@ -598,7 +598,13 @@ def _log_and_checkpoint(
 
 
 def _git_rev() -> str:
-    """Short git revision of the working tree, or "unknown" outside a repo."""
+    """Short git revision of the working tree, or "unknown" if it cannot be read.
+
+    Provenance is nice to have; it is never worth losing a finished training run
+    over. Every failure mode resolves to "unknown": no git binary (``OSError``),
+    a hung or slow invocation (``subprocess.TimeoutExpired``), and a non-zero
+    exit such as "not a git repository" (empty stdout).
+    """
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -608,7 +614,7 @@ def _git_rev() -> str:
             timeout=5,
         )
         return out.stdout.strip() or "unknown"
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
