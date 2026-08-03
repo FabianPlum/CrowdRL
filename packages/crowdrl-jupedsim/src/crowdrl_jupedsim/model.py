@@ -73,6 +73,9 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
+DEFAULT_CHEST_DEPTH = 0.15
+
+
 @dataclass(frozen=True)
 class TemporalMemory:
     """Per-agent trajectory memory backing the temporal observation block.
@@ -130,7 +133,7 @@ class CrowdRLAgentState:
     shoulder_width: float = 0.225
     """Half-width of the collision ellipse, torso-perpendicular (m)."""
 
-    chest_depth: float = 0.15
+    chest_depth: float = DEFAULT_CHEST_DEPTH
     """Half-depth of the collision ellipse, torso-forward (m)."""
 
     mass: float = 80.0
