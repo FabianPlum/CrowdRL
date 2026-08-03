@@ -653,14 +653,20 @@ def is_passable(
     1. **A* reachability** -- topological path exists on the triangle graph.
     2. **Portal-width filter** -- every shared edge along the corridor is at
        least ``2 * effective_radius`` wide.  This is a fast rejection filter.
-    3. **Geometric clearance** -- the funnel-smoothed path, buffered by
-       *effective_radius*, lies entirely within the walkable polygon.  This
-       catches narrow gaps between close obstacles where the portal edge
-       runs diagonally and overestimates the actual perpendicular clearance.
+    3. **Geometric clearance (Minkowski erosion)** -- the walkable polygon is
+       eroded inward by *effective_radius* (Shapely ``buffer(-r)``) and start
+       and goal must remain connected in the eroded polygon.  This catches
+       narrow gaps between close obstacles where the portal edge runs
+       diagonally and overestimates the actual perpendicular clearance.  An
+       earlier version buffered the funnel-smoothed path instead; it was too
+       sensitive to floating-point slivers at obstacle corners.
 
     ``effective_radius = agent_radius * clearance_factor``.  Use
     *clearance_factor* > 1 to add a safety margin (e.g. 1.2 = 20%,
     ensuring the agent at its widest orientation can traverse the path).
+    Note this function defaults to ``clearance_factor=1.0`` (no margin); the
+    1.2 default lives at the env layer, on ``verify_solvability`` and
+    ``CrowdEnvConfig.solvability_clearance_factor``.
 
     Parameters
     ----------
