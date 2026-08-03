@@ -1,5 +1,21 @@
 # GPU-Native Navmesh Waypoint Signals
 
+> **Status: implemented, but the waypoint *signal* it describes has since been replaced.**
+> The pre-computation architecture below is exactly what runs -- funnel waypoints computed
+> on CPU at episode reset, padded, shipped to GPU, looked up with pure tensor ops via a
+> monotonic cursor. That part is current.
+>
+> Two things have changed since 2026-03-30:
+> - **The two-waypoint distance-weighted blend is gone** (commit `fa18862`). The
+>   observation now carries the single *next* waypoint direction. This was deliberate and
+>   should not be undone -- see `plan/waypoint_lookahead_and_replanning.md`, which
+>   explicitly rules out returning to a smoothed signal.
+> - **`navmesh_max_waypoints` is 1024, not 16.**
+>
+> The shipped policy additionally serves that waypoint router-style at JuPedSim's fixed
+> 0.2 m portal inset (`use_jupedsim_style_routing`) and pins `path_deviation` to 0.0. Read
+> Section 3.3 of `plan/CrowdRL_Project_Plan_v10.md` for why.
+
 **Status: Implemented** (2026-03-30)
 
 ## Problem
