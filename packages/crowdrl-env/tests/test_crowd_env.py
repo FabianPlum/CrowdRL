@@ -668,3 +668,61 @@ class TestJupedsimStyleRoutingObs:
             if np.any(obs_off[:, -1] > 0.0):
                 saw_real_p_dev = True
         assert saw_real_p_dev, "flag-off never produced a detour -- weak scenario"
+
+
+class TestWallDirectionsWiring:
+    """The wall-shaping flags must reach compute_rewards through the env step.
+
+    Numpy twin of the batched_step wiring test in crowdrl-torch
+    (test_step_wall_directions.py): a knob that resolves in the config but
+    never materialises its inputs in the step is a silent no-op on the
+    eval/scorecard side.
+    """
+
+    def _env(self, reward_cfg):
+        config = CrowdEnvConfig(
+            geometry=GeometryConfig(tier=GeometryTier.TIER_0, min_side=10.0, max_side=15.0),
+            spawn=SpawnConfig(n_agents_range=(3, 5), min_spawn_separation=0.3),
+            solvability_mode=SolvabilityMode.PRUNE,
+            max_steps=50,
+            reward=reward_cfg,
+        )
+        return CrowdEnv(config=config, seed=42)
+
+    def _spy_step(self, env, monkeypatch):
+        from crowdrl_env import crowd_env as crowd_env_module
+
+        captured = {}
+        orig = crowd_env_module.compute_rewards
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(crowd_env_module, "compute_rewards", spy)
+        env.reset(seed=7)
+        actions = np.zeros((env.n_agents, env.config.action.action_dim), dtype=np.float64)
+        env.step(actions)
+        return captured
+
+    def test_directions_materialised_when_weighted(self, monkeypatch):
+        env = self._env(
+            RewardConfig(
+                use_smoothness=False,
+                use_graded_wall_proximity=True,
+                use_velocity_weighted_wall_proximity=True,
+                wall_proximity_speed_floor=0.0,
+            )
+        )
+        captured = self._spy_step(env, monkeypatch)
+        dirs = captured["wall_directions"]
+        assert dirs is not None
+        assert dirs.shape == (env.n_agents, 2)
+        # Unit vectors: every agent in a closed room has a nearest wall.
+        norms = np.linalg.norm(dirs, axis=1)
+        np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-9)
+
+    def test_directions_skipped_when_flags_off(self, monkeypatch):
+        env = self._env(RewardConfig(use_smoothness=False))
+        captured = self._spy_step(env, monkeypatch)
+        assert captured["wall_directions"] is None

@@ -24,6 +24,7 @@ from crowdrl_core.action import ActionConfig, interpret_actions_batch
 from crowdrl_core.collision import (
     compute_contact_forces,
     compute_min_wall_distances,
+    compute_min_wall_distances_and_directions,
     detect_collisions,
     enforce_wall_boundaries,
 )
@@ -366,9 +367,16 @@ class CrowdEnv(gym.Env):
 
         # Snapshot the policy's chosen (pre-contact) velocities so the reward's
         # optional impact-speed weighting measures the approach speed the policy
-        # controls, not the post-contact bounce. Only materialised when enabled.
+        # controls, not the post-contact bounce. Only materialised when enabled
+        # (also by the wall-proximity closing-speed weighting, which then hands
+        # it to every weighted term that reads it -- mirrors crowdrl_torch.step).
         pre_contact_velocities = (
-            self._world.velocities.copy() if cfg.reward.use_velocity_weighted_collision else None
+            self._world.velocities.copy()
+            if (
+                cfg.reward.use_velocity_weighted_collision
+                or cfg.reward.use_velocity_weighted_wall_proximity
+            )
+            else None
         )
 
         # --- 3. Collision detection and contact forces ---
@@ -413,8 +421,18 @@ class CrowdEnv(gym.Env):
         # --- 5. Compute rewards ---
         # Distances for proximity penalties (agent-agent pair distances are
         # computed inside compute_rewards so the graded ramp can use per-pair
-        # contact distances).
-        wall_distances = compute_min_wall_distances(self._world)
+        # contact distances). The nearest-wall DIRECTION is only materialised
+        # when a reward term consumes it (closing-speed weighting / wall-normal
+        # impact) -- mirrors crowdrl_torch.step.
+        if cfg.reward.use_velocity_weighted_wall_proximity or (
+            cfg.reward.use_velocity_weighted_collision and cfg.reward.use_wall_normal_impact
+        ):
+            wall_distances, wall_directions = compute_min_wall_distances_and_directions(
+                self._world
+            )
+        else:
+            wall_distances = compute_min_wall_distances(self._world)
+            wall_directions = None
         agent_radii = np.maximum(self._world.shoulder_widths, self._world.chest_depths)
 
         # Path-distance metric (remaining navmesh path, straight-line fallback),
@@ -436,6 +454,7 @@ class CrowdEnv(gym.Env):
             current_distances=nav_distances,
             wall_distances=wall_distances,
             wall_collision_mask=wall_collision_mask,
+            wall_directions=wall_directions,
             agent_radii=agent_radii,
             actions=actions,
             collision_velocities=pre_contact_velocities,
