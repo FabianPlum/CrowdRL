@@ -348,7 +348,15 @@ def compute_rewards(
     comp_progress = torch.where(active_mask, config.progress_weight * progress, zero)
     rewards = rewards + comp_progress
 
-    # --- Tier 2: Smoothness (jerk + angular accel + speed deviation, one channel) ---
+    # --- Tier 2: Smoothness (jerk + angular accel; speed deviation is separate) ---
+    # NOTE: jerk/angular-accel need prev_velocities and are gated by use_smoothness.
+    # Preferred-speed deviation is NOT: it depends only on the current velocity and
+    # is a locomotion-style target (match your own preferred speed), not a motion-
+    # smoothness regulariser. Nesting it here made speed_deviation_weight silently
+    # inert whenever use_smoothness was false -- which is the baseline setting -- so
+    # a run could ask for speed matching and train without it. Its contribution is
+    # still reported on the ``smoothness`` channel to keep the component schema at
+    # 10 entries.
     comp_smoothness = zero
     if config.use_smoothness and prev_velocities is not None:
         dt = config.dt
@@ -381,13 +389,13 @@ def compute_rewards(
             comp_smoothness = comp_smoothness + term
             rewards = rewards + term
 
-        # Preferred speed deviation
-        if config.speed_deviation_weight != 0.0 and preferred_speeds is not None:
-            speeds = (velocities**2).sum(dim=-1).sqrt()  # (E, N)
-            speed_dev = (speeds - preferred_speeds).abs()
-            term = torch.where(active_mask, config.speed_deviation_weight * speed_dev, zero)
-            comp_smoothness = comp_smoothness + term
-            rewards = rewards + term
+    # Preferred speed deviation -- independent of use_smoothness (see note above).
+    if config.speed_deviation_weight != 0.0 and preferred_speeds is not None:
+        speeds = (velocities**2).sum(dim=-1).sqrt()  # (E, N)
+        speed_dev = (speeds - preferred_speeds).abs()
+        term = torch.where(active_mask, config.speed_deviation_weight * speed_dev, zero)
+        comp_smoothness = comp_smoothness + term
+        rewards = rewards + term
 
     # Zero rewards for inactive agents (no-op for the sum: every component is
     # already zero where inactive, but kept for parity with the prior code).
