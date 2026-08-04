@@ -52,6 +52,58 @@ class TestBuildEnvConfigSpeed:
         assert tc.max_backward_speed == 0.5
 
 
+class TestBuildEnvConfigSpawn:
+    """The ``spawn:`` block must propagate from YAML into ``CrowdEnvConfig.spawn``.
+
+    Same failure mode as the speed caps above: ``build_env_config`` had no
+    ``spawn=`` argument at all, so every sampling parameter silently fell back to
+    the ``SpawnConfig`` dataclass defaults and a YAML ``spawn:`` block was inert.
+    That matters most for ``preferred_speed_*``: a run targeting JuPedSim (which
+    clamps agents to 1.0 m/s) would quietly train against the 1.34 m/s literature
+    default, and nothing in the logs or config_resolved.yaml would say so.
+    """
+
+    def test_preferred_speed_propagates_from_yaml(self):
+        ec = build_env_config(
+            {"spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25}}
+        )
+        assert ec.spawn.preferred_speed_mean == 1.0
+        assert ec.spawn.preferred_speed_std == 0.25
+
+    def test_spawn_defaults_when_block_absent(self):
+        ec = build_env_config({})
+        assert ec.spawn.preferred_speed_mean == 1.34
+        assert ec.spawn.preferred_speed_std == 0.26
+
+    def test_curriculum_preserves_spawn_distribution(self):
+        """The training path goes through CurriculumManager.make_env_config, which
+        rebuilds SpawnConfig field-by-field to override n_agents_range. It must
+        carry the sampling parameters across."""
+        from crowdrl_train.config import CurriculumConfig, CurriculumPhase
+        from crowdrl_train.curriculum import CurriculumManager
+        from crowdrl_env.geometry_generator import GeometryTier
+
+        ec = build_env_config(
+            {"spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25}}
+        )
+        manager = CurriculumManager(
+            CurriculumConfig(
+                phases=[
+                    CurriculumPhase(
+                        name="only",
+                        geometry_tiers=(GeometryTier.TIER_0,),
+                        n_agents_range=(5, 10),
+                        goal_rate_threshold=0.0,
+                    )
+                ]
+            )
+        )
+        phase_cfg = manager.make_env_config(ec)
+        assert phase_cfg.spawn.preferred_speed_mean == 1.0
+        assert phase_cfg.spawn.preferred_speed_std == 0.25
+        assert phase_cfg.spawn.n_agents_range == (5, 10)
+
+
 class TestCfgDictRoundTrip:
     """``cfg_dict_from_env_config`` is the exact inverse of ``build_env_config``.
 
@@ -96,6 +148,7 @@ class TestCfgDictRoundTrip:
             "use_velocity_weighted_proximity": True,
         },
         "episode": {"stuck_termination_enabled": False},
+        "spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25},
         "max_steps": 3000,
         "desired_velocity_weight": 0.8,
     }
@@ -128,6 +181,13 @@ class TestCfgDictRoundTrip:
         self._assert_dataclass_close(ec0.action, ec1.action)
         self._assert_dataclass_close(ec0.reward, ec1.reward)
         self._assert_dataclass_close(ec0.geometry, ec1.geometry)
+
+    def test_spawn_round_trips(self):
+        """Every spawn sampling parameter must survive the dump/reload, or a
+        results dir's config_resolved.yaml misreports the crowd it trained on."""
+        ec0, ec1 = self._round_trip(self.SOURCE_CFG)
+        self._assert_dataclass_close(ec0.spawn, ec1.spawn)
+        assert ec1.spawn.preferred_speed_mean == 1.0
 
     def test_top_level_fields_round_trip(self):
         ec0, ec1 = self._round_trip(self.SOURCE_CFG)
