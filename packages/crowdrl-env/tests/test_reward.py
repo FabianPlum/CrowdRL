@@ -143,6 +143,57 @@ class TestTier1Sparse:
         assert rewards[0] > 0
 
 
+class TestSpeedDeviationIndependentOfSmoothness:
+    """``speed_deviation_weight`` must work with ``use_smoothness=False``.
+
+    It used to be nested inside the ``use_smoothness`` block, so every config that
+    turned smoothness off -- which is the baseline setting -- silently trained with
+    NO speed matching no matter what weight it asked for. That is invisible in the
+    logs: the smoothness channel just reads +0.00. Policies aimed at JuPedSim
+    (constant 1.0 m/s preferred speed) depend on this term, so pin it here.
+
+    Must stay in lockstep with the torch twin in crowdrl_torch.reward.
+    """
+
+    def _reward(self, weight: float) -> np.ndarray:
+        # Every other term zeroed (incl. the collision penalty, which would not
+        # fire anyway -- these agents never touch) so the delta isolates speed_dev.
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=weight,
+        )
+        n = 3
+        velocities = np.array([[0.2, 0.0], [1.0, 0.0], [1.8, 0.0]])
+        state = _make_state(n)
+        state.prev_velocities = velocities.copy()
+        rewards, _ = compute_rewards(
+            np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+            velocities,
+            np.zeros(n),
+            np.array([[100.0, 0.0]] * n),
+            np.array([1.0, 1.0, 1.0]),
+            np.ones(n, dtype=np.bool_),
+            np.zeros(n, dtype=np.bool_),
+            state,
+            cfg,
+            dt=0.01,
+        )
+        return np.asarray(rewards)
+
+    def test_applies_when_smoothness_disabled(self):
+        delta = self._reward(-0.5) - self._reward(0.0)
+        # |speed - 1.0| = [0.8, 0.0, 0.8]  ->  -0.5 * that
+        assert np.allclose(delta, [-0.4, 0.0, -0.4])
+
+    def test_agent_at_preferred_speed_is_unpenalised(self):
+        """The middle agent moves at exactly its preferred speed."""
+        assert self._reward(-0.5)[1] == pytest.approx(0.0)
+
+    def test_zero_weight_is_a_no_op(self):
+        assert np.allclose(self._reward(0.0), 0.0)
+
+
 class TestTier2Smoothness:
     def test_speed_deviation_penalty(self, default_config):
         """Agent moving much faster than preferred gets penalised."""

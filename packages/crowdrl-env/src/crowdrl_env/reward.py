@@ -4,7 +4,12 @@ Tier 1 — Sparse task rewards:
   Goal-reaching bonus, collision penalty, timeout penalty.
 
 Tier 2 — Smoothness priors:
-  Jerk penalty, angular acceleration penalty, preferred-speed deviation.
+  Jerk penalty, angular acceleration penalty. Gated by ``use_smoothness``.
+
+Preferred-speed deviation is reported on the same channel but is NOT gated by
+``use_smoothness`` — it needs no motion history and is a locomotion-style target
+rather than a smoothness regulariser. It is controlled solely by
+``speed_deviation_weight``.
 
 Tier 3 — Distributional style matching (future, requires PeTrack data).
 """
@@ -128,7 +133,12 @@ class RewardConfig:
 
     # Tier 2: smoothness
     use_smoothness: bool = True
-    """Whether to apply Tier 2 smoothness penalties."""
+    """Whether to apply the Tier 2 smoothness penalties (jerk + angular accel).
+
+    Does NOT gate ``speed_deviation_weight``: preferred-speed deviation applies
+    whenever that weight is non-zero, regardless of this flag. It used to be
+    nested here, which silently disabled speed matching for every
+    ``use_smoothness=False`` config -- the baseline setting."""
 
     jerk_penalty_weight: float = -1e-5
     """Weight for acceleration change (jerk) penalty. Layer 1 v2
@@ -436,7 +446,14 @@ def compute_rewards(
         inv_dist = 1.0 / (goal_distances + 1.0)
         rewards[active_mask] += config.inverse_distance_weight * inv_dist[active_mask]
 
-    # --- Tier 2: Smoothness ---
+    # --- Tier 2: Smoothness (jerk + angular accel; speed deviation is separate) ---
+    # NOTE: jerk/angular-accel need prev_velocities and are gated by use_smoothness.
+    # Preferred-speed deviation is NOT: it depends only on the current velocity and
+    # is a locomotion-style target (match your own preferred speed), not a motion-
+    # smoothness regulariser. Nesting it here made speed_deviation_weight silently
+    # inert whenever use_smoothness was false -- which is the baseline setting -- so
+    # a run could ask for speed matching and train without it.
+    # Must stay in lockstep with crowdrl_torch.reward.compute_rewards.
     if config.use_smoothness and state.prev_velocities is not None:
         # Current acceleration
         accelerations = (velocities - state.prev_velocities) / dt
@@ -463,15 +480,16 @@ def compute_rewards(
 
             state.prev_heading_changes = heading_change.copy()
 
-        # Preferred speed deviation
-        speeds = np.linalg.norm(velocities, axis=1)
-        speed_dev = np.abs(speeds - preferred_speeds)
-        rewards[active_mask] += config.speed_deviation_weight * speed_dev[active_mask]
-
         state.prev_accelerations = accelerations.copy()
     elif state.prev_velocities is not None:
         # Even without smoothness, update acceleration state
         state.prev_accelerations = (velocities - state.prev_velocities) / dt
+
+    # Preferred speed deviation -- independent of use_smoothness (see note above).
+    if config.speed_deviation_weight != 0.0:
+        speeds = np.linalg.norm(velocities, axis=1)
+        speed_dev = np.abs(speeds - preferred_speeds)
+        rewards[active_mask] += config.speed_deviation_weight * speed_dev[active_mask]
 
     # Update state for next step
     state.prev_velocities = velocities.copy()

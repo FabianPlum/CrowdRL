@@ -192,11 +192,17 @@ class EnvConfig(NamedTuple):
     personal_space_radius: float = 1.0
     action_rate_weight: float = -0.01  # Layer 1: was 0.0 (disabled)
     existence_penalty: float = -0.01
+    # Gates the jerk + angular-accel penalties ONLY. It does NOT gate
+    # speed_deviation_weight -- see that field below.
     use_smoothness: bool = True
     jerk_penalty_weight: float = (
         -1e-5
     )  # Layer 1 v2: was -1e-4 (10x down -- see reward.py docstring)
     angular_accel_penalty_weight: float = -0.01  # Layer 1: was -1e-4 (100x up)
+    # Applies whenever non-zero, independent of use_smoothness (it needs no motion
+    # history). It used to be nested under use_smoothness, silently disabling speed
+    # matching for every use_smoothness=False config -- the baseline setting.
+    # Reported on the ``smoothness`` component channel.
     speed_deviation_weight: float = (
         -0.005
     )  # Layer 1 v2: was -0.1 (20x down -- see reward.py docstring)

@@ -98,16 +98,30 @@ class TestSpawnAgents:
                 dist = np.linalg.norm(result.positions[i] - result.positions[j])
                 assert dist >= config.min_spawn_separation - 1e-10
 
-    def test_tight_region_fewer_agents(self, rng):
-        """When spawn region is tiny, fewer agents than requested may be placed."""
+    def test_tight_region_reports_shortfall(self, rng):
+        """A region too small for the request must SAY so, not quietly undershoot.
+
+        This test used to assert ``result.n_agents < 100`` -- it encoded the silent
+        shortfall as correct behaviour, which is why a spawner delivering ~50% of the
+        requested crowd survived a green suite. What matters is not that a 0.25 m2
+        region holds fewer than 100 agents (it obviously does) but that the shortfall
+        is reported: the count asked for, the count placed, and the capacity that made
+        it impossible. See test_spawn_capacity.py for the delivery guarantees.
+        """
         tiny_spawn = [box(0, 0, 0.5, 0.5)]
         goal = [box(10, 0, 15, 5)]
         config = SpawnConfig(min_spawn_separation=0.3)
         result = spawn_agents(rng, tiny_spawn, goal, config=config, n_agents=100)
 
-        # Should place some but not all 100
         assert result.n_agents > 0
-        assert result.n_agents < 100
+        assert result.is_short, "a 0.25 m2 region cannot hold 100 agents"
+        assert result.requested_n == 100
+        assert result.n_agents <= result.capacity, (
+            "placement must never exceed the analytic packing bound"
+        )
+        # The provenance needed to act on it is all present.
+        assert result.spawn_area_m2 == pytest.approx(0.25, abs=1e-6)
+        assert "requested=100" in result.shortfall_summary
 
     def test_random_agent_count_from_range(self, rng, simple_regions):
         spawn_r, goal_r = simple_regions

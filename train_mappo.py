@@ -15,6 +15,7 @@ All output is written to ``results_<config-stem>/``.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -123,6 +124,7 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
     act = cfg.get("action", {})
     rew = cfg.get("reward", {})
     ep = cfg.get("episode", {})
+    spn = cfg.get("spawn", {})
 
     return CrowdEnvConfig(
         geometry=GeometryConfig(
@@ -130,6 +132,35 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             max_side=geo.get("max_side", 15.0),
             corridor_width_range=tuple(geo.get("corridor_width", (2.0, 4.0))),
             corridor_length_range=tuple(geo.get("corridor_length", (8.0, 18.0))),
+        ),
+        # n_agents_range is deliberately not sourced from here: training always
+        # overrides it per curriculum phase (CurriculumManager.make_env_config),
+        # and eval/render call sites pass their own tier-specific range. Every
+        # other sampling parameter (speeds, body dims, mass, dilation policy)
+        # has no other source, so it must round-trip through this config.
+        spawn=SpawnConfig(
+            shoulder_width_mean=spn.get("shoulder_width_mean", 0.22),
+            shoulder_width_std=spn.get("shoulder_width_std", 0.02),
+            chest_depth_mean=spn.get("chest_depth_mean", 0.12),
+            chest_depth_std=spn.get("chest_depth_std", 0.015),
+            mass_mean=spn.get("mass_mean", 80.0),
+            mass_std=spn.get("mass_std", 15.0),
+            mass_min=spn.get("mass_min", 40.0),
+            preferred_speed_mean=spn.get("preferred_speed_mean", 1.34),
+            preferred_speed_std=spn.get("preferred_speed_std", 0.26),
+            min_body_dim=spn.get("min_body_dim", 0.08),
+            min_speed=spn.get("min_speed", 0.5),
+            max_speed=spn.get("max_speed", 2.0),
+            min_spawn_separation=spn.get("min_spawn_separation", 0.3),
+            max_spawn_attempts=spn.get("max_spawn_attempts", 50),
+            spawn_sampler=spn.get("spawn_sampler", "lattice"),
+            max_spawn_dilation=spn.get("max_spawn_dilation", 3.0),
+            separate_spawn_from_exit=spn.get("separate_spawn_from_exit", True),
+            target_initial_density=spn.get("target_initial_density", 1.0),
+            spawn_dilation_headroom=spn.get("spawn_dilation_headroom", 1.15),
+            spawn_shortfall_policy=spn.get("spawn_shortfall_policy", "regenerate"),
+            min_spawn_goal_distance=spn.get("min_spawn_goal_distance", 3.0),
+            max_goal_attempts=spn.get("max_goal_attempts", 32),
         ),
         obs=ObsConfig(
             use_navmesh=obs.get("use_navmesh", True),
@@ -216,12 +247,39 @@ def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
     ``obs.temporal_memory_dt``.
     """
     o, a, r, g = env_config.obs, env_config.action, env_config.reward, env_config.geometry
+    s = env_config.spawn
     return {
         "geometry": {
             "min_side": g.min_side,
             "max_side": g.max_side,
             "corridor_width": list(g.corridor_width_range),
             "corridor_length": list(g.corridor_length_range),
+        },
+        # n_agents_range is omitted: it is always supplied by the curriculum
+        # phase or the eval scenario, never by this block. See build_env_config.
+        "spawn": {
+            "shoulder_width_mean": s.shoulder_width_mean,
+            "shoulder_width_std": s.shoulder_width_std,
+            "chest_depth_mean": s.chest_depth_mean,
+            "chest_depth_std": s.chest_depth_std,
+            "mass_mean": s.mass_mean,
+            "mass_std": s.mass_std,
+            "mass_min": s.mass_min,
+            "preferred_speed_mean": s.preferred_speed_mean,
+            "preferred_speed_std": s.preferred_speed_std,
+            "min_body_dim": s.min_body_dim,
+            "min_speed": s.min_speed,
+            "max_speed": s.max_speed,
+            "min_spawn_separation": s.min_spawn_separation,
+            "max_spawn_attempts": s.max_spawn_attempts,
+            "spawn_sampler": s.spawn_sampler,
+            "max_spawn_dilation": s.max_spawn_dilation,
+            "separate_spawn_from_exit": s.separate_spawn_from_exit,
+            "target_initial_density": s.target_initial_density,
+            "spawn_dilation_headroom": s.spawn_dilation_headroom,
+            "spawn_shortfall_policy": s.spawn_shortfall_policy,
+            "min_spawn_goal_distance": s.min_spawn_goal_distance,
+            "max_goal_attempts": s.max_goal_attempts,
         },
         "observation": {
             "use_navmesh": o.use_navmesh,
@@ -688,7 +746,7 @@ def run_evaluation(
         eval_env_config = CrowdEnvConfig(
             geometry=eval_geometry,
             geometry_tiers=[tier],
-            spawn=SpawnConfig(n_agents_range=agent_range),
+            spawn=dataclasses.replace(env_config.spawn, n_agents_range=agent_range),
             obs=obs_config,
             reward=reward_config,
             max_steps=env_config.max_steps,
@@ -808,7 +866,7 @@ def save_trajectory_plots(
             config=CrowdEnvConfig(
                 geometry=eval_geometry,
                 geometry_tiers=[tier],
-                spawn=SpawnConfig(n_agents_range=agent_range),
+                spawn=dataclasses.replace(env_config.spawn, n_agents_range=agent_range),
                 obs=obs_config,
                 reward=reward_config,
                 max_steps=env_config.max_steps,
@@ -915,7 +973,7 @@ def try_render_video(
         config=CrowdEnvConfig(
             geometry=env_config.geometry,
             geometry_tiers=[tier],
-            spawn=SpawnConfig(n_agents_range=agent_range),
+            spawn=dataclasses.replace(env_config.spawn, n_agents_range=agent_range),
             obs=obs_config,
             reward=reward_config,
             max_steps=env_config.max_steps,
