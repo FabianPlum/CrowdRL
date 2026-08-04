@@ -251,6 +251,36 @@ class TestWallEquivalence:
         npt.assert_allclose(torch_nearest[0].numpy(), np_nearest, atol=ATOL, rtol=RTOL)
         npt.assert_allclose(torch_dist[0].numpy(), np_dist, atol=ATOL, rtol=RTOL)
 
+    def test_min_wall_distance_and_direction_parity(self):
+        """Distance+direction provider matches the NumPy reference."""
+        from crowdrl_core.collision import compute_min_wall_distances_and_directions
+        from crowdrl_torch.walls import (
+            compute_min_wall_distances_and_directions as torch_dist_dirs,
+        )
+
+        world = _make_test_world(n_agents=10, seed=7)
+        np_dist, np_dirs = compute_min_wall_distances_and_directions(world)
+
+        config = EnvConfig(max_agents=10)
+        td = _world_to_torch(world, config)
+        t_dist, t_dirs = torch_dist_dirs(td["positions"], td["wall_segments"], td["n_segments"])
+
+        n = world.n_agents
+        npt.assert_allclose(t_dist[0, :n].numpy(), np_dist, atol=ATOL, rtol=RTOL)
+        npt.assert_allclose(t_dirs[0, :n].numpy(), np_dirs, atol=ATOL, rtol=RTOL)
+
+    def test_min_wall_distance_and_direction_no_segments(self):
+        """All-padding envs get the sentinel distance and zero directions."""
+        from crowdrl_torch.walls import compute_min_wall_distances_and_directions
+
+        dist, dirs = compute_min_wall_distances_and_directions(
+            torch.zeros((1, 3, 2)),
+            torch.zeros((1, 8, 2, 2)),
+            torch.tensor([0], dtype=torch.int32),
+        )
+        assert (dist >= 1e5).all()
+        npt.assert_array_equal(dirs.numpy(), np.zeros((1, 3, 2), dtype=np.float32))
+
 
 class TestSensingEquivalence:
     """Test PyTorch raycasting and KNN match NumPy reference."""
