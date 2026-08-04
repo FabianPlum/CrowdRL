@@ -428,10 +428,16 @@ The force direction points from the nearest wall point toward the agent.
   the force multiplies by `e` for every 30cm closer: an agent 5cm from a wall feels
   `exp((0.30 - 0.05)/0.3) ~ 2.3x` the force of one at 30cm, and ~20x that of one at 1.2 m.
 
-- **Smooth gradient for learning.** Unlike a hard wall constraint (which has
-  zero gradient until contact), the exponential provides a continuous signal
-  that the policy can learn from. The agent can "feel" the wall approaching
-  before contact occurs.
+- **Smooth gradient in principle -- a nudge in practice.** Unlike a hard wall
+  constraint (which has zero gradient until contact), the exponential provides
+  a continuous signal. But every trained config pins `desired_velocity_weight
+  = 0.8` (A.2), which re-imposes 80% of the *commanded* velocity each step, so
+  the repulsion impulse's steady-state contribution against a 2 m/s command is
+  on the order of a centimetre per second -- three orders of magnitude below
+  the policy's authority. At that setting the agent cannot meaningfully "feel"
+  the wall approaching through the physics; the anticipatory wall signals the
+  policy can actually learn from are the raycasts (observation) and the wall
+  reward gradient (B.1 graded/weighted variants).
 
 - **All wall segments contribute.** In a corner, the agent feels repulsion from
   both walls simultaneously (there is no distance cutoff -- the exponential
@@ -530,7 +536,7 @@ what the policy can learn:
 |
 +-- Spring-damper (A.4) -----> Overlapping = getting pushed apart
 |
-+-- Wall repulsion (A.5) ----> "Feel" walls before contact
++-- Wall repulsion (A.5) ----> Near-wall nudge (weak at w=0.8; see A.5)
 |
 +-- Speed clamp (A.6) -------> No unrealistic velocities
 |
@@ -676,7 +682,9 @@ the critic rather than treating them as terminal.
   steps is below 0.2 m is deactivated early and pays the same timeout penalty
   -- dense episodes stop carrying frozen agents to the horizon.
 
-#### Wall proximity: -0.1 per step
+#### Wall proximity: -0.1 per step (flat band; graded/weighted variants opt-in)
+
+Legacy (default) form -- a flat band:
 
 ```
 threshold = agent_radius * 1.5    (e.g. 0.22m * 1.5 = 0.33m)
@@ -685,18 +693,40 @@ if distance_to_nearest_wall < threshold AND agent is active:
     reward += -0.1
 ```
 
-- **Incentivises**: keeping distance from walls, walking in open space.
-- **Complements wall repulsion (A.5)**: the exponential force pushes the agent
-  away physically, while this penalty teaches the agent to *avoid approaching*
-  walls in the first place. The physics acts reactively; the reward acts
-  proactively.
+Two opt-in reshapes (defaults off, flags compose; both implementations):
+
+```
+use_graded_wall_proximity: linear ramp near -> far over [radius, threshold]
+    t   = clip((dist - radius) / (threshold - radius), 0, 1)
+    pen = (1-t) * wall_proximity_penalty_near + t * wall_proximity_penalty_far
+          (defaults: near -0.2 at body contact, far 0.0 at the threshold edge
+           -- same band-mean as the flat -0.1, but now a slope)
+
+use_velocity_weighted_wall_proximity: scale by closing speed toward the wall
+    closing = dot(v_pre_contact, unit(agent -> nearest wall point))
+    pen    *= max(wall_proximity_speed_floor
+                  + wall_proximity_speed_scale * closing, 0)
+```
+
+- **Incentivises (flat band)**: keeping distance from walls, walking in open
+  space.
+- **What the flat band gets wrong**: it is a step, not a gradient. Anywhere
+  inside the threshold costs the same, so there is no signal to brake between
+  the band edge and body contact -- and *waiting* beside a wall (yielding to
+  let someone pass) is taxed -0.1 every step while *approaching* one at 2 m/s
+  is free until contact. Note the physics-side exponential repulsion (A.5)
+  does NOT supply the missing gradient at the trained
+  `desired_velocity_weight = 0.8`.
+- **The graded ramp** gives walls the anticipation gradient the agent-proximity
+  term always had: approaching closer costs progressively more.
+- **The closing-speed weighting** mirrors the agent-side anti-freezing fix
+  (`proximity_speed_floor = 0.0` made slow coexistence free): at floor 0.0,
+  standing or sliding parallel beside a wall costs nothing -- yielding near a
+  wall becomes reward-viable -- while running at one is taxed before contact.
 - **Lower than collision penalty**: -0.1 vs -1.0 reflects that wall-hugging is
   less dangerous than agent-agent interpenetration. An agent in a narrow
   corridor cannot avoid triggering this penalty, so making it too large would
   create unlearnable situations.
-- **A band, not a gradient**: the penalty is flat inside the threshold; the
-  smooth near-wall gradient comes from the physics-side exponential repulsion
-  (A.5).
 
 #### Wall collision: -1.0 per step
 
@@ -709,9 +739,13 @@ if enforce_wall_boundaries() reported hard wall contact for the agent:
   band warns, this one punishes contact. Note the mask fires at one body radius of
   clearance (A.7), not on actual penetration.
 - **Impact-speed variant**: when the collision weighting is on, this penalty
-  is scaled by the agent's *own* pre-contact speed (there is no wall-normal
-  closing speed to measure), so sliding along a wall costs little and slamming
-  into one costs a lot. The shipped run uses -0.5.
+  is scaled by the agent's *own full* pre-contact speed by default -- ramming
+  costs more than drifting, but sliding along a wall at 2 m/s costs exactly as
+  much as slamming into it head-on, so it gives no gradient toward turning
+  parallel. The opt-in `use_wall_normal_impact` weights by the velocity
+  component INTO the wall instead (clamped >= 0, using the nearest-wall
+  direction), so a parallel slide pays only the floor while a head-on pays in
+  full. The shipped r0125 run uses -0.5 with the full-speed weighting.
 - **`collision_penalty_cap` does not apply here.** The cap bounds only the agent-agent
   term. So in r0125 the agent-collision penalty is strictly discount-only (base -2.0,
   cap -2.0) while this one is uncapped and can be *amplified* above its base -- at 3 m/s,
@@ -924,8 +958,14 @@ a collision occurs, because:
 - The graded agent-proximity ramp provides a continuous gradient from
   1 m out to contact, so approaching closer is progressively costly
   instead of being free until a hard threshold
-- The wall repulsion force provides a gradient signal before contact
 - Social observations show approaching agents' velocities, allowing prediction
+
+Note this anticipatory pressure historically existed for *agents only*: walls
+had a flat band with no approach gradient (and the A.5 repulsion is a nudge at
+the trained `desired_velocity_weight`), which is consistent with the observed
+failure mode of policies swerving into walls at full speed while avoiding
+people. The graded / closing-speed-weighted wall variants (B.1) exist to give
+walls the same anticipation structure.
 
 **Corridor lane formation.** In bidirectional corridors, agents spontaneously
 form lanes because:
@@ -1034,12 +1074,17 @@ stays at the default.
 | `use_velocity_weighted_proximity` | False | False | True | closing-speed scaling of the ramp |
 | `proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.25 / 0.5 | **0.0** / 0.5 | floor 0 => a stationary neighbour costs nothing |
 | `timeout_penalty` | -5.0 | **-10.0** | -10.0 | also paid on stuck termination |
-| `wall_proximity_penalty` | -0.1 | -0.1 | -0.1 | flat band inside the threshold |
+| `wall_proximity_penalty` | -0.1 | -0.1 | -0.1 | flat band inside the threshold (legacy mode) |
 | `wall_proximity_threshold` | 1.5x radius | 1.5x radius | 1.5x radius | |
+| `use_graded_wall_proximity` | False | False | (predates) | ramp near->far instead of the flat band (B.1) |
+| `wall_proximity_penalty_near` / `_far` | -0.2 / 0.0 | -0.2 / 0.0 | (predates) | ramp endpoints at body contact / threshold edge |
+| `use_velocity_weighted_wall_proximity` | False | False | (predates) | closing-speed scaling toward the nearest wall |
+| `wall_proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.25 / 0.5 | (predates) | floor 0 => waiting beside a wall costs nothing |
 | `wall_collision_penalty` | -1.0 | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables; **not** covered by the cap |
+| `use_wall_normal_impact` | False | False | (predates) | contact impact = into-wall component, not \|\|v\|\| |
 | `existence_penalty` | -0.01 | -0.01 | -0.01 | |
 | `progress_weight` | +1.0 | +1.0 | +2.0 | on navmesh remaining-path length |
-| `use_smoothness` | True | True | False | gates jerk / angular accel / speed deviation |
+| `use_smoothness` | True | True | False | gates jerk / angular accel (speed deviation is independent since 5ba4282) |
 | `jerk_penalty_weight` | -1e-5 | *not parsed* | (off) | Tier 2; Layer 1 v2: 10x down from -1e-4 |
 | `angular_accel_penalty_weight` | -1e-2 | *not parsed* | (off) | Tier 2; measured on the torso orientation |
 | `speed_deviation_weight` | -5e-3 | **0.0** | 0.0 | r0125 never turned this *off* -- the driver default is already 0.0 |
