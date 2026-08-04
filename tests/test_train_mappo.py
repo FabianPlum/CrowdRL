@@ -104,6 +104,58 @@ class TestBuildEnvConfigSpawn:
         assert phase_cfg.spawn.n_agents_range == (5, 10)
 
 
+class TestBuildEnvConfigWallShaping:
+    """The wall-shaping reward keys must propagate YAML -> RewardConfig ->
+    torch EnvConfig. Two historically-skipped layers: a key missing from
+    ``build_env_config``'s .get() allowlist is silently inert, and a field
+    missing from ``EnvConfig.from_crowd_env_config`` resolves in the numpy
+    config but never reaches training."""
+
+    _YAML = {
+        "reward": {
+            "use_graded_wall_proximity": True,
+            "wall_proximity_penalty_near": -0.3,
+            "wall_proximity_penalty_far": -0.01,
+            "use_velocity_weighted_wall_proximity": True,
+            "wall_proximity_speed_floor": 0.0,
+            "wall_proximity_speed_scale": 0.7,
+            "use_wall_normal_impact": True,
+        }
+    }
+
+    def test_yaml_reaches_reward_config(self):
+        r = build_env_config(self._YAML).reward
+        assert r.use_graded_wall_proximity is True
+        assert r.wall_proximity_penalty_near == -0.3
+        assert r.wall_proximity_penalty_far == -0.01
+        assert r.use_velocity_weighted_wall_proximity is True
+        assert r.wall_proximity_speed_floor == 0.0
+        assert r.wall_proximity_speed_scale == 0.7
+        assert r.use_wall_normal_impact is True
+
+    def test_yaml_reaches_torch_env_config(self):
+        from crowdrl_torch.types import EnvConfig
+
+        tc = EnvConfig.from_crowd_env_config(
+            build_env_config(self._YAML), max_agents=8, max_segments=64
+        )
+        assert tc.use_graded_wall_proximity is True
+        assert tc.wall_proximity_penalty_near == -0.3
+        assert tc.wall_proximity_penalty_far == -0.01
+        assert tc.use_velocity_weighted_wall_proximity is True
+        assert tc.wall_proximity_speed_floor == 0.0
+        assert tc.wall_proximity_speed_scale == 0.7
+        assert tc.use_wall_normal_impact is True
+
+    def test_defaults_when_absent_preserve_legacy_behaviour(self):
+        from crowdrl_torch.types import EnvConfig
+
+        tc = EnvConfig.from_crowd_env_config(build_env_config({}), max_agents=8, max_segments=64)
+        assert tc.use_graded_wall_proximity is False
+        assert tc.use_velocity_weighted_wall_proximity is False
+        assert tc.use_wall_normal_impact is False
+
+
 class TestCfgDictRoundTrip:
     """``cfg_dict_from_env_config`` is the exact inverse of ``build_env_config``.
 
@@ -146,6 +198,13 @@ class TestCfgDictRoundTrip:
             "use_velocity_weighted_collision": True,
             "collision_penalty_cap": -2.0,
             "use_velocity_weighted_proximity": True,
+            "use_graded_wall_proximity": True,
+            "wall_proximity_penalty_near": -0.3,
+            "wall_proximity_penalty_far": -0.01,
+            "use_velocity_weighted_wall_proximity": True,
+            "wall_proximity_speed_floor": 0.0,
+            "wall_proximity_speed_scale": 0.7,
+            "use_wall_normal_impact": True,
         },
         "episode": {"stuck_termination_enabled": False},
         "spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25},

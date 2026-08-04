@@ -214,6 +214,15 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             use_velocity_weighted_proximity=rew.get("use_velocity_weighted_proximity", False),
             proximity_speed_floor=rew.get("proximity_speed_floor", 0.25),
             proximity_speed_scale=rew.get("proximity_speed_scale", 0.5),
+            use_graded_wall_proximity=rew.get("use_graded_wall_proximity", False),
+            wall_proximity_penalty_near=rew.get("wall_proximity_penalty_near", -0.2),
+            wall_proximity_penalty_far=rew.get("wall_proximity_penalty_far", 0.0),
+            use_velocity_weighted_wall_proximity=rew.get(
+                "use_velocity_weighted_wall_proximity", False
+            ),
+            wall_proximity_speed_floor=rew.get("wall_proximity_speed_floor", 0.25),
+            wall_proximity_speed_scale=rew.get("wall_proximity_speed_scale", 0.5),
+            use_wall_normal_impact=rew.get("use_wall_normal_impact", False),
         ),
         max_steps=cfg.get("max_steps", 2000),
         # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this
@@ -327,6 +336,13 @@ def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
             "use_velocity_weighted_proximity": r.use_velocity_weighted_proximity,
             "proximity_speed_floor": r.proximity_speed_floor,
             "proximity_speed_scale": r.proximity_speed_scale,
+            "use_graded_wall_proximity": r.use_graded_wall_proximity,
+            "wall_proximity_penalty_near": r.wall_proximity_penalty_near,
+            "wall_proximity_penalty_far": r.wall_proximity_penalty_far,
+            "use_velocity_weighted_wall_proximity": r.use_velocity_weighted_wall_proximity,
+            "wall_proximity_speed_floor": r.wall_proximity_speed_floor,
+            "wall_proximity_speed_scale": r.wall_proximity_speed_scale,
+            "use_wall_normal_impact": r.use_wall_normal_impact,
         },
         "episode": {
             "stuck_termination_enabled": env_config.stuck_termination_enabled,
