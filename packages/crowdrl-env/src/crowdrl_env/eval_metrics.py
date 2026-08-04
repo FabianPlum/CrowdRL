@@ -159,7 +159,14 @@ def compute_episode_metrics(
         world = _frame_world(frames, f, wall_segments)
         if wall_segments is not None:
             wall_dist = compute_min_wall_distances(world)  # (N,)
-            wall_contact_hits += int(((wall_dist < radius) & active).sum())
+            # The boundary enforcement parks a contacting agent at EXACTLY one
+            # body radius from the wall (enforce_wall_boundaries projects to
+            # nearest_point + inward * radius), so a strict `< radius` test
+            # reads a wall-pressed agent as not-in-contact and undercounts
+            # sustained contact. The 0.1 mm epsilon is far above float noise
+            # and far below behavioural scale. Scorecards written before this
+            # fix undercount wall_contact_rate -- re-score before comparing.
+            wall_contact_hits += int(((wall_dist < radius + 1e-4) & active).sum())
             wall_prox_hits += int(((wall_dist < 1.5 * radius) & active).sum())
         if n_active >= 2:
             involved: set[int] = set()

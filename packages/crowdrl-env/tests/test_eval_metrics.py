@@ -54,6 +54,36 @@ def test_wall_contact_rate():
     assert m["wall_proximity_rate"] == 1.0
 
 
+def test_wall_contact_counts_agent_parked_at_exactly_one_radius():
+    # The boundary enforcement parks a contacting agent at EXACTLY one body
+    # radius from the wall (enforce_wall_boundaries projects to nearest_point
+    # + inward * radius), so the metric must count that as sustained contact
+    # -- the strict `< radius` it used before read a permanently wall-pressed
+    # agent as contact-free. An agent a millimetre further out stays uncounted.
+    walls = np.array([[[-1.0, 0.0], [1.0, 0.0]]])  # wall along y=0
+
+    def frames_at(y):
+        pos = np.array([[[0.0, y]], [[0.0, y]]])  # (2, 1, 2), stationary
+        return EpisodeFrames(
+            positions=pos,
+            torso_orientations=np.zeros((2, 1)),
+            head_orientations=np.zeros((2, 1)),
+            shoulder_widths=np.array([0.22]),
+            chest_depths=np.array([0.12]),
+            goal_positions=np.array([[5.0, 5.0]]),
+            active_masks=np.ones((2, 1), dtype=bool),
+            reached_goal=np.array([False]),
+            walls=walls,
+            dt=0.1,
+        )
+
+    parked = compute_episode_metrics(frames_at(0.22))  # exactly one radius
+    assert parked["wall_contact_rate"] == 1.0
+    clear = compute_episode_metrics(frames_at(0.221))  # radius + 1 mm
+    assert clear["wall_contact_rate"] == 0.0
+    assert clear["wall_proximity_rate"] == 1.0  # still inside the 1.5x band
+
+
 def test_no_wall_metrics_without_geometry():
     # No walls and no polygon -> wall metrics are omitted, not guessed.
     pos = np.array([[[0.0, 0.0]], [[0.1, 0.0]]])
