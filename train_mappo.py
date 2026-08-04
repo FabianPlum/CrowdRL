@@ -1665,6 +1665,43 @@ def train_worker(
                     rollout,
                     total_episodes=total_episodes,
                 )
+                # Companion ONNX for every checkpoint, so each saved iteration
+                # ships a deployable, self-describing artefact alongside its
+                # weights (no post-hoc reexport_onnx.py step when handing a
+                # mid-run policy to other processes). PolicyForExport deep-
+                # copies the nets, so the live GPU actor is untouched. Best-
+                # effort like renders: an export failure must never crash a
+                # long training run.
+                try:
+                    onnx_ckpt_path = results_dir / f"policy_r{rollout:04d}.onnx"
+                    export_onnx(
+                        actor_critic.actor,
+                        obs_normalizer,
+                        onnx_ckpt_path,
+                        obs_config=env_config.obs,
+                        action_config=env_config.action,
+                        dynamics={
+                            "desired_velocity_weight": env_config.desired_velocity_weight,
+                            "max_velocity_magnitude": env_config.max_velocity_magnitude,
+                            "contact_stiffness": env_config.contact_stiffness,
+                            "contact_damping": env_config.contact_damping,
+                        },
+                        provenance={
+                            "run": results_dir.name,
+                            "checkpoint": ckpt_path.name,
+                            "rollout": rollout,
+                            "episode": total_episodes,
+                            "git_rev": _git_rev(),
+                            "source": "train_mappo",
+                        },
+                    )
+                    print(f"  ONNX policy -> {onnx_ckpt_path.name}", flush=True)
+                except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                    print(
+                        f"  Warning: checkpoint ONNX export failed ({type(e).__name__}: {e}); "
+                        "continuing training.",
+                        flush=True,
+                    )
                 if render_interval > 0 and rollout % render_interval == 0:
                     viz_out = results_dir / f"viz_r{rollout:04d}_tier3B.mp4"
                     # Never let a render-spawn failure crash a long training run:
