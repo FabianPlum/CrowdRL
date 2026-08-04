@@ -53,6 +53,58 @@ class RewardConfig:
     Deters using walls as a free brake (instant deceleration at no cost).
     Mirrors the agent ``collision_penalty``. Default -1.0; set 0.0 to disable."""
 
+    # Wall-proximity shaping (optional, default OFF -> the flat band above).
+    # The flat band is a step, not a gradient: anywhere inside the threshold
+    # costs the same, so the policy gets no signal to brake between the band
+    # edge and body contact, while WAITING near a wall (yielding) is taxed
+    # every step. The graded ramp + closing-speed weighting mirror the agent-
+    # proximity treatment: near-wall coexistence becomes cheap (free at floor
+    # 0.0) and only APPROACHING the wall at speed is penalised -- an
+    # anticipatory braking gradient that exists before contact.
+    use_graded_wall_proximity: bool = False
+    """Replace the flat wall-proximity band with a linear ramp interpolating
+    ``wall_proximity_penalty_near`` (at body contact, wall distance == agent
+    radius) and ``wall_proximity_penalty_far`` (at ``wall_proximity_threshold``
+    x radius). False reproduces the flat ``wall_proximity_penalty`` band
+    exactly (the default)."""
+
+    wall_proximity_penalty_near: float = -0.2
+    """Graded-band penalty at body contact (wall distance == agent radius).
+    With the flat band at -0.1 over [radius, 1.5 x radius], near=-0.2 and
+    far=0.0 keep the band-mean unchanged (equal integral) while giving the
+    policy a slope to descend. Inert while ``use_graded_wall_proximity`` is
+    False."""
+
+    wall_proximity_penalty_far: float = 0.0
+    """Graded-band penalty right at the ``wall_proximity_threshold`` edge.
+    0.0 keeps the band continuous at its outer edge (no onset cliff)."""
+
+    use_velocity_weighted_wall_proximity: bool = False
+    """Scale the wall-proximity penalty (flat or graded -- the flags compose)
+    by the closing speed toward the nearest wall, exactly as
+    ``use_velocity_weighted_proximity`` does for neighbours: waiting beside a
+    wall is cheap (free at floor 0.0), approaching one at speed is taxed
+    BEFORE contact. Needs ``wall_directions`` from the caller; without them
+    the weighting is skipped. False reproduces the unweighted penalty exactly
+    (the default)."""
+
+    wall_proximity_speed_floor: float = 0.25
+    """Wall-proximity multiplier at zero closing speed (0.0 = waiting near a
+    wall is free; mirrors ``proximity_speed_floor``)."""
+
+    wall_proximity_speed_scale: float = 0.5
+    """Extra wall-proximity multiplier per m/s of closing speed toward the
+    wall."""
+
+    use_wall_normal_impact: bool = False
+    """Weight the wall-CONTACT penalty by the velocity component INTO the wall
+    (clamped >= 0) instead of the agent's full speed, so sliding parallel to a
+    wall at speed is cheap while slamming into it head-on is not. Only
+    meaningful when ``use_velocity_weighted_collision`` is on (the contact
+    penalty is binary otherwise); reuses ``collision_speed_floor`` /
+    ``collision_speed_scale``. Needs ``wall_directions``; falls back to the
+    full-speed weighting without them."""
+
     # Impact-speed weighting for the collision / wall-contact penalties
     # (optional, default OFF -> binary per-step penalty). A binary penalty has
     # ZERO marginal cost for hitting at speed, so once contact is unavoidable
@@ -244,6 +296,7 @@ def compute_rewards(
     current_distances: NDArray[np.float64] | None = None,
     wall_distances: NDArray[np.float64] | None = None,
     wall_collision_mask: NDArray[np.bool_] | None = None,
+    wall_directions: NDArray[np.float64] | None = None,
     agent_radii: NDArray[np.float64] | None = None,
     actions: NDArray[np.float64] | None = None,
     collision_velocities: NDArray[np.float64] | None = None,
@@ -265,6 +318,11 @@ def compute_rewards(
     wall_distances : (n_agents,) optional — min distance to nearest wall per agent
     wall_collision_mask : (n_agents,) bool optional — True where the boundary
         enforcement corrected the agent this step (hard wall-contact signal)
+    wall_directions : (n_agents, 2) optional — unit vector agent → nearest wall
+        point (``compute_min_wall_distances_and_directions``). Needed by
+        ``use_velocity_weighted_wall_proximity`` (closing speed toward the
+        wall) and ``use_wall_normal_impact`` (into-wall impact component);
+        both fall back to their legacy behaviour when this is None.
     agent_radii : (n_agents,) optional — agent body radii (used for the
         graded agent-proximity penalty: contact distance = r_i + r_j)
     actions : (n_agents, action_dim) optional — raw policy output this step
@@ -344,15 +402,42 @@ def compute_rewards(
         coll_pen = np.maximum(coll_pen, config.collision_penalty_cap)
     rewards[coll_active] += coll_pen
 
-    # Wall proximity penalty (smooth, distance-based)
-    if (
-        config.wall_proximity_penalty != 0.0
-        and wall_distances is not None
-        and agent_radii is not None
-    ):
+    # Wall proximity penalty. Legacy mode is a FLAT band -- a step, not a
+    # gradient: constant penalty anywhere inside threshold*radius. Opt-in
+    # graded mode mirrors the agent-proximity ramp (near at body contact ->
+    # far at the threshold edge); opt-in closing-speed weighting taxes
+    # APPROACHING the wall rather than being near it, so yielding beside a
+    # wall can be free. Must stay in lockstep with crowdrl_torch.reward.
+    if config.use_graded_wall_proximity:
+        wall_prox_on = (
+            config.wall_proximity_penalty_near != 0.0 or config.wall_proximity_penalty_far != 0.0
+        )
+    else:
+        wall_prox_on = config.wall_proximity_penalty != 0.0
+    if wall_prox_on and wall_distances is not None and agent_radii is not None:
         threshold = agent_radii * config.wall_proximity_threshold
-        wall_proximity = (wall_distances < threshold) & active_mask
-        rewards[wall_proximity] += config.wall_proximity_penalty
+        in_band = (wall_distances < threshold) & active_mask
+        if config.use_graded_wall_proximity:
+            # Linear ramp: ``near`` at wall_distance == radius, ``far`` at the
+            # threshold. Below-radius distances clamp to ``near``.
+            denom = np.maximum(threshold - agent_radii, 1e-6)
+            t = np.clip((wall_distances - agent_radii) / denom, 0.0, 1.0)
+            wall_pen = (1.0 - t) * config.wall_proximity_penalty_near + (
+                t * config.wall_proximity_penalty_far
+            )
+        else:
+            wall_pen = np.full(n_agents, config.wall_proximity_penalty)
+        if config.use_velocity_weighted_wall_proximity and wall_directions is not None:
+            vel = collision_velocities if collision_velocities is not None else velocities
+            closing = np.minimum(
+                np.sum(vel * wall_directions, axis=1), max_impact_speed
+            )  # >0 when approaching the nearest wall (capped)
+            speed_w = np.maximum(
+                config.wall_proximity_speed_floor + config.wall_proximity_speed_scale * closing,
+                0.0,
+            )
+            wall_pen = wall_pen * speed_w
+        rewards[in_band] += wall_pen[in_band]
 
     # Wall contact penalty (hard, per step while the boundary pushed the agent
     # back). Distinct from the proximity band; mirrors the agent collision
@@ -360,14 +445,20 @@ def compute_rewards(
     if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
         wall_active = wall_collision_mask & active_mask
         if config.use_velocity_weighted_collision and bool(wall_active.any()):
-            # No wall normal is available here, so weight by the agent's own
-            # (pre-contact) speed: ramming a wall at speed costs more than
-            # drifting into it. wall_collision_mask already implies into-wall
-            # motion the boundary had to cancel.
             vel = collision_velocities if collision_velocities is not None else velocities
-            own_speed = np.minimum(np.linalg.norm(vel, axis=1), max_impact_speed)
+            if config.use_wall_normal_impact and wall_directions is not None:
+                # Impact speed = the (pre-contact) velocity component INTO the
+                # wall, clamped >= 0, so sliding parallel to the wall is cheap
+                # while slamming into it head-on is not.
+                impact = np.clip(np.sum(vel * wall_directions, axis=1), 0.0, max_impact_speed)
+            else:
+                # No wall normal in use: weight by the agent's own
+                # (pre-contact) FULL speed -- ramming a wall at speed costs
+                # more than drifting into it, but sliding parallel costs
+                # exactly as much as a head-on at the same speed.
+                impact = np.minimum(np.linalg.norm(vel, axis=1), max_impact_speed)
             wall_scale = np.maximum(
-                config.collision_speed_floor + config.collision_speed_scale * own_speed, 0.0
+                config.collision_speed_floor + config.collision_speed_scale * impact, 0.0
             )
             rewards[wall_active] += config.wall_collision_penalty * wall_scale[wall_active]
         else:

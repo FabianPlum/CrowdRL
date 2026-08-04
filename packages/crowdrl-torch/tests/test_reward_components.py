@@ -257,3 +257,118 @@ def test_speed_deviation_applies_without_smoothness():
     # Reported on the smoothness channel, keeping the schema at 10 channels.
     npt.assert_allclose(on_comps[:, _idx("smoothness")], expected, atol=1e-5)
     npt.assert_allclose(on_comps.sum(axis=-1), on, atol=1e-4, rtol=1e-4)
+
+
+def _wall_shaping_config(n: int, **overrides) -> EnvConfig:
+    """EnvConfig with everything except the wall terms zeroed."""
+    base = dict(
+        max_agents=n,
+        use_smoothness=False,
+        goal_bonus=0.0,
+        collision_penalty=0.0,
+        timeout_penalty=0.0,
+        existence_penalty=0.0,
+        progress_weight=0.0,
+        speed_deviation_weight=0.0,
+        wall_proximity_penalty=0.0,
+        wall_collision_penalty=0.0,
+        agent_proximity_penalty_near=0.0,
+        agent_proximity_penalty_far=0.0,
+        action_rate_weight=0.0,
+    )
+    base.update(overrides)
+    return EnvConfig(**base)
+
+
+def test_graded_wall_proximity_channel():
+    """Graded + closing-speed-weighted wall proximity lands on its channel.
+
+    Band = [0.22, 0.33] (radius 0.22, threshold 1.5). Agents 0 and 1 sit
+    mid-band (ramp value -0.1 with near -0.2 / far 0.0); agent 0 approaches
+    its wall at 1 m/s (weight 0.5), agent 1 stands (weight 0 at floor 0.0 --
+    the free yield state), agent 2 is far from any wall.
+    """
+    n = 3
+    positions = np.array([[2.0, 2.0], [4.0, 4.0], [6.0, 6.0]], dtype=np.float32)
+    velocities = np.array([[0.0, -1.0], [0.0, 0.0], [0.0, -2.0]], dtype=np.float32)
+    goal_positions = np.array([[100.0, 0.0]] * n, dtype=np.float32)
+    active_mask = np.ones(n, dtype=np.bool_)
+    collision_mask = np.zeros(n, dtype=np.bool_)
+    prev_goal_distances = np.linalg.norm(goal_positions - positions, axis=1).astype(np.float32)
+    agent_radii = np.full(n, 0.22, dtype=np.float32)
+    wall_distances = np.array([0.275, 0.275, 5.0], dtype=np.float32)
+    wall_directions = np.array([[0.0, -1.0]] * n, dtype=np.float32)
+
+    config = _wall_shaping_config(
+        n,
+        use_graded_wall_proximity=True,
+        wall_proximity_penalty_near=-0.2,
+        wall_proximity_penalty_far=0.0,
+        use_velocity_weighted_wall_proximity=True,
+        wall_proximity_speed_floor=0.0,
+        wall_proximity_speed_scale=0.5,
+    )
+
+    def t(x):
+        return torch.tensor(x).unsqueeze(0)
+
+    rewards, _reached, _dists, comps = compute_rewards(
+        t(positions),
+        t(velocities),
+        t(goal_positions),
+        t(active_mask),
+        t(collision_mask),
+        t(prev_goal_distances),
+        config,
+        wall_distances=t(wall_distances),
+        wall_directions=t(wall_directions),
+        agent_radii=t(agent_radii),
+    )
+    comps = comps[0].numpy()
+    wp = _idx("wall_proximity")
+    npt.assert_allclose(comps[:, wp], np.array([-0.05, 0.0, 0.0]), atol=1e-5)
+    npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)
+
+
+def test_wall_normal_impact_channel():
+    """use_wall_normal_impact: parallel slide pays the floor, head-on the full
+    into-wall impact -- on the wall_collision channel."""
+    n = 2
+    positions = np.array([[2.0, 2.0], [4.0, 4.0]], dtype=np.float32)
+    # Agent 0 slides parallel to its wall at 2 m/s; agent 1 rams head-on at 2 m/s.
+    velocities = np.array([[2.0, 0.0], [0.0, -2.0]], dtype=np.float32)
+    goal_positions = np.array([[100.0, 0.0]] * n, dtype=np.float32)
+    active_mask = np.ones(n, dtype=np.bool_)
+    collision_mask = np.zeros(n, dtype=np.bool_)
+    prev_goal_distances = np.linalg.norm(goal_positions - positions, axis=1).astype(np.float32)
+    wall_collision_mask = np.ones(n, dtype=np.bool_)
+    wall_directions = np.array([[0.0, -1.0]] * n, dtype=np.float32)
+
+    config = _wall_shaping_config(
+        n,
+        wall_collision_penalty=-2.0,
+        use_velocity_weighted_collision=True,
+        collision_speed_floor=0.25,
+        collision_speed_scale=0.5,
+        use_wall_normal_impact=True,
+    )
+
+    def t(x):
+        return torch.tensor(x).unsqueeze(0)
+
+    rewards, _reached, _dists, comps = compute_rewards(
+        t(positions),
+        t(velocities),
+        t(goal_positions),
+        t(active_mask),
+        t(collision_mask),
+        t(prev_goal_distances),
+        config,
+        wall_collision_mask=t(wall_collision_mask),
+        wall_directions=t(wall_directions),
+    )
+    comps = comps[0].numpy()
+    wc = _idx("wall_collision")
+    # Parallel: impact 0 -> -2 * 0.25 = -0.5. Head-on: impact 2 -> -2 * 1.25 = -2.5.
+    npt.assert_allclose(comps[:, wc], np.array([-0.5, -2.5]), atol=1e-5)
+    npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)

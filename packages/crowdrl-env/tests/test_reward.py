@@ -704,3 +704,204 @@ class TestVelocityWeightedCollision:
         assert np.all(np.isfinite(rewards))
         # capped: -2 * (0.1 + 0.5*10) = -10.2
         assert rewards[0] == pytest.approx(-10.2)
+
+
+class TestGradedWallProximity:
+    """Graded ramp + closing-speed weighting of the wall-proximity band.
+
+    One agent, radius 0.22, threshold 1.5 -> band [0.22, 0.33]. The nearest
+    wall sits BELOW the agent, so ``wall_directions`` = (0, -1) and a velocity
+    of (0, -v) approaches it at v m/s.
+    """
+
+    _RADII = np.array([0.22])
+    _DOWN = np.array([[0.0, -1.0]])
+
+    def _wall(self, cfg, wall_distance, velocity, wall_directions=None, collision_velocities=None):
+        rewards, _ = compute_rewards(
+            np.array([[0.0, 0.0]]),
+            np.array([velocity]),
+            np.zeros(1),
+            np.array([[100.0, 0.0]]),  # far goal -> no bonus
+            np.ones(1) * 1.34,
+            np.ones(1, dtype=np.bool_),
+            np.zeros(1, dtype=np.bool_),  # no agent collision
+            _make_state(1),
+            cfg,
+            dt=0.01,
+            wall_distances=np.array([wall_distance]),
+            wall_directions=wall_directions,
+            agent_radii=self._RADII,
+            collision_velocities=collision_velocities,
+        )
+        return rewards[0]
+
+    def test_flags_off_reproduce_flat_band(self):
+        # near/far set to sentinel garbage: with the flag OFF they must be inert
+        # and the flat band must apply byte-for-byte.
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            wall_proximity_penalty=-0.1,
+            wall_proximity_penalty_near=-9.9,
+            wall_proximity_penalty_far=-9.9,
+        )
+        assert self._wall(cfg, 0.25, [0.0, -2.0]) == pytest.approx(-0.1)
+        assert self._wall(cfg, 0.5, [0.0, -2.0]) == pytest.approx(0.0)
+
+    def test_graded_ramp_values(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=0.0,
+        )
+        v = [0.0, 0.0]
+        # At body contact (d == radius): full near penalty.
+        assert self._wall(cfg, 0.22, v) == pytest.approx(-0.2)
+        # Mid-band: mean of near and far.
+        assert self._wall(cfg, 0.275, v) == pytest.approx(-0.1)
+        # Near the outer edge: ramp approaches far (0.0) -> continuous onset.
+        assert self._wall(cfg, 0.329, v) == pytest.approx(-0.2 * (1 - 0.109 / 0.11))
+        # Outside the band: nothing.
+        assert self._wall(cfg, 0.34, v) == pytest.approx(0.0)
+        # Below radius (transient penetration): clamps to near.
+        assert self._wall(cfg, 0.1, v) == pytest.approx(-0.2)
+
+    def test_closing_speed_weighting_floor_zero(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=0.0,
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.0,
+            wall_proximity_speed_scale=0.5,
+        )
+        # Approaching at 1 m/s, mid-band: -0.1 * (0 + 0.5*1) = -0.05
+        assert self._wall(cfg, 0.275, [0.0, -1.0], self._DOWN) == pytest.approx(-0.05)
+        # Standing beside the wall: FREE (this is the yield state).
+        assert self._wall(cfg, 0.275, [0.0, 0.0], self._DOWN) == pytest.approx(0.0)
+        # Moving parallel to the wall: zero closing -> free.
+        assert self._wall(cfg, 0.275, [2.0, 0.0], self._DOWN) == pytest.approx(0.0)
+        # Receding: negative closing clamps the weight to 0 -> free.
+        assert self._wall(cfg, 0.275, [0.0, 2.0], self._DOWN) == pytest.approx(0.0)
+
+    def test_floor_charges_at_zero_closing(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=0.0,
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.25,
+            wall_proximity_speed_scale=0.5,
+        )
+        # Standing mid-band with a non-zero floor: -0.1 * 0.25
+        assert self._wall(cfg, 0.275, [0.0, 0.0], self._DOWN) == pytest.approx(-0.025)
+
+    def test_weighting_skipped_without_directions(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=0.0,
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.0,
+            wall_proximity_speed_scale=0.5,
+        )
+        # No wall_directions -> unweighted ramp, even at speed.
+        assert self._wall(cfg, 0.275, [0.0, -2.0], None) == pytest.approx(-0.1)
+
+    def test_flat_band_composes_with_weighting(self):
+        # The two flags are orthogonal: weighting also applies to the flat band.
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            wall_proximity_penalty=-0.1,
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.0,
+            wall_proximity_speed_scale=0.5,
+        )
+        assert self._wall(cfg, 0.25, [0.0, -1.0], self._DOWN) == pytest.approx(-0.05)
+        assert self._wall(cfg, 0.25, [0.0, 0.0], self._DOWN) == pytest.approx(0.0)
+
+    def test_weighting_uses_precontact_snapshot(self):
+        cfg = _collision_only_config(
+            collision_penalty=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=0.0,
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.0,
+            wall_proximity_speed_scale=0.5,
+        )
+        # Post-contact velocity says "approaching fast" but the pre-contact
+        # snapshot says "standing": the snapshot must win -> free.
+        r = self._wall(
+            cfg,
+            0.275,
+            [0.0, -2.0],
+            self._DOWN,
+            collision_velocities=np.zeros((1, 2)),
+        )
+        assert r == pytest.approx(0.0)
+
+
+class TestWallNormalImpact:
+    """Wall-contact impact speed = into-wall velocity component (opt-in)."""
+
+    _DOWN = np.array([[0.0, -1.0]])
+
+    def _contact(self, cfg, velocity, wall_directions=None):
+        rewards, _ = compute_rewards(
+            np.array([[0.0, 0.0]]),
+            np.array([velocity]),
+            np.zeros(1),
+            np.array([[100.0, 0.0]]),
+            np.ones(1) * 1.34,
+            np.ones(1, dtype=np.bool_),
+            np.zeros(1, dtype=np.bool_),
+            _make_state(1),
+            cfg,
+            dt=0.01,
+            wall_collision_mask=np.ones(1, dtype=np.bool_),
+            wall_directions=wall_directions,
+        )
+        return rewards[0]
+
+    def _cfg(self, **overrides):
+        base = dict(
+            collision_penalty=0.0,
+            wall_collision_penalty=-2.0,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.25,
+            collision_speed_scale=0.5,
+            use_wall_normal_impact=True,
+        )
+        base.update(overrides)
+        return _collision_only_config(**base)
+
+    def test_head_on_pays_full_impact(self):
+        # Into-wall component 2 m/s -> -2 * (0.25 + 0.5*2) = -2.5
+        assert self._contact(self._cfg(), [0.0, -2.0], self._DOWN) == pytest.approx(-2.5)
+
+    def test_sliding_parallel_pays_only_floor(self):
+        # Parallel slide at 2 m/s: zero into-wall component -> -2 * 0.25 = -0.5
+        assert self._contact(self._cfg(), [2.0, 0.0], self._DOWN) == pytest.approx(-0.5)
+
+    def test_diagonal_pays_normal_component(self):
+        # 45 deg into the wall at |v| = 2: component sqrt(2)
+        expected = -2.0 * (0.25 + 0.5 * np.sqrt(2.0))
+        r = self._contact(self._cfg(), [np.sqrt(2.0), -np.sqrt(2.0)], self._DOWN)
+        assert r == pytest.approx(expected)
+
+    def test_receding_component_clamps_to_floor(self):
+        # Moving away from the wall while still flagged: impact clamps to 0.
+        assert self._contact(self._cfg(), [0.0, 2.0], self._DOWN) == pytest.approx(-0.5)
+
+    def test_flag_off_uses_full_speed(self):
+        # Legacy weighting: sliding parallel at 2 m/s costs the same as head-on.
+        cfg = self._cfg(use_wall_normal_impact=False)
+        assert self._contact(cfg, [2.0, 0.0], self._DOWN) == pytest.approx(-2.5)
+
+    def test_falls_back_to_full_speed_without_directions(self):
+        assert self._contact(self._cfg(), [2.0, 0.0], None) == pytest.approx(-2.5)
