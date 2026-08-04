@@ -905,3 +905,34 @@ class TestWallNormalImpact:
 
     def test_falls_back_to_full_speed_without_directions(self):
         assert self._contact(self._cfg(), [2.0, 0.0], None) == pytest.approx(-2.5)
+
+
+class TestWallCollisionPenaltyCap:
+    """Wall-side twin of collision_penalty_cap: weighting may DISCOUNT slow
+    contact but never AMPLIFY fast contact below the cap. Same harness as
+    TestWallNormalImpact (base -2.0, floor 0.25, scale 0.5, wall below)."""
+
+    _DOWN = TestWallNormalImpact._DOWN
+    _contact = TestWallNormalImpact._contact
+    _cfg = TestWallNormalImpact._cfg
+
+    def test_cap_clamps_amplified_head_on(self):
+        # Head-on 2 m/s: uncapped -2.0 * (0.25 + 1.0) = -2.5 -> clamped to -2.0.
+        cfg = self._cfg(wall_collision_penalty_cap=-2.0)
+        assert self._contact(cfg, [0.0, -2.0], self._DOWN) == pytest.approx(-2.0)
+
+    def test_cap_leaves_discounted_contact_alone(self):
+        # Parallel slide pays the floor (-0.5), far above the cap -> untouched.
+        cfg = self._cfg(wall_collision_penalty_cap=-2.0)
+        assert self._contact(cfg, [2.0, 0.0], self._DOWN) == pytest.approx(-0.5)
+
+    def test_cap_off_preserves_amplification(self):
+        # cap 0.0 (the default) -> legacy behaviour, amplified -2.5 stands.
+        cfg = self._cfg(wall_collision_penalty_cap=0.0)
+        assert self._contact(cfg, [0.0, -2.0], self._DOWN) == pytest.approx(-2.5)
+
+    def test_cap_applies_to_full_speed_weighting_too(self):
+        # Independent of use_wall_normal_impact: full-||v|| weighting is capped
+        # the same way (parallel slide at 2 m/s -> -2.5 uncapped -> -2.0).
+        cfg = self._cfg(use_wall_normal_impact=False, wall_collision_penalty_cap=-2.0)
+        assert self._contact(cfg, [2.0, 0.0], self._DOWN) == pytest.approx(-2.0)

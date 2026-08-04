@@ -372,3 +372,48 @@ def test_wall_normal_impact_channel():
     # Parallel: impact 0 -> -2 * 0.25 = -0.5. Head-on: impact 2 -> -2 * 1.25 = -2.5.
     npt.assert_allclose(comps[:, wc], np.array([-0.5, -2.5]), atol=1e-5)
     npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)
+
+
+def test_wall_collision_penalty_cap_channel():
+    """wall_collision_penalty_cap floors the wall_collision channel: the
+    amplified head-on (-2.5) clamps to -2.0, the discounted parallel slide
+    (-0.5) is untouched, and non-contact zeros stay zero."""
+    n = 3
+    positions = np.array([[2.0, 2.0], [4.0, 4.0], [6.0, 6.0]], dtype=np.float32)
+    # Agent 0 slides parallel, agent 1 rams head-on, agent 2 not in contact.
+    velocities = np.array([[2.0, 0.0], [0.0, -2.0], [0.0, -2.0]], dtype=np.float32)
+    goal_positions = np.array([[100.0, 0.0]] * n, dtype=np.float32)
+    active_mask = np.ones(n, dtype=np.bool_)
+    collision_mask = np.zeros(n, dtype=np.bool_)
+    prev_goal_distances = np.linalg.norm(goal_positions - positions, axis=1).astype(np.float32)
+    wall_collision_mask = np.array([True, True, False], dtype=np.bool_)
+    wall_directions = np.array([[0.0, -1.0]] * n, dtype=np.float32)
+
+    config = _wall_shaping_config(
+        n,
+        wall_collision_penalty=-2.0,
+        use_velocity_weighted_collision=True,
+        collision_speed_floor=0.25,
+        collision_speed_scale=0.5,
+        use_wall_normal_impact=True,
+        wall_collision_penalty_cap=-2.0,
+    )
+
+    def t(x):
+        return torch.tensor(x).unsqueeze(0)
+
+    rewards, _reached, _dists, comps = compute_rewards(
+        t(positions),
+        t(velocities),
+        t(goal_positions),
+        t(active_mask),
+        t(collision_mask),
+        t(prev_goal_distances),
+        config,
+        wall_collision_mask=t(wall_collision_mask),
+        wall_directions=t(wall_directions),
+    )
+    comps = comps[0].numpy()
+    wc = _idx("wall_collision")
+    npt.assert_allclose(comps[:, wc], np.array([-0.5, -2.0, 0.0]), atol=1e-5)
+    npt.assert_allclose(comps.sum(axis=-1), rewards[0].numpy(), atol=1e-4, rtol=1e-4)

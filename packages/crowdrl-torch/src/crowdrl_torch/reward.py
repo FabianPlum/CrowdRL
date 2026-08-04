@@ -305,6 +305,13 @@ def compute_rewards(
                 torch.full_like(rewards, config.wall_collision_penalty),
                 zero,
             )
+        # Cap the per-step wall-contact penalty at a floor: the weighting may
+        # DISCOUNT slow contact but not AMPLIFY fast contact below the cap
+        # (wall-side twin of collision_penalty_cap; mirrors crowdrl_env.reward).
+        # cap=0.0 disables. Static branch -> torch.compile-safe; non-contact
+        # zeros are above any negative cap, so the clamp leaves them untouched.
+        if config.wall_collision_penalty_cap < 0.0:
+            comp_wall_collision = comp_wall_collision.clamp(min=config.wall_collision_penalty_cap)
         rewards = rewards + comp_wall_collision
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).

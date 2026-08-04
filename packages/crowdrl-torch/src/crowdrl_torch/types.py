@@ -238,6 +238,12 @@ class EnvConfig(NamedTuple):
     wall_proximity_speed_floor: float = 0.25
     wall_proximity_speed_scale: float = 0.5
     use_wall_normal_impact: bool = False
+    # Per-step floor on the WALL contact penalty (0.0 = off) -- the wall-side
+    # twin of collision_penalty_cap: weighting may discount slow contact but
+    # never amplify fast contact below this floor (crowd shoves an agent into
+    # a wall -> it should not be charged unboundedly for contact it does not
+    # control). See crowdrl_env.reward.RewardConfig for the full rationale.
+    wall_collision_penalty_cap: float = 0.0
 
     # Episode
     max_steps: int = 5000
@@ -332,6 +338,7 @@ class EnvConfig(NamedTuple):
             wall_proximity_speed_floor=cfg.reward.wall_proximity_speed_floor,
             wall_proximity_speed_scale=cfg.reward.wall_proximity_speed_scale,
             use_wall_normal_impact=cfg.reward.use_wall_normal_impact,
+            wall_collision_penalty_cap=cfg.reward.wall_collision_penalty_cap,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
             use_goal_direction=cfg.obs.use_goal_direction,

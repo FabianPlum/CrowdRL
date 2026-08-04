@@ -136,6 +136,17 @@ class RewardConfig:
     dense pileups WORSE (coll_ag -> -1086, gridlock); capping at the base
     collision_penalty turns the weighting into discount-only."""
 
+    wall_collision_penalty_cap: float = 0.0
+    """Per-step floor (NEGATIVE; 0.0 disables) on the WALL contact penalty --
+    the wall-side twin of ``collision_penalty_cap``. Without it the weighted
+    wall term is amplified above its base at speed (e.g. -2.0 base at 2 m/s ->
+    -2.5/step), and in dense pileups the crowd can SHOVE an agent into a wall,
+    charging it heavily for contact it does not control -- the same
+    amplification pathology the agent-side cap was introduced to fix
+    (wallshape run: wall_c -21..-39/episode, late-run destabilisation).
+    Capping at the base turns the weighting into discount-only: parallel
+    slides and slow drift stay cheap, ramming saturates at the base price."""
+
     # Velocity weighting for the agent-PROXIMITY penalty (optional, default OFF).
     # The distance-only proximity ramp penalises an agent for merely BEING near a
     # neighbour, so in a crowd the cheapest policy is to stop at the edge and not
@@ -460,9 +471,16 @@ def compute_rewards(
             wall_scale = np.maximum(
                 config.collision_speed_floor + config.collision_speed_scale * impact, 0.0
             )
-            rewards[wall_active] += config.wall_collision_penalty * wall_scale[wall_active]
+            wall_contact_pen = config.wall_collision_penalty * wall_scale[wall_active]
         else:
-            rewards[wall_active] += config.wall_collision_penalty
+            wall_contact_pen = config.wall_collision_penalty
+        # Cap the per-step wall-contact penalty at a floor: the weighting may
+        # DISCOUNT slow contact but not AMPLIFY fast contact below the cap
+        # (wall-side twin of collision_penalty_cap; mirrors crowdrl_torch).
+        # cap=0.0 disables.
+        if config.wall_collision_penalty_cap < 0.0:
+            wall_contact_pen = np.maximum(wall_contact_pen, config.wall_collision_penalty_cap)
+        rewards[wall_active] += wall_contact_pen
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).
     # Penalty interpolates between ``near`` (at contact, r_i + r_j) and

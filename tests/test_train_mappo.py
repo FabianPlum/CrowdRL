@@ -120,6 +120,7 @@ class TestBuildEnvConfigWallShaping:
             "wall_proximity_speed_floor": 0.0,
             "wall_proximity_speed_scale": 0.7,
             "use_wall_normal_impact": True,
+            "wall_collision_penalty_cap": -1.5,
         }
     }
 
@@ -132,6 +133,7 @@ class TestBuildEnvConfigWallShaping:
         assert r.wall_proximity_speed_floor == 0.0
         assert r.wall_proximity_speed_scale == 0.7
         assert r.use_wall_normal_impact is True
+        assert r.wall_collision_penalty_cap == -1.5
 
     def test_yaml_reaches_torch_env_config(self):
         from crowdrl_torch.types import EnvConfig
@@ -146,6 +148,7 @@ class TestBuildEnvConfigWallShaping:
         assert tc.wall_proximity_speed_floor == 0.0
         assert tc.wall_proximity_speed_scale == 0.7
         assert tc.use_wall_normal_impact is True
+        assert tc.wall_collision_penalty_cap == -1.5
 
     def test_defaults_when_absent_preserve_legacy_behaviour(self):
         from crowdrl_torch.types import EnvConfig
@@ -205,6 +208,7 @@ class TestCfgDictRoundTrip:
             "wall_proximity_speed_floor": 0.0,
             "wall_proximity_speed_scale": 0.7,
             "use_wall_normal_impact": True,
+            "wall_collision_penalty_cap": -2.0,
         },
         "episode": {"stuck_termination_enabled": False},
         "spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25},

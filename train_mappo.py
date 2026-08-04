@@ -223,6 +223,7 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             wall_proximity_speed_floor=rew.get("wall_proximity_speed_floor", 0.25),
             wall_proximity_speed_scale=rew.get("wall_proximity_speed_scale", 0.5),
             use_wall_normal_impact=rew.get("use_wall_normal_impact", False),
+            wall_collision_penalty_cap=rew.get("wall_collision_penalty_cap", 0.0),
         ),
         max_steps=cfg.get("max_steps", 2000),
         # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this
@@ -343,6 +344,7 @@ def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
             "wall_proximity_speed_floor": r.wall_proximity_speed_floor,
             "wall_proximity_speed_scale": r.wall_proximity_speed_scale,
             "use_wall_normal_impact": r.use_wall_normal_impact,
+            "wall_collision_penalty_cap": r.wall_collision_penalty_cap,
         },
         "episode": {
             "stuck_termination_enabled": env_config.stuck_termination_enabled,

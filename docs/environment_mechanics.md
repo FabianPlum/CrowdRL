@@ -746,10 +746,16 @@ if enforce_wall_boundaries() reported hard wall contact for the agent:
   component INTO the wall instead (clamped >= 0, using the nearest-wall
   direction), so a parallel slide pays only the floor while a head-on pays in
   full. The shipped r0125 run uses -0.5 with the full-speed weighting.
-- **`collision_penalty_cap` does not apply here.** The cap bounds only the agent-agent
-  term. So in r0125 the agent-collision penalty is strictly discount-only (base -2.0,
-  cap -2.0) while this one is uncapped and can be *amplified* above its base -- at 3 m/s,
-  `-0.5 * (0.25 + 0.5*3.0) = -0.875`.
+- **`collision_penalty_cap` does not apply here -- the wall term has its own.**
+  The agent-side cap bounds only the agent-agent term, so in r0125 the
+  agent-collision penalty is strictly discount-only (base -2.0, cap -2.0)
+  while the wall term is amplified above its base at speed -- at 3 m/s,
+  `-0.5 * (0.25 + 0.5*3.0) = -0.875`. `wall_collision_penalty_cap` (default
+  0.0 = off) is the wall-side twin: it floors the per-step wall penalty so
+  the weighting discounts slow contact but never amplifies fast contact. The
+  wallshape run demonstrated why it matters: at base -2.0 uncapped, dense
+  pileups shoving agents into walls charged `wall_c` -21..-39 per episode --
+  penalties the agent does not fully control -- and the run destabilised.
 
 ### B.2 Shaped progress reward
 
@@ -1080,8 +1086,9 @@ stays at the default.
 | `wall_proximity_penalty_near` / `_far` | -0.2 / 0.0 | -0.2 / 0.0 | (predates) | ramp endpoints at body contact / threshold edge |
 | `use_velocity_weighted_wall_proximity` | False | False | (predates) | closing-speed scaling toward the nearest wall |
 | `wall_proximity_speed_floor` / `_scale` | 0.25 / 0.5 | 0.25 / 0.5 | (predates) | floor 0 => waiting beside a wall costs nothing |
-| `wall_collision_penalty` | -1.0 | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables; **not** covered by the cap |
+| `wall_collision_penalty` | -1.0 | -1.0 | -0.5 | hard wall-contact mask; 0.0 disables; **not** covered by the agent cap |
 | `use_wall_normal_impact` | False | False | (predates) | contact impact = into-wall component, not \|\|v\|\| |
+| `wall_collision_penalty_cap` | 0.0 (off) | 0.0 | (predates) | discount-only floor for the wall term (twin of `collision_penalty_cap`) |
 | `existence_penalty` | -0.01 | -0.01 | -0.01 | |
 | `progress_weight` | +1.0 | +1.0 | +2.0 | on navmesh remaining-path length |
 | `use_smoothness` | True | True | False | gates jerk / angular accel (speed deviation is independent since 5ba4282) |

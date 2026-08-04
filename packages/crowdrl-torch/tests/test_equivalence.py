@@ -1147,6 +1147,76 @@ class TestRewardEquivalence:
         # The whole point: torch training reward == numpy reference reward.
         npt.assert_allclose(t_r[0].numpy(), np_r, atol=ATOL, rtol=RTOL)
 
+    def test_wall_collision_cap_parity(self):
+        """wall_collision_penalty_cap floors the per-step wall-contact penalty
+        (weighting discounts but never amplifies). One agent sliding parallel
+        at 2 m/s (floor, -0.5, above the cap -> untouched), one ramming head-on
+        at 2 m/s (uncapped -2.5 -> clamped to -2.0). numpy MUST equal torch --
+        the cap lives in BOTH reward paths (the dual-implementation trap)."""
+        n = 2
+        positions = np.array([[2.0, 2.0], [6.0, 2.0]], dtype=np.float32)
+        velocities = np.array([[2.0, 0.0], [0.0, -2.0]], dtype=np.float32)
+        radii = np.array([0.22, 0.22], dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        no_coll = np.zeros(n, dtype=np.bool_)
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+        wall_mask = np.ones(n, dtype=np.bool_)
+        wall_dirs = np.array([[0.0, -1.0], [0.0, -1.0]], dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=0.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=-2.0,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_velocity_weighted_collision=True,
+            collision_speed_floor=0.25,
+            collision_speed_scale=0.5,
+            use_wall_normal_impact=True,
+            wall_collision_penalty_cap=-2.0,  # the cap under test
+        )
+
+        np_r, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            no_coll,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_collision_mask=wall_mask,
+            wall_directions=wall_dirs.astype(np.float64),
+            agent_radii=radii.astype(np.float64),
+        )
+        cfg = EnvConfig(max_agents=n, **common)
+        t_r, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(no_coll).unsqueeze(0),
+            torch.zeros(1, n),
+            cfg,
+            wall_collision_mask=torch.tensor(wall_mask).unsqueeze(0),
+            wall_directions=torch.tensor(wall_dirs).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+
+        npt.assert_allclose(np_r, [-0.5, -2.0], atol=ATOL)
+        npt.assert_allclose(t_r[0].numpy(), np_r, atol=ATOL, rtol=RTOL)
+
 
 class TestTemporalMemoryEquivalence:
     """Numpy and torch temporal-memory features should match numerically."""
