@@ -73,7 +73,7 @@ from crowdrl_core.geometry import extract_wall_segments
 from crowdrl_core.observation import ObsConfig, build_observations_batch
 from crowdrl_core.world_state import WorldState
 
-from .model import CrowdRLAgentState, CustomOperationalModel
+from .model import DEFAULT_CHEST_DEPTH, CrowdRLAgentState, CustomOperationalModel
 from .policy import Policy, resolve_configs, resolve_dynamics
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -166,7 +166,7 @@ class _Row:
         self.torso = float(getattr(state, "torso_angle", 0.0))
         self.head = float(getattr(state, "head_angle", 0.0))
         self.shoulder = float(getattr(state, "shoulder_width", 0.225))
-        self.chest = float(getattr(state, "chest_depth", 0.15))
+        self.chest = float(getattr(state, "chest_depth", DEFAULT_CHEST_DEPTH))
         self.mass = float(getattr(state, "mass", 80.0))
         self.preferred_speed = float(getattr(state, "preferred_speed", 1.34))
         self.goal = np.asarray(goal, dtype=np.float64)
