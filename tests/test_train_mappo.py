@@ -104,6 +104,61 @@ class TestBuildEnvConfigSpawn:
         assert phase_cfg.spawn.n_agents_range == (5, 10)
 
 
+class TestBuildEnvConfigWallShaping:
+    """The wall-shaping reward keys must propagate YAML -> RewardConfig ->
+    torch EnvConfig. Two historically-skipped layers: a key missing from
+    ``build_env_config``'s .get() allowlist is silently inert, and a field
+    missing from ``EnvConfig.from_crowd_env_config`` resolves in the numpy
+    config but never reaches training."""
+
+    _YAML = {
+        "reward": {
+            "use_graded_wall_proximity": True,
+            "wall_proximity_penalty_near": -0.3,
+            "wall_proximity_penalty_far": -0.01,
+            "use_velocity_weighted_wall_proximity": True,
+            "wall_proximity_speed_floor": 0.0,
+            "wall_proximity_speed_scale": 0.7,
+            "use_wall_normal_impact": True,
+            "wall_collision_penalty_cap": -1.5,
+        }
+    }
+
+    def test_yaml_reaches_reward_config(self):
+        r = build_env_config(self._YAML).reward
+        assert r.use_graded_wall_proximity is True
+        assert r.wall_proximity_penalty_near == -0.3
+        assert r.wall_proximity_penalty_far == -0.01
+        assert r.use_velocity_weighted_wall_proximity is True
+        assert r.wall_proximity_speed_floor == 0.0
+        assert r.wall_proximity_speed_scale == 0.7
+        assert r.use_wall_normal_impact is True
+        assert r.wall_collision_penalty_cap == -1.5
+
+    def test_yaml_reaches_torch_env_config(self):
+        from crowdrl_torch.types import EnvConfig
+
+        tc = EnvConfig.from_crowd_env_config(
+            build_env_config(self._YAML), max_agents=8, max_segments=64
+        )
+        assert tc.use_graded_wall_proximity is True
+        assert tc.wall_proximity_penalty_near == -0.3
+        assert tc.wall_proximity_penalty_far == -0.01
+        assert tc.use_velocity_weighted_wall_proximity is True
+        assert tc.wall_proximity_speed_floor == 0.0
+        assert tc.wall_proximity_speed_scale == 0.7
+        assert tc.use_wall_normal_impact is True
+        assert tc.wall_collision_penalty_cap == -1.5
+
+    def test_defaults_when_absent_preserve_legacy_behaviour(self):
+        from crowdrl_torch.types import EnvConfig
+
+        tc = EnvConfig.from_crowd_env_config(build_env_config({}), max_agents=8, max_segments=64)
+        assert tc.use_graded_wall_proximity is False
+        assert tc.use_velocity_weighted_wall_proximity is False
+        assert tc.use_wall_normal_impact is False
+
+
 class TestCfgDictRoundTrip:
     """``cfg_dict_from_env_config`` is the exact inverse of ``build_env_config``.
 
@@ -146,6 +201,14 @@ class TestCfgDictRoundTrip:
             "use_velocity_weighted_collision": True,
             "collision_penalty_cap": -2.0,
             "use_velocity_weighted_proximity": True,
+            "use_graded_wall_proximity": True,
+            "wall_proximity_penalty_near": -0.3,
+            "wall_proximity_penalty_far": -0.01,
+            "use_velocity_weighted_wall_proximity": True,
+            "wall_proximity_speed_floor": 0.0,
+            "wall_proximity_speed_scale": 0.7,
+            "use_wall_normal_impact": True,
+            "wall_collision_penalty_cap": -2.0,
         },
         "episode": {"stuck_termination_enabled": False},
         "spawn": {"preferred_speed_mean": 1.0, "preferred_speed_std": 0.25},
@@ -501,3 +564,62 @@ class TestScorecardCommand:
         ):
             assert flag in cmd
             assert cmd[cmd.index(flag) + 1] == val
+
+
+class TestExportPolicyOnnx:
+    """The single place that decides which dynamics travel with a policy.
+
+    Both export sites (per-checkpoint companion and end-of-run policy.onnx)
+    call export_policy_onnx, so this pins the metadata contract once. The
+    dynamics-key assertion is the load-bearing one: a field added to
+    DYNAMICS_FIELDS but not to the exporter would ship policies that silently
+    fall back to a default for it on the deployment side.
+    """
+
+    def _capture(self, monkeypatch, **provenance):
+        import train_mappo
+
+        captured = {}
+        monkeypatch.setattr(
+            train_mappo, "export_onnx", lambda *a, **kw: captured.update(kw) or captured
+        )
+        monkeypatch.setattr(train_mappo, "_git_rev", lambda: "deadbee")
+        env_config = build_env_config({})
+        train_mappo.export_policy_onnx(
+            object(),
+            object(),
+            Path("policy.onnx"),
+            env_config,
+            Path("results_myrun"),
+            **provenance,
+        )
+        return captured, env_config
+
+    def test_dynamics_block_covers_the_whole_schema(self, monkeypatch):
+        from crowdrl_core.config_io import DYNAMICS_FIELDS
+
+        captured, env_config = self._capture(monkeypatch)
+        assert set(captured["dynamics"]) == set(DYNAMICS_FIELDS)
+        for field, value in captured["dynamics"].items():
+            assert value == getattr(env_config, field)
+
+    def test_base_provenance_and_configs(self, monkeypatch):
+        captured, env_config = self._capture(monkeypatch)
+        assert captured["provenance"] == {
+            "run": "results_myrun",
+            "git_rev": "deadbee",
+            "source": "train_mappo",
+        }
+        assert captured["obs_config"] is env_config.obs
+        assert captured["action_config"] is env_config.action
+
+    def test_checkpoint_provenance_merges(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch, checkpoint="checkpoint_rollout_0200.pt", rollout=200, episode=1234
+        )
+        assert captured["provenance"]["checkpoint"] == "checkpoint_rollout_0200.pt"
+        assert captured["provenance"]["rollout"] == 200
+        assert captured["provenance"]["episode"] == 1234
+        # The base block still travels alongside the per-checkpoint additions.
+        assert captured["provenance"]["run"] == "results_myrun"
+        assert captured["provenance"]["source"] == "train_mappo"

@@ -106,6 +106,7 @@ def compute_rewards(
     current_distances: Tensor | None = None,
     wall_distances: Tensor | None = None,
     wall_collision_mask: Tensor | None = None,
+    wall_directions: Tensor | None = None,
     agent_radii: Tensor | None = None,
     collision_velocities: Tensor | None = None,
     actions: Tensor | None = None,
@@ -136,6 +137,11 @@ def compute_rewards(
     wall_distances : (E, N) optional -- min distance to nearest wall per agent
     wall_collision_mask : (E, N) bool optional -- True where the boundary
         enforcement corrected the agent this step (hard wall-contact signal)
+    wall_directions : (E, N, 2) optional -- unit vector agent -> nearest wall
+        point (``compute_min_wall_distances_and_directions``). Needed by
+        ``use_velocity_weighted_wall_proximity`` (closing speed toward the
+        wall) and ``use_wall_normal_impact`` (into-wall impact component);
+        both fall back to their legacy behaviour when this is None.
     agent_radii : (E, N) optional -- agent body radii (used for the graded
         agent-proximity penalty: per-pair contact distance = r_i + r_j)
     collision_velocities : (E, N, 2) optional -- pre-contact velocities for the
@@ -229,20 +235,43 @@ def compute_rewards(
         comp_collision = comp_collision.clamp(min=config.collision_penalty_cap)
     rewards = rewards + comp_collision
 
-    # Wall proximity penalty (smooth, distance-based)
+    # Wall proximity penalty. Legacy mode is a FLAT band -- a step, not a
+    # gradient: constant penalty anywhere inside threshold*radius. Opt-in
+    # graded mode mirrors the agent-proximity ramp (near at body contact ->
+    # far at the threshold edge); opt-in closing-speed weighting taxes
+    # APPROACHING the wall rather than being near it, so yielding beside a
+    # wall can be free. Mirrors crowdrl_env.reward -- keep in lockstep
+    # (test_equivalence guards this).
     comp_wall = zero
-    if (
-        config.wall_proximity_penalty != 0.0
-        and wall_distances is not None
-        and agent_radii is not None
-    ):
-        threshold = agent_radii * config.wall_proximity_threshold
-        wall_proximity = (wall_distances < threshold) & active_mask
-        comp_wall = torch.where(
-            wall_proximity,
-            torch.full_like(rewards, config.wall_proximity_penalty),
-            zero,
+    if config.use_graded_wall_proximity:
+        wall_prox_on = (
+            config.wall_proximity_penalty_near != 0.0 or config.wall_proximity_penalty_far != 0.0
         )
+    else:
+        wall_prox_on = config.wall_proximity_penalty != 0.0
+    if wall_prox_on and wall_distances is not None and agent_radii is not None:
+        threshold = agent_radii * config.wall_proximity_threshold
+        in_band = (wall_distances < threshold) & active_mask
+        if config.use_graded_wall_proximity:
+            # Linear ramp: ``near`` at wall_distance == radius, ``far`` at the
+            # threshold. Below-radius distances clamp to ``near``.
+            denom = torch.clamp(threshold - agent_radii, min=1e-6)
+            t = torch.clamp((wall_distances - agent_radii) / denom, 0.0, 1.0)
+            wall_pen = (1.0 - t) * config.wall_proximity_penalty_near + (
+                t * config.wall_proximity_penalty_far
+            )
+        else:
+            wall_pen = torch.full_like(rewards, config.wall_proximity_penalty)
+        if config.use_velocity_weighted_wall_proximity and wall_directions is not None:
+            vel = collision_velocities if collision_velocities is not None else velocities
+            closing = (
+                (vel * wall_directions).sum(dim=-1).clamp(max=max_impact_speed)
+            )  # (E, N), >0 when approaching the nearest wall (capped)
+            speed_w = (
+                config.wall_proximity_speed_floor + config.wall_proximity_speed_scale * closing
+            ).clamp(min=0.0)
+            wall_pen = wall_pen * speed_w
+        comp_wall = torch.where(in_band, wall_pen, zero)
         rewards = rewards + comp_wall
 
     # Wall contact penalty (hard, per-step while the boundary pushes the agent
@@ -252,11 +281,20 @@ def compute_rewards(
     if config.wall_collision_penalty != 0.0 and wall_collision_mask is not None:
         wall_active = wall_collision_mask & active_mask
         if config.use_velocity_weighted_collision:
-            # Wall is static, so impact speed = the agent's own (pre-contact) speed.
             vel = collision_velocities if collision_velocities is not None else velocities
-            own_speed = (vel**2).sum(dim=-1).sqrt().clamp(max=max_impact_speed)  # (E,N) capped
+            if config.use_wall_normal_impact and wall_directions is not None:
+                # Impact speed = the (pre-contact) velocity component INTO the
+                # wall, clamped >= 0, so sliding parallel to the wall is cheap
+                # while slamming into it head-on is not.
+                impact = (vel * wall_directions).sum(dim=-1).clamp(min=0.0, max=max_impact_speed)
+            else:
+                # No wall normal in use: weight by the agent's own FULL
+                # (pre-contact) speed -- ramming at speed costs more than
+                # drifting, but sliding parallel costs exactly as much as a
+                # head-on at the same speed.
+                impact = (vel**2).sum(dim=-1).sqrt().clamp(max=max_impact_speed)  # (E,N) capped
             wall_scale = (
-                config.collision_speed_floor + config.collision_speed_scale * own_speed
+                config.collision_speed_floor + config.collision_speed_scale * impact
             ).clamp(min=0.0)
             comp_wall_collision = torch.where(
                 wall_active, config.wall_collision_penalty * wall_scale, zero
@@ -267,6 +305,13 @@ def compute_rewards(
                 torch.full_like(rewards, config.wall_collision_penalty),
                 zero,
             )
+        # Cap the per-step wall-contact penalty at a floor: the weighting may
+        # DISCOUNT slow contact but not AMPLIFY fast contact below the cap
+        # (wall-side twin of collision_penalty_cap; mirrors crowdrl_env.reward).
+        # cap=0.0 disables. Static branch -> torch.compile-safe; non-contact
+        # zeros are above any negative cap, so the clamp leaves them untouched.
+        if config.wall_collision_penalty_cap < 0.0:
+            comp_wall_collision = comp_wall_collision.clamp(min=config.wall_collision_penalty_cap)
         rewards = rewards + comp_wall_collision
 
     # Agent proximity penalty (graded linear ramp, min over neighbours).

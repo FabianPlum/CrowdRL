@@ -1911,3 +1911,80 @@ and plus the `inverse_distance_weight` dead-knob item. The behavioural target --
 100-agent composed regime, where the policy trades goal completion for collision avoidance
 -- is untouched by this entry and remains the thing that unblocks M4.
 
+
+## 2026-08-07 -- Wall reward shaping: the terms land, the experiment does not conclude
+
+Branch `feat/wall-reward-shaping`. Full detail, including the experiment record and the
+footguns, is in `plan/handover_2026-08-07.md`; this entry is the summary that stays here.
+
+### Headline
+
+The wall-reward reshape is implemented in both engines, tested, and merge-ready --
+**and it is not yet validated as an improvement.** The two claims are independent. The
+code is behaviour-neutral by construction (every term default-off; flags off reproduce
+the previous arithmetic term for term), which is what makes it safe to merge before the
+experiment concludes. `example_model/policy_r0125.onnx` remains the shipped artefact.
+
+### What landed
+
+Seven opt-in reward flags plus `wall_collision_penalty_cap`, addressing the diagnosis in
+`docs/environment_mechanics.md` B.1 -- that wall-ramming was **reward-optimal rather than
+a perception failure**. The flat proximity band gave no braking gradient, waiting beside
+a wall was taxed while approaching one was free, and contact scaled with full speed so a
+parallel slide cost as much as a head-on. The reshape supplies a graded ramp, closing-speed
+weighting (yielding beside a wall becomes free at floor 0.0), wall-normal impact weighting,
+and a cap that makes the wall-contact weighting discount-only -- the wall-side twin of
+`collision_penalty_cap`.
+
+Supporting: nearest-wall *directions* alongside distances in `crowdrl-core` and
+`crowdrl-torch`, materialised only when a flag consumes them; an eval fix counting wall
+contact at exactly one body radius (the one non-flagged behaviour change, eval-only, and
+it roughly quadruples the measured rate); a companion ONNX at every checkpoint save; and
+`export_policy_onnx()` as the single site deciding which dynamics travel with a policy.
+
+Suite 729 -> 774 without a JuPedSim build, ruff clean.
+
+### What the experiment actually showed -- and the conclusion it reversed
+
+Three arms ran on 2026-08-04 from one common ancestor, one variable group apart. The
+belief on the day was that the `wallshape` arm had cut wall contact 15-20% against the
+control. **That comparison was invalid and its sign is wrong.** It put post-fix
+`wallshape` numbers against pre-fix control numbers -- across the very boundary the eval
+fix in this branch created, in the direction that flatters the new arm, since the control
+was being under-measured ~4x.
+
+Re-running all 18 control checkpoints post-fix at the matched 1500-step budget (done
+2026-08-07) gives, over r0050-r0950, control vs `wallshape`:
+
+| | control | wallshape | sign-test p |
+|---|---|---|---|
+| goal rate | 0.802 | 0.806 | 0.48 (indistinguishable, below the 0.055 noise floor) |
+| **wall contact rate** | **0.0107** | **0.0147 (+38%)** | **0.031** |
+| **high-density goal** | **0.752** | **0.690 (-0.062)** | **0.0013** |
+| **`corridor_t1` seed 0** | **0.36** | **0.73** | **0.0034** |
+
+So the reshape **fails its own headline claim** -- it raises wall contact rather than
+lowering it -- and costs high-density goal, the project's known weak spot. Its one clear
+win is the dense-corridor scenario it was designed around, where agents now yield beside
+the wall instead of pushing through. The plausible mechanism is that making wall-adjacent
+waiting free removed the tax on *being* near a wall without a comparable tax on *touching*
+one slowly, so agents park against walls; `wall_proximity_rate` drifts up with it.
+
+`wallshape` separately destabilised past r0600 (the uncapped weighted wall-contact term
+amplifying above base at speed -- the same pathology the agent side fixed with
+`collision_penalty_cap`). Its `wallcap` successor tests exactly that fix but was stopped
+at r0350, ~9% of its planned rollouts, so **the branch's newest term has never been
+evaluated.** That is now the highest-value open experiment.
+
+Two measurement traps were established and are worth carrying forward: scorecards produced
+before the eval fix undercount `wall_contact_rate` ~4x and must never be compared across
+that boundary, and any re-evaluation must pass `--max-steps 1500` (the configs'
+`scorecard_max_steps`) or *every* metric shifts, not only the wall ones. The most expensive
+mistake in this experiment was not a modelling choice -- it was comparing across an
+eval-metric change.
+
+### What remains
+
+Unchanged from 2026-08-03, plus: run `wallcap` to a judgeable depth past r0600. The
+behavioural target -- the high-density regime where the policy trades goal completion for
+collision avoidance -- is what the wall arms were ultimately aiming at, and it remains open.

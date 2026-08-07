@@ -225,6 +225,26 @@ class EnvConfig(NamedTuple):
     proximity_speed_floor: float = 0.25
     proximity_speed_scale: float = 0.5
 
+    # Wall-proximity shaping. Graded ramp (near at body contact -> far at the
+    # threshold) instead of the flat band, closing-speed weighting toward the
+    # nearest wall (waiting beside a wall cheap/free, approaching taxed), and
+    # wall-normal impact speed for the contact penalty (sliding parallel cheap,
+    # head-on not). All default OFF -> identical to before. Lockstep with
+    # crowdrl_env.reward.RewardConfig -- see there for the full rationale.
+    use_graded_wall_proximity: bool = False
+    wall_proximity_penalty_near: float = -0.2
+    wall_proximity_penalty_far: float = 0.0
+    use_velocity_weighted_wall_proximity: bool = False
+    wall_proximity_speed_floor: float = 0.25
+    wall_proximity_speed_scale: float = 0.5
+    use_wall_normal_impact: bool = False
+    # Per-step floor on the WALL contact penalty (0.0 = off) -- the wall-side
+    # twin of collision_penalty_cap: weighting may discount slow contact but
+    # never amplify fast contact below this floor (crowd shoves an agent into
+    # a wall -> it should not be charged unboundedly for contact it does not
+    # control). See crowdrl_env.reward.RewardConfig for the full rationale.
+    wall_collision_penalty_cap: float = 0.0
+
     # Episode
     max_steps: int = 5000
 
@@ -311,6 +331,14 @@ class EnvConfig(NamedTuple):
             use_velocity_weighted_proximity=cfg.reward.use_velocity_weighted_proximity,
             proximity_speed_floor=cfg.reward.proximity_speed_floor,
             proximity_speed_scale=cfg.reward.proximity_speed_scale,
+            use_graded_wall_proximity=cfg.reward.use_graded_wall_proximity,
+            wall_proximity_penalty_near=cfg.reward.wall_proximity_penalty_near,
+            wall_proximity_penalty_far=cfg.reward.wall_proximity_penalty_far,
+            use_velocity_weighted_wall_proximity=(cfg.reward.use_velocity_weighted_wall_proximity),
+            wall_proximity_speed_floor=cfg.reward.wall_proximity_speed_floor,
+            wall_proximity_speed_scale=cfg.reward.wall_proximity_speed_scale,
+            use_wall_normal_impact=cfg.reward.use_wall_normal_impact,
+            wall_collision_penalty_cap=cfg.reward.wall_collision_penalty_cap,
             max_steps=cfg.max_steps,
             use_navmesh=cfg.obs.use_navmesh,
             use_goal_direction=cfg.obs.use_goal_direction,

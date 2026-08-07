@@ -4,6 +4,8 @@ import numpy as np
 
 from crowdrl_core.collision import (
     compute_contact_forces,
+    compute_min_wall_distances,
+    compute_min_wall_distances_and_directions,
     detect_collisions,
     ellipse_overlap,
     enforce_wall_boundaries,
@@ -297,6 +299,56 @@ class TestEnforceWallBoundaries:
 
 
 from shapely.geometry import Point  # noqa: E402
+
+
+class TestMinWallDistancesAndDirections:
+    def test_direction_toward_nearest_wall(self):
+        # Agent 0.3 m above the bottom wall of the 10x10 rectangle
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[5.0, 0.3]]),
+            goal_positions=np.array([[8.0, 8.0]]),
+        )
+        dist, dirs = compute_min_wall_distances_and_directions(world)
+        np.testing.assert_allclose(dist, [0.3], atol=1e-12)
+        np.testing.assert_allclose(dirs, [[0.0, -1.0]], atol=1e-12)
+
+    def test_direction_toward_obstacle_corner(self):
+        # Nearest wall point is a hole corner -> diagonal unit direction
+        from shapely.geometry import Polygon
+
+        exterior = [(0, 0), (10, 0), (10, 10), (0, 10)]
+        hole = [(5, 5), (6, 5), (6, 6), (5, 6)]
+        poly = Polygon(exterior, [hole])
+        world = make_world_state(
+            n_agents=1,
+            positions=np.array([[4.5, 4.5]]),
+            goal_positions=np.array([[8.0, 8.0]]),
+            polygon=poly,
+        )
+        dist, dirs = compute_min_wall_distances_and_directions(world)
+        np.testing.assert_allclose(dist, [np.sqrt(0.5)], atol=1e-12)
+        np.testing.assert_allclose(dirs, [[np.sqrt(0.5), np.sqrt(0.5)]], atol=1e-12)
+
+    def test_distances_match_plain_provider(self):
+        rng = np.random.default_rng(3)
+        n = 6
+        world = make_world_state(
+            n_agents=n,
+            positions=rng.uniform(0.5, 9.5, (n, 2)),
+            goal_positions=rng.uniform(0.5, 9.5, (n, 2)),
+        )
+        dist, dirs = compute_min_wall_distances_and_directions(world)
+        np.testing.assert_allclose(dist, compute_min_wall_distances(world), atol=1e-12)
+        # Directions are unit vectors
+        np.testing.assert_allclose(np.linalg.norm(dirs, axis=1), np.ones(n), atol=1e-12)
+
+    def test_no_wall_segments(self):
+        world = make_world_state(n_agents=2)
+        world.wall_segments = []
+        dist, dirs = compute_min_wall_distances_and_directions(world)
+        assert np.isinf(dist).all()
+        np.testing.assert_array_equal(dirs, np.zeros((2, 2)))
 
 
 class TestRayEllipseIntersection:

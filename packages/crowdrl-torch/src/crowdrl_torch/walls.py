@@ -112,6 +112,55 @@ def compute_min_wall_distances(
     return distances.min(dim=-1).values  # (E, N)
 
 
+def compute_min_wall_distances_and_directions(
+    positions: Tensor,
+    wall_segments: Tensor,
+    n_segments: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Return nearest-wall distance AND unit direction agent → nearest wall point.
+
+    Torch twin of ``crowdrl_core.collision.compute_min_wall_distances_and_directions``.
+    The reward uses the direction to measure the velocity component closing on
+    the wall (approach speed), which a bare distance cannot provide.
+
+    Parameters
+    ----------
+    positions : (E, N, 2)
+    wall_segments : (E, S, 2, 2)
+    n_segments : (E,) int
+
+    Returns
+    -------
+    min_distances : (E, N) — 1e6 sentinel for envs whose segments are all padding
+    directions : (E, N, 2) — unit vector agent → nearest wall point; zero rows
+        for all-padding envs
+    """
+    seg_starts = wall_segments[:, :, 0, :]  # (E, S, 2)
+    seg_ends = wall_segments[:, :, 1, :]  # (E, S, 2)
+    _, distances, normals = points_to_segments_nearest(positions, seg_starts, seg_ends)
+
+    # Mask out padding segments (beyond n_segments per env)
+    S = wall_segments.shape[1]
+    seg_idx = torch.arange(S, device=wall_segments.device).unsqueeze(0)  # (1, S)
+    valid_mask = seg_idx < n_segments.unsqueeze(1)  # (E, S)
+    distances = torch.where(
+        valid_mask.unsqueeze(1),  # (E, 1, S)
+        distances,
+        torch.full_like(distances, 1e6),
+    )
+    min_dist, idx = distances.min(dim=-1)  # (E, N)
+    # ``normals`` point wall → agent; the closing direction is agent → wall.
+    gathered = torch.gather(
+        normals, 2, idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
+    )  # (E, N, 1, 2)
+    directions = -gathered.squeeze(2)  # (E, N, 2)
+    # All-padding envs have no meaningful nearest wall — zero the direction.
+    directions = torch.where(
+        (min_dist < 1e5).unsqueeze(-1), directions, torch.zeros_like(directions)
+    )
+    return min_dist, directions
+
+
 def point_in_polygon(
     points: Tensor,
     wall_segments: Tensor,

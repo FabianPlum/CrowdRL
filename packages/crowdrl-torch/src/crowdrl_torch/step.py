@@ -23,7 +23,11 @@ from crowdrl_torch.reward import (
 )
 from crowdrl_torch.sensing import match_persistent_neighbors
 from crowdrl_torch.types import EnvConfig, TorchWorldState
-from crowdrl_torch.walls import compute_min_wall_distances, enforce_wall_boundaries
+from crowdrl_torch.walls import (
+    compute_min_wall_distances,
+    compute_min_wall_distances_and_directions,
+    enforce_wall_boundaries,
+)
 
 
 def advance_waypoint_cursor(
@@ -129,7 +133,14 @@ def batched_step(
     # (step 4) so it reflects the approach speed the policy controls, not the
     # post-bounce velocity. The later reassignments of new_velocities are
     # functional (no in-place mutation), so this reference stays valid.
-    pre_contact_velocities = new_velocities if config.use_velocity_weighted_collision else None
+    # Also materialised for the wall-proximity closing-speed weighting; note
+    # that enabling ONLY the wall weighting therefore hands the snapshot to
+    # every weighted term that reads it (a no-op when those flags are off).
+    pre_contact_velocities = (
+        new_velocities
+        if (config.use_velocity_weighted_collision or config.use_velocity_weighted_wall_proximity)
+        else None
+    )
 
     # --- 3. Collision detection ---
     overlap_matrix, collision_mask = detect_collisions_pairwise(
@@ -200,10 +211,22 @@ def batched_step(
     # --- 7. Rewards ---
     # Wall distances for wall-proximity penalty. Agent-agent pair distances
     # are computed inside compute_rewards so the graded proximity ramp can
-    # use per-pair contact distances.
-    wall_distances = compute_min_wall_distances(
-        new_positions, state.wall_segments, state.n_segments
+    # use per-pair contact distances. The nearest-wall DIRECTION is only
+    # materialised when a reward term consumes it (closing-speed weighting /
+    # wall-normal impact); the flags are Python scalars, so this branch is
+    # static under torch.compile.
+    need_wall_directions = config.use_velocity_weighted_wall_proximity or (
+        config.use_velocity_weighted_collision and config.use_wall_normal_impact
     )
+    if need_wall_directions:
+        wall_distances, wall_directions = compute_min_wall_distances_and_directions(
+            new_positions, state.wall_segments, state.n_segments
+        )
+    else:
+        wall_distances = compute_min_wall_distances(
+            new_positions, state.wall_segments, state.n_segments
+        )
+        wall_directions = None
     agent_radii = torch.maximum(state.shoulder_widths, state.chest_depths)
 
     # Path-distance metric (remaining navmesh path, straight-line goal fallback).
@@ -233,6 +256,7 @@ def batched_step(
         current_distances=new_nav_distances,
         wall_distances=wall_distances,
         wall_collision_mask=wall_collision_mask,
+        wall_directions=wall_directions,
         agent_radii=agent_radii,
         actions=actions,
         prev_actions=state.prev_actions,

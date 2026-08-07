@@ -214,6 +214,16 @@ def build_env_config(cfg: dict) -> CrowdEnvConfig:
             use_velocity_weighted_proximity=rew.get("use_velocity_weighted_proximity", False),
             proximity_speed_floor=rew.get("proximity_speed_floor", 0.25),
             proximity_speed_scale=rew.get("proximity_speed_scale", 0.5),
+            use_graded_wall_proximity=rew.get("use_graded_wall_proximity", False),
+            wall_proximity_penalty_near=rew.get("wall_proximity_penalty_near", -0.2),
+            wall_proximity_penalty_far=rew.get("wall_proximity_penalty_far", 0.0),
+            use_velocity_weighted_wall_proximity=rew.get(
+                "use_velocity_weighted_wall_proximity", False
+            ),
+            wall_proximity_speed_floor=rew.get("wall_proximity_speed_floor", 0.25),
+            wall_proximity_speed_scale=rew.get("wall_proximity_speed_scale", 0.5),
+            use_wall_normal_impact=rew.get("use_wall_normal_impact", False),
+            wall_collision_penalty_cap=rew.get("wall_collision_penalty_cap", 0.0),
         ),
         max_steps=cfg.get("max_steps", 2000),
         # Layer 1 default 0.05 (tau ~200ms). Historical configs pin this
@@ -327,6 +337,14 @@ def cfg_dict_from_env_config(env_config: CrowdEnvConfig) -> dict:
             "use_velocity_weighted_proximity": r.use_velocity_weighted_proximity,
             "proximity_speed_floor": r.proximity_speed_floor,
             "proximity_speed_scale": r.proximity_speed_scale,
+            "use_graded_wall_proximity": r.use_graded_wall_proximity,
+            "wall_proximity_penalty_near": r.wall_proximity_penalty_near,
+            "wall_proximity_penalty_far": r.wall_proximity_penalty_far,
+            "use_velocity_weighted_wall_proximity": r.use_velocity_weighted_wall_proximity,
+            "wall_proximity_speed_floor": r.wall_proximity_speed_floor,
+            "wall_proximity_speed_scale": r.wall_proximity_speed_scale,
+            "use_wall_normal_impact": r.use_wall_normal_impact,
+            "wall_collision_penalty_cap": r.wall_collision_penalty_cap,
         },
         "episode": {
             "stuck_termination_enabled": env_config.stuck_termination_enabled,
@@ -352,6 +370,44 @@ def _git_rev() -> str:
         return out.stdout.strip() or "unknown"
     except OSError:
         return "unknown"
+
+
+def export_policy_onnx(
+    actor,
+    obs_normalizer,
+    path: Path,
+    env_config: CrowdEnvConfig,
+    results_dir: Path,
+    **provenance,
+) -> None:
+    """Write a self-describing ONNX policy.
+
+    The single place that decides WHICH dynamics fields travel with a policy.
+    Both export sites -- the per-checkpoint companion and the end-of-run
+    ``policy.onnx`` -- go through here so the two cannot disagree about the
+    embedded metadata; a field added to the dynamics schema is added once.
+    Extra keyword arguments are merged into the provenance block (the
+    checkpoint export adds ``checkpoint`` / ``rollout`` / ``episode``).
+    """
+    export_onnx(
+        actor,
+        obs_normalizer,
+        path,
+        obs_config=env_config.obs,
+        action_config=env_config.action,
+        dynamics={
+            "desired_velocity_weight": env_config.desired_velocity_weight,
+            "max_velocity_magnitude": env_config.max_velocity_magnitude,
+            "contact_stiffness": env_config.contact_stiffness,
+            "contact_damping": env_config.contact_damping,
+        },
+        provenance={
+            "run": results_dir.name,
+            "git_rev": _git_rev(),
+            "source": "train_mappo",
+            **provenance,
+        },
+    )
 
 
 def build_net_config(cfg: dict, env_config: CrowdEnvConfig) -> NetworkConfig:
@@ -1647,6 +1703,32 @@ def train_worker(
                     rollout,
                     total_episodes=total_episodes,
                 )
+                # Companion ONNX for every checkpoint, so each saved iteration
+                # ships a deployable, self-describing artefact alongside its
+                # weights (no post-hoc reexport_onnx.py step when handing a
+                # mid-run policy to other processes). PolicyForExport deep-
+                # copies the nets, so the live GPU actor is untouched. Best-
+                # effort like renders: an export failure must never crash a
+                # long training run.
+                try:
+                    onnx_ckpt_path = results_dir / f"policy_r{rollout:04d}.onnx"
+                    export_policy_onnx(
+                        actor_critic.actor,
+                        obs_normalizer,
+                        onnx_ckpt_path,
+                        env_config,
+                        results_dir,
+                        checkpoint=ckpt_path.name,
+                        rollout=rollout,
+                        episode=total_episodes,
+                    )
+                    print(f"  ONNX policy -> {onnx_ckpt_path.name}", flush=True)
+                except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
+                    print(
+                        f"  Warning: checkpoint ONNX export failed ({type(e).__name__}: {e}); "
+                        "continuing training.",
+                        flush=True,
+                    )
                 if render_interval > 0 and rollout % render_interval == 0:
                     viz_out = results_dir / f"viz_r{rollout:04d}_tier3B.mp4"
                     # Never let a render-spawn failure crash a long training run:
@@ -1809,23 +1891,12 @@ def train_worker(
         # means any regression cannot corrupt earlier evaluation steps.
         print("  Exporting ONNX policy...", flush=True)
         onnx_path = results_dir / "policy.onnx"
-        export_onnx(
+        export_policy_onnx(
             actor_critic.actor,
             obs_normalizer,
             onnx_path,
-            obs_config=env_config.obs,
-            action_config=env_config.action,
-            dynamics={
-                "desired_velocity_weight": env_config.desired_velocity_weight,
-                "max_velocity_magnitude": env_config.max_velocity_magnitude,
-                "contact_stiffness": env_config.contact_stiffness,
-                "contact_damping": env_config.contact_damping,
-            },
-            provenance={
-                "run": results_dir.name,
-                "git_rev": _git_rev(),
-                "source": "train_mappo",
-            },
+            env_config,
+            results_dir,
         )
         print(f"  ONNX policy -> {onnx_path} ({onnx_path.stat().st_size / 1024:.1f} KB)")
 
