@@ -703,10 +703,23 @@ use_graded_wall_proximity: linear ramp near -> far over [radius, threshold]
            -- same band-mean as the flat -0.1, but now a slope)
 
 use_velocity_weighted_wall_proximity: scale by closing speed toward the wall
-    closing = dot(v_pre_contact, unit(agent -> nearest wall point))
+    closing = min(dot(v_pre_contact, unit(agent -> nearest wall point)), 10.0)
     pen    *= max(wall_proximity_speed_floor
                   + wall_proximity_speed_scale * closing, 0)
 ```
+
+Two things the formulas do not show:
+
+- `closing` is capped at `max_impact_speed = 10 m/s`, the same ceiling the
+  agent-side weightings use, so a numerical blow-up cannot buy an unbounded
+  penalty. It is far above `max_forward_speed`, so policy-commanded motion
+  never reaches it.
+- The weighting needs the nearest-wall *direction*, which the step only
+  materialises when a flag asks for it. If `wall_directions` is `None` the
+  weighting is skipped silently and the unweighted `pen` applies -- the
+  fallback both engines take when `compute_rewards` is called directly. Inside
+  `CrowdEnv.step` / `batched_step` the directions are always supplied when this
+  flag is on, so the fallback is a library-caller concern, not a training one.
 
 - **Incentivises (flat band)**: keeping distance from walls, walking in open
   space.
@@ -743,9 +756,12 @@ if enforce_wall_boundaries() reported hard wall contact for the agent:
   costs more than drifting, but sliding along a wall at 2 m/s costs exactly as
   much as slamming into it head-on, so it gives no gradient toward turning
   parallel. The opt-in `use_wall_normal_impact` weights by the velocity
-  component INTO the wall instead (clamped >= 0, using the nearest-wall
-  direction), so a parallel slide pays only the floor while a head-on pays in
-  full. The shipped r0125 run uses -0.5 with the full-speed weighting.
+  component INTO the wall instead (clamped to `[0, 10]` m/s, using the
+  nearest-wall direction), so a parallel slide pays only the floor while a
+  head-on pays in full. **It rides on `use_velocity_weighted_collision`**: with
+  that flag off nothing reads the normal and `use_wall_normal_impact` is a
+  silent no-op, not an independent knob. The shipped r0125 run uses -0.5 with
+  the full-speed weighting.
 - **`collision_penalty_cap` does not apply here -- the wall term has its own.**
   The agent-side cap bounds only the agent-agent term, so in r0125 the
   agent-collision penalty is strictly discount-only (base -2.0, cap -2.0)
