@@ -564,3 +564,62 @@ class TestScorecardCommand:
         ):
             assert flag in cmd
             assert cmd[cmd.index(flag) + 1] == val
+
+
+class TestExportPolicyOnnx:
+    """The single place that decides which dynamics travel with a policy.
+
+    Both export sites (per-checkpoint companion and end-of-run policy.onnx)
+    call export_policy_onnx, so this pins the metadata contract once. The
+    dynamics-key assertion is the load-bearing one: a field added to
+    DYNAMICS_FIELDS but not to the exporter would ship policies that silently
+    fall back to a default for it on the deployment side.
+    """
+
+    def _capture(self, monkeypatch, **provenance):
+        import train_mappo
+
+        captured = {}
+        monkeypatch.setattr(
+            train_mappo, "export_onnx", lambda *a, **kw: captured.update(kw) or captured
+        )
+        monkeypatch.setattr(train_mappo, "_git_rev", lambda: "deadbee")
+        env_config = build_env_config({})
+        train_mappo.export_policy_onnx(
+            object(),
+            object(),
+            Path("policy.onnx"),
+            env_config,
+            Path("results_myrun"),
+            **provenance,
+        )
+        return captured, env_config
+
+    def test_dynamics_block_covers_the_whole_schema(self, monkeypatch):
+        from crowdrl_core.config_io import DYNAMICS_FIELDS
+
+        captured, env_config = self._capture(monkeypatch)
+        assert set(captured["dynamics"]) == set(DYNAMICS_FIELDS)
+        for field, value in captured["dynamics"].items():
+            assert value == getattr(env_config, field)
+
+    def test_base_provenance_and_configs(self, monkeypatch):
+        captured, env_config = self._capture(monkeypatch)
+        assert captured["provenance"] == {
+            "run": "results_myrun",
+            "git_rev": "deadbee",
+            "source": "train_mappo",
+        }
+        assert captured["obs_config"] is env_config.obs
+        assert captured["action_config"] is env_config.action
+
+    def test_checkpoint_provenance_merges(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch, checkpoint="checkpoint_rollout_0200.pt", rollout=200, episode=1234
+        )
+        assert captured["provenance"]["checkpoint"] == "checkpoint_rollout_0200.pt"
+        assert captured["provenance"]["rollout"] == 200
+        assert captured["provenance"]["episode"] == 1234
+        # The base block still travels alongside the per-checkpoint additions.
+        assert captured["provenance"]["run"] == "results_myrun"
+        assert captured["provenance"]["source"] == "train_mappo"

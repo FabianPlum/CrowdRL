@@ -372,6 +372,44 @@ def _git_rev() -> str:
         return "unknown"
 
 
+def export_policy_onnx(
+    actor,
+    obs_normalizer,
+    path: Path,
+    env_config: CrowdEnvConfig,
+    results_dir: Path,
+    **provenance,
+) -> None:
+    """Write a self-describing ONNX policy.
+
+    The single place that decides WHICH dynamics fields travel with a policy.
+    Both export sites -- the per-checkpoint companion and the end-of-run
+    ``policy.onnx`` -- go through here so the two cannot disagree about the
+    embedded metadata; a field added to the dynamics schema is added once.
+    Extra keyword arguments are merged into the provenance block (the
+    checkpoint export adds ``checkpoint`` / ``rollout`` / ``episode``).
+    """
+    export_onnx(
+        actor,
+        obs_normalizer,
+        path,
+        obs_config=env_config.obs,
+        action_config=env_config.action,
+        dynamics={
+            "desired_velocity_weight": env_config.desired_velocity_weight,
+            "max_velocity_magnitude": env_config.max_velocity_magnitude,
+            "contact_stiffness": env_config.contact_stiffness,
+            "contact_damping": env_config.contact_damping,
+        },
+        provenance={
+            "run": results_dir.name,
+            "git_rev": _git_rev(),
+            "source": "train_mappo",
+            **provenance,
+        },
+    )
+
+
 def build_net_config(cfg: dict, env_config: CrowdEnvConfig) -> NetworkConfig:
     net = cfg.get("network", {})
     return NetworkConfig(
@@ -1674,26 +1712,15 @@ def train_worker(
                 # long training run.
                 try:
                     onnx_ckpt_path = results_dir / f"policy_r{rollout:04d}.onnx"
-                    export_onnx(
+                    export_policy_onnx(
                         actor_critic.actor,
                         obs_normalizer,
                         onnx_ckpt_path,
-                        obs_config=env_config.obs,
-                        action_config=env_config.action,
-                        dynamics={
-                            "desired_velocity_weight": env_config.desired_velocity_weight,
-                            "max_velocity_magnitude": env_config.max_velocity_magnitude,
-                            "contact_stiffness": env_config.contact_stiffness,
-                            "contact_damping": env_config.contact_damping,
-                        },
-                        provenance={
-                            "run": results_dir.name,
-                            "checkpoint": ckpt_path.name,
-                            "rollout": rollout,
-                            "episode": total_episodes,
-                            "git_rev": _git_rev(),
-                            "source": "train_mappo",
-                        },
+                        env_config,
+                        results_dir,
+                        checkpoint=ckpt_path.name,
+                        rollout=rollout,
+                        episode=total_episodes,
                     )
                     print(f"  ONNX policy -> {onnx_ckpt_path.name}", flush=True)
                 except Exception as e:  # noqa: BLE001 -- best-effort, log and continue
@@ -1864,23 +1891,12 @@ def train_worker(
         # means any regression cannot corrupt earlier evaluation steps.
         print("  Exporting ONNX policy...", flush=True)
         onnx_path = results_dir / "policy.onnx"
-        export_onnx(
+        export_policy_onnx(
             actor_critic.actor,
             obs_normalizer,
             onnx_path,
-            obs_config=env_config.obs,
-            action_config=env_config.action,
-            dynamics={
-                "desired_velocity_weight": env_config.desired_velocity_weight,
-                "max_velocity_magnitude": env_config.max_velocity_magnitude,
-                "contact_stiffness": env_config.contact_stiffness,
-                "contact_damping": env_config.contact_damping,
-            },
-            provenance={
-                "run": results_dir.name,
-                "git_rev": _git_rev(),
-                "source": "train_mappo",
-            },
+            env_config,
+            results_dir,
         )
         print(f"  ONNX policy -> {onnx_path} ({onnx_path.stat().st_size / 1024:.1f} KB)")
 
