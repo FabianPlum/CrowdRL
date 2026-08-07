@@ -1076,6 +1076,148 @@ class TestRewardEquivalence:
         assert abs(sta[0]) < 1e-6
         assert abs(rec[0]) < 1e-6
 
+    def test_graded_wall_far_term_parity(self):
+        """The ``far`` end of the ramp must match across engines.
+
+        Every other graded test pins ``wall_proximity_penalty_far`` to 0.0,
+        where ``t * far`` vanishes -- an engine that dropped the term entirely
+        would pass them all. Here far is -0.02, so the three band positions
+        separate ``(1-t)*near + t*far`` from ``(1-t)*near``.
+        """
+        n = 3
+        positions = np.tile(np.array([[5.0, 5.0]], dtype=np.float32), (n, 1))
+        radii = np.full(n, 0.22, dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        no_coll = np.zeros(n, dtype=np.bool_)
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+        velocities = np.zeros((n, 2), dtype=np.float32)
+        # Band [0.22, 0.33] at threshold 1.5: t = 0.0 / 0.5 / 0.9.
+        wall_dist = np.array([0.22, 0.275, 0.319], dtype=np.float32)
+        wall_dirs = np.tile(np.array([[0.0, -1.0]], dtype=np.float32), (n, 1))
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=0.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=0.0,
+            wall_collision_penalty=0.0,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_graded_wall_proximity=True,
+            wall_proximity_penalty_near=-0.2,
+            wall_proximity_penalty_far=-0.02,
+        )
+
+        np_r, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            no_coll,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_distances=wall_dist.astype(np.float64),
+            wall_directions=wall_dirs.astype(np.float64),
+            agent_radii=radii.astype(np.float64),
+        )
+        t_r, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(no_coll).unsqueeze(0),
+            torch.zeros(1, n),
+            EnvConfig(max_agents=n, **common),
+            wall_distances=torch.tensor(wall_dist).unsqueeze(0),
+            wall_directions=torch.tensor(wall_dirs).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+        npt.assert_allclose(t_r[0].numpy(), np_r, atol=ATOL, rtol=RTOL)
+
+        # t=0 -> near; t=0.5 -> mean of near and far; t=0.9 -> mostly far.
+        # The last two are what a dropped ``t * far`` term would get wrong
+        # (-0.10 and -0.02 respectively).
+        npt.assert_allclose(np_r, [-0.2, -0.11, -0.038], atol=1e-6)
+
+    def test_flat_band_weighting_parity(self):
+        """The two wall flags are orthogonal: closing-speed weighting must
+        apply to the LEGACY flat band too, identically in both engines. The
+        numpy side pins this (test_reward.py::test_flat_band_composes_with_
+        weighting); without a twin the torch side could weight only the ramp.
+        """
+        n = 2
+        positions = np.tile(np.array([[5.0, 5.0]], dtype=np.float32), (n, 1))
+        radii = np.full(n, 0.22, dtype=np.float32)
+        goal_positions = np.full((n, 2), 50.0, dtype=np.float32)
+        active = np.ones(n, dtype=np.bool_)
+        no_coll = np.zeros(n, dtype=np.bool_)
+        preferred = np.full(n, 1.34, dtype=np.float32)
+        headings = np.zeros(n, dtype=np.float32)
+        wall_dist = np.full(n, 0.25, dtype=np.float32)  # inside the flat band
+        wall_dirs = np.tile(np.array([[0.0, -1.0]], dtype=np.float32), (n, 1))
+        # Agent 0 approaches the wall at 1 m/s; agent 1 stands still.
+        velocities = np.array([[0.0, -1.0], [0.0, 0.0]], dtype=np.float32)
+
+        common = dict(
+            goal_bonus=0.0,
+            collision_penalty=0.0,
+            timeout_penalty=0.0,
+            wall_proximity_penalty=-0.1,
+            wall_collision_penalty=0.0,
+            agent_proximity_penalty_near=0.0,
+            agent_proximity_penalty_far=0.0,
+            action_rate_weight=0.0,
+            use_smoothness=False,
+            speed_deviation_weight=0.0,
+            existence_penalty=0.0,
+            progress_weight=0.0,
+            use_graded_wall_proximity=False,  # legacy flat band
+            use_velocity_weighted_wall_proximity=True,
+            wall_proximity_speed_floor=0.0,
+            wall_proximity_speed_scale=0.5,
+        )
+
+        np_r, _ = np_compute_rewards(
+            positions.astype(np.float64),
+            velocities.astype(np.float64),
+            headings.astype(np.float64),
+            goal_positions.astype(np.float64),
+            preferred.astype(np.float64),
+            active,
+            no_coll,
+            NpRewardState(),
+            NpRewardConfig(inverse_distance_weight=0.0, **common),
+            dt=0.01,
+            wall_distances=wall_dist.astype(np.float64),
+            wall_directions=wall_dirs.astype(np.float64),
+            agent_radii=radii.astype(np.float64),
+        )
+        t_r, _, _, _ = torch_compute_rewards(
+            torch.tensor(positions).unsqueeze(0),
+            torch.tensor(velocities).unsqueeze(0),
+            torch.tensor(goal_positions).unsqueeze(0),
+            torch.tensor(active).unsqueeze(0),
+            torch.tensor(no_coll).unsqueeze(0),
+            torch.zeros(1, n),
+            EnvConfig(max_agents=n, **common),
+            wall_distances=torch.tensor(wall_dist).unsqueeze(0),
+            wall_directions=torch.tensor(wall_dirs).unsqueeze(0),
+            agent_radii=torch.tensor(radii).unsqueeze(0),
+        )
+        npt.assert_allclose(t_r[0].numpy(), np_r, atol=ATOL, rtol=RTOL)
+        # -0.1 * (0 + 0.5*1) approaching; standing beside the wall is free.
+        npt.assert_allclose(np_r, [-0.05, 0.0], atol=1e-6)
+
     def test_wall_normal_impact_parity(self):
         """numpy and torch wall-CONTACT penalties must match when the wall-normal
         impact weighting is ON. One agent sliding parallel at 2 m/s (pays the

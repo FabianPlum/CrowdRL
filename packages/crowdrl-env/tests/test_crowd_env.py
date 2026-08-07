@@ -722,7 +722,33 @@ class TestWallDirectionsWiring:
         norms = np.linalg.norm(dirs, axis=1)
         np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-9)
 
+    def test_directions_materialised_for_normal_impact_alone(self, monkeypatch):
+        # The OTHER half of the predicate: wall-normal impact reaches the
+        # reward through use_velocity_weighted_collision, proximity weighting
+        # off. Untested, this clause could be dropped and only the contact
+        # term -- never the build -- would change.
+        env = self._env(
+            RewardConfig(
+                use_smoothness=False,
+                use_velocity_weighted_collision=True,
+                use_wall_normal_impact=True,
+                use_velocity_weighted_wall_proximity=False,
+            )
+        )
+        captured = self._spy_step(env, monkeypatch)
+        dirs = captured["wall_directions"]
+        assert dirs is not None
+        assert dirs.shape == (env.n_agents, 2)
+
     def test_directions_skipped_when_flags_off(self, monkeypatch):
         env = self._env(RewardConfig(use_smoothness=False))
+        captured = self._spy_step(env, monkeypatch)
+        assert captured["wall_directions"] is None
+
+    def test_directions_skipped_for_normal_impact_without_weighting(self, monkeypatch):
+        # use_wall_normal_impact alone is a documented no-op: without
+        # use_velocity_weighted_collision nothing consumes the normal, so the
+        # step must not pay to compute it.
+        env = self._env(RewardConfig(use_smoothness=False, use_wall_normal_impact=True))
         captured = self._spy_step(env, monkeypatch)
         assert captured["wall_directions"] is None

@@ -17,10 +17,11 @@ from crowdrl_torch.step import batched_step
 from crowdrl_torch.types import EnvConfig, make_initial_state
 
 _WP = REWARD_COMPONENT_NAMES.index("wall_proximity")
+_WC = REWARD_COMPONENT_NAMES.index("wall_collision")
 
 
-def _wall_state():
-    """One active agent inside a 10x10 room, 0.35 m from the left wall (x=0).
+def _room_state(n_active: int = 1):
+    """Agents inside a 10x10 room, radius 0.25 -> band [0.25, 0.375].
 
     A closed polygon (not a bare segment) so ``enforce_wall_boundaries``'s
     even-odd inside test is meaningful and the agent is left untouched.
@@ -43,8 +44,8 @@ def _wall_state():
     # Huge mass -> the exponential wall-repulsion impulse is negligible and the
     # post-step position is exactly start + v*dt (hand-computable).
     state.masses[:] = 1e12
-    state.active_mask[0] = torch.tensor([True, False])
-    state.n_agents[:] = 1
+    state.active_mask[0] = torch.tensor([True, n_active == 2])
+    state.n_agents[:] = n_active
     state.wall_segments[0] = torch.tensor(
         [
             [[0.0, 0.0], [10.0, 0.0]],
@@ -55,6 +56,11 @@ def _wall_state():
     )
     state.n_segments[:] = 4
     return state
+
+
+def _wall_state():
+    """One active agent, 0.35 m from the left wall (x=0)."""
+    return _room_state(n_active=1)
 
 
 def _config(**overrides):
@@ -122,3 +128,51 @@ def test_step_standing_beside_wall_is_free_with_floor_zero():
     )
     _, _, _, _, _, comps = batched_step(state, actions, shaped)
     npt.assert_allclose(comps[0, 0, _WP].item(), 0.0, atol=1e-6)
+
+
+def test_step_wires_wall_directions_for_normal_impact_alone():
+    """The OTHER half of the ``need_wall_directions`` predicate.
+
+    ``use_wall_normal_impact`` reaches the reward through
+    ``use_velocity_weighted_collision``, with the proximity weighting OFF. Two
+    agents in wall contact at the SAME speed (0.5 m/s) but different geometry:
+    agent 0 drives into the left wall, agent 1 slides along the bottom wall. If
+    the directions were not materialised the impact would fall back to full
+    speed and both would pay the same -- so the two values differing is what
+    proves the wiring.
+    """
+
+    def contact_state():
+        state = _room_state(n_active=2)
+        state.positions[0, 0] = torch.tensor([0.24, 2.0])  # penetrating the left wall
+        state.positions[0, 1] = torch.tensor([2.0, 0.24])  # penetrating the bottom wall
+        state.goal_positions[0, 1] = torch.tensor([9.5, 0.24])
+        return state
+
+    contact_cfg = dict(
+        wall_collision_penalty=-2.0,
+        use_velocity_weighted_collision=True,
+        collision_speed_floor=0.25,
+        collision_speed_scale=0.5,
+    )
+    # Both back up at 0.5 m/s along -x: into the left wall, parallel to the bottom.
+    actions = torch.zeros((1, 2, 4))
+    actions[0, :, 0] = -1.0
+
+    _, _, _, _, _, comps = batched_step(
+        contact_state(),
+        actions,
+        _config(use_wall_normal_impact=True, **contact_cfg),
+    )
+    # Head-on: -2.0 * (0.25 + 0.5 * 0.5) = -1.0. Parallel: -2.0 * 0.25 = -0.5.
+    npt.assert_allclose(comps[0, 0, _WC].item(), -1.0, atol=1e-5)
+    npt.assert_allclose(comps[0, 1, _WC].item(), -0.5, atol=1e-5)
+
+    # Same scene without the normal: full speed weights both alike at -1.0.
+    _, _, _, _, _, flat = batched_step(
+        contact_state(),
+        actions,
+        _config(use_wall_normal_impact=False, **contact_cfg),
+    )
+    npt.assert_allclose(flat[0, 0, _WC].item(), -1.0, atol=1e-5)
+    npt.assert_allclose(flat[0, 1, _WC].item(), -1.0, atol=1e-5)
